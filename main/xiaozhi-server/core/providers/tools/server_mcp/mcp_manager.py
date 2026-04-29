@@ -173,6 +173,37 @@ class ServerMCPManager:
             tools.extend(client_tools)
         return tools
 
+    def _build_tool_call_meta(self) -> Dict[str, Any]:
+        meta: Dict[str, Any] = {}
+
+        device_id = str(getattr(self.conn, "device_id", "") or "").strip()
+        if not device_id and isinstance(getattr(self.conn, "headers", None), dict):
+            headers = getattr(self.conn, "headers", {}) or {}
+            device_id = str(
+                headers.get("device-id")
+                or headers.get("Device-Id")
+                or headers.get("device_id")
+                or ""
+            ).strip()
+        if device_id:
+            meta["device_id"] = device_id
+            meta["deviceId"] = device_id
+            meta["xiaozhi_device_id"] = device_id
+            meta["target_device_id"] = device_id
+
+        session_id = str(getattr(self.conn, "session_id", "") or "").strip()
+        if session_id:
+            meta["session_id"] = session_id
+            meta["sessionId"] = session_id
+
+        experiment_session_id = str(
+            getattr(self.conn, "experiment_session_id", "") or ""
+        ).strip()
+        if experiment_session_id:
+            meta["experiment_session_id"] = experiment_session_id
+
+        return meta
+
     def is_mcp_tool(self, tool_name: str) -> bool:
         """Check whether a tool exists in the shared pool."""
         return tool_name in type(self)._shared_tool_to_client
@@ -235,6 +266,7 @@ class ServerMCPManager:
             raise RuntimeError(f"MCP client {client_name} is not initialized")
 
         call_hook_entered = False
+        tool_call_meta = self._build_tool_call_meta()
         try:
             if (
                 client_name == "experiment-graph"
@@ -252,6 +284,7 @@ class ServerMCPManager:
                         tool_name,
                         arguments,
                         progress_callback=self.progress_callback,
+                        meta=tool_call_meta or None,
                     )
                 except Exception as exc:
                     if attempt == max_retries - 1:

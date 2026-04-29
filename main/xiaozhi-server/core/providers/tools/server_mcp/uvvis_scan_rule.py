@@ -22,6 +22,9 @@ SCAN_STARTED_CONFIRMED_RESPONSE = (
     "扫描已启动。扫完后告诉我扫描已经结束，我再读取最大吸收波长。"
 )
 DEFAULT_UVVIS_SCAN_OUTPUT_SUBDIR = Path("lab_runs") / "exp1_AgNPs_synthesis" / "data" / "uv_data_common"
+UVVIS_SCAN_CONTEXT_REQUIRED_RESPONSE = "还没有可查询的扫描任务，请先开始扫描。"
+UVVIS_SCAN_RESULT_INCOMPLETE_RESPONSE = "这次扫描结果还没有完整取到，请稍后再试。"
+UVVIS_SCAN_RESULT_NOT_SAVED_RESPONSE = "这次扫描结果还没有保存到指定位置，请稍后再试。"
 
 
 def _extract_uvvis_scan_context(
@@ -136,6 +139,24 @@ def _extract_scan_peak(payload) -> dict[str, Any] | None:
     return None
 
 
+def _has_saved_scan_artifact(payload) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    validation = payload.get("artifact_validation")
+    if not isinstance(validation, dict):
+        return False
+
+    checked_files = validation.get("checked_files", [])
+    if not isinstance(checked_files, list):
+        return False
+
+    return any(
+        isinstance(item, dict) and item.get("exists")
+        for item in checked_files
+    )
+
+
 class UVVisScanRule:
     def __init__(
         self,
@@ -162,6 +183,12 @@ class UVVisScanRule:
             return None
 
         if actual_tool_name != "uvvis_scan_batch":
+            if actual_tool_name in {"uvvis_scan_status", "uvvis_scan_result"}:
+                if not pick_text(arguments.get("task_id")):
+                    return ActionResponse(
+                        action=Action.RESPONSE,
+                        response=UVVIS_SCAN_CONTEXT_REQUIRED_RESPONSE,
+                    )
             return None
 
         return ActionResponse(
@@ -174,6 +201,7 @@ class UVVisScanRule:
         )
 
     def prepare_arguments(self, actual_tool_name: str, arguments: Dict[str, Any]) -> None:
+        self._inject_uvvis_native_output_dir(actual_tool_name, arguments)
         self._inject_uvvis_scan_output_paths(actual_tool_name, arguments)
         self._inject_saved_uvvis_task_id(actual_tool_name, arguments)
 
@@ -217,8 +245,43 @@ class UVVisScanRule:
                 payload,
                 fallback_task_id=arguments.get("task_id", ""),
             )
-            if context is not None:
-                self._clear_pending_scan_start_confirmation(context.get("task_id", ""))
+            if context is None:
+                return ActionResponse(
+                    action=Action.RESPONSE,
+                    response=UVVIS_SCAN_CONTEXT_REQUIRED_RESPONSE,
+                )
+            self._clear_pending_scan_start_confirmation(context.get("task_id", ""))
+            state = _extract_uvvis_scan_state(payload)
+            if state and state != "succeeded":
+                reply = build_server_mcp_spoken_response("uvvis_scan_status", payload)
+                if reply:
+                    return ActionResponse(
+                        action=Action.RESPONSE,
+                        response=reply,
+                    )
+                return None
+            peak = _extract_scan_peak(payload)
+            if peak is not None:
+                result = payload.get("result")
+                if not isinstance(result, dict):
+                    result = {}
+                    payload["result"] = result
+                result.setdefault("lambda_max_nm", peak.get("lambda_max_nm"))
+                result.setdefault("max_absorbance", peak.get("max_absorbance"))
+                if peak.get("peak_source_csv"):
+                    result.setdefault("peak_source_csv", peak.get("peak_source_csv"))
+            has_saved_artifact = _has_saved_scan_artifact(payload)
+            if not has_saved_artifact:
+                return ActionResponse(
+                    action=Action.RESPONSE,
+                    response=UVVIS_SCAN_RESULT_NOT_SAVED_RESPONSE,
+                )
+            peak = _extract_scan_peak(payload)
+            if peak is None:
+                return ActionResponse(
+                    action=Action.RESPONSE,
+                    response=UVVIS_SCAN_RESULT_INCOMPLETE_RESPONSE,
+                )
             reply = build_server_mcp_spoken_response("uvvis_scan_result", payload)
             if reply:
                 return ActionResponse(
@@ -301,6 +364,39 @@ class UVVisScanRule:
 
         return (Path("data") / "uv_data_common").resolve()
 
+    def _resolve_runtime_device_dir(self) -> Path:
+        device_id = str(getattr(self.conn, "device_id", "") or "").strip()
+        if not device_id and isinstance(getattr(self.conn, "headers", None), dict):
+            headers = getattr(self.conn, "headers", {}) or {}
+            device_id = str(
+                headers.get("device-id")
+                or headers.get("Device-Id")
+                or headers.get("device_id")
+                or ""
+            ).strip()
+
+        normalized_device_id = self._normalize_device_id(device_id)
+        return (self._resolve_uvvis_output_root_dir() / normalized_device_id).resolve()
+
+    def _inject_uvvis_native_output_dir(
+        self,
+        actual_tool_name: str,
+        arguments: Dict[str, Any],
+    ) -> None:
+        if actual_tool_name not in {"uvvis_measure_spectra", "uvvis_measure_kinetics"}:
+            return
+        if pick_text(arguments.get("output_dir")):
+            return
+
+        target_dir = self._resolve_runtime_device_dir()
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self.conn.logger.warning(
+                f"failed to create uvvis native output dir {target_dir}: {exc}"
+            )
+        arguments["output_dir"] = str(target_dir)
+
     def _inject_uvvis_scan_output_paths(
         self,
         actual_tool_name: str,
@@ -316,8 +412,8 @@ class UVVisScanRule:
                 sample_name = pick_text(context.get("sample_name"))
 
         sample_folder = self._normalize_sample_folder_name(sample_name)
-        root_dir = self._resolve_uvvis_output_root_dir()
-        target_dir = root_dir / sample_folder
+        device_dir = self._resolve_runtime_device_dir()
+        target_dir = device_dir / sample_folder
 
         try:
             target_dir.mkdir(parents=True, exist_ok=True)

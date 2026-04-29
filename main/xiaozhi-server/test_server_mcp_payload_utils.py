@@ -105,6 +105,31 @@ class ServerMCPPayloadUtilsTest(unittest.TestCase):
         self.assertIn("最大吸收波长在546.0纳米", reply)
         self.assertIn("最大吸光度是0.823", reply)
 
+    def test_build_server_mcp_spoken_response_blocks_uvvis_success_without_saved_files(self):
+        payload = {
+            "result": {
+                "lambda_max_nm": 546.0,
+                "max_absorbance": 0.823,
+            },
+            "artifact_validation": {
+                "checked_files": [
+                    {
+                        "field": "absorbance_output_csv",
+                        "path": "C:/missing.csv",
+                        "exists": False,
+                    }
+                ],
+                "all_expected_outputs_exist": False,
+            },
+        }
+
+        reply = build_server_mcp_spoken_response(
+            "uvvis_scan_result",
+            payload,
+        )
+
+        self.assertEqual("这次扫描结果还没有保存到指定位置，请稍后再试。", reply)
+
 
 if __name__ == "__main__":
     unittest.main()

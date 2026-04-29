@@ -286,6 +286,12 @@ def build_server_mcp_spoken_response(
         result = data.get("result")
         if not isinstance(result, dict):
             result = {}
+        checked_files = validation.get("checked_files", [])
+        has_saved_artifact = any(
+            isinstance(item, dict) and item.get("exists") for item in checked_files
+        )
+        if validation and not has_saved_artifact:
+            return "这次扫描结果还没有保存到指定位置，请稍后再试。"
         lambda_max_nm = result.get("lambda_max_nm")
         max_absorbance = result.get("max_absorbance")
         if lambda_max_nm is not None and max_absorbance is not None:

@@ -257,6 +257,12 @@ prompt: |
 #       yaml_path: your-mcp.yaml
 # 然后在 prompt 或 prompt_template 中直接使用：通过{{ yaml_path }}调用MCP工具
 
+# UV-Vis 光谱输出根目录。
+# 正式实验建议在 data/.config.yaml 中显式覆盖为：
+# uvvis_scan_output_root: C:/Users/11979/Documents/GitHub/codex_edu/lab_runs/exp1_AgNPs_synthesis/data/uv_data_common
+# 运行时会继续按 device_id 分子目录保存，例如：
+# .../uv_data_common/94_a9_90_28_ea_e0/
+
 # 默认系统提示词模板文件
 prompt_template: agent-base-prompt.txt
 
