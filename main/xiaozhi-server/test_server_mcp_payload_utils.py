@@ -11,6 +11,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from core.providers.tools.server_mcp.payload_utils import (
     build_server_mcp_spoken_response,
     finalize_server_mcp_payload,
+    sync_server_mcp_payload_state,
 )
 
 
@@ -129,6 +130,52 @@ class ServerMCPPayloadUtilsTest(unittest.TestCase):
         )
 
         self.assertEqual("这次扫描结果还没有保存到指定位置，请稍后再试。", reply)
+
+    def test_sync_server_mcp_payload_state_tracks_uvvis_blank_baseline_meta(self):
+        class _Conn:
+            pass
+
+        conn = _Conn()
+        payload = {
+            "blank_baseline_exists": True,
+            "blank_baseline_status": "reused",
+            "blank_baseline_csv": "C:/demo/air_blank_latest.csv",
+            "blank_baseline_manifest_json": "C:/demo/latest_air_blank_manifest.json",
+        }
+
+        sync_server_mcp_payload_state(
+            conn,
+            tool_name="uvvis_measure_spectra",
+            payload=payload,
+        )
+
+        self.assertEqual("uvvis_measure_spectra", getattr(conn, "_last_server_mcp_tool_name"))
+        self.assertEqual(payload, getattr(conn, "_last_server_mcp_payload"))
+        self.assertEqual(
+            {
+                "blank_baseline_exists": True,
+                "blank_baseline_status": "reused",
+                "blank_baseline_csv": "C:/demo/air_blank_latest.csv",
+                "blank_baseline_manifest_json": "C:/demo/latest_air_blank_manifest.json",
+            },
+            getattr(conn, "_last_uvvis_blank_baseline_state"),
+        )
+
+    def test_build_server_mcp_spoken_response_for_missing_uvvis_blank_baseline(self):
+        payload = {
+            "success": False,
+            "phase": "baseline_missing",
+            "blank_baseline_exists": False,
+            "blank_baseline_status": "missing",
+            "blank_baseline_csv": "C:/demo/air_blank_latest.csv",
+        }
+
+        reply = build_server_mcp_spoken_response(
+            "uvvis_measure_spectra",
+            payload,
+        )
+
+        self.assertEqual("还没有空白基线，请先确认空白基线已经准备好，再继续。", reply)
 
 
 if __name__ == "__main__":

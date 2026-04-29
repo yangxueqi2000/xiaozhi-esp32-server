@@ -105,6 +105,28 @@ class UVVisScanRuleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Action.RESPONSE, response.action)
         self.assertEqual("这次扫描结果还没有保存到指定位置，请稍后再试。", response.response)
 
+    async def test_after_execute_reminds_when_uvvis_blank_baseline_is_missing(self):
+        conn = _FakeConn()
+        rule = UVVisScanRule(conn, lambda: None)
+
+        payload = {
+            "success": False,
+            "phase": "baseline_missing",
+            "blank_baseline_exists": False,
+            "blank_baseline_status": "missing",
+            "blank_baseline_csv": "C:/missing/air_blank_latest.csv",
+        }
+
+        response = await rule.after_execute(
+            "uvvis_measure_spectra",
+            {"ready_for_samples": True},
+            payload,
+        )
+
+        self.assertIsNotNone(response)
+        self.assertEqual(Action.RESPONSE, response.action)
+        self.assertEqual("还没有空白基线，请先确认空白基线已经准备好，再继续。", response.response)
+
 
 if __name__ == "__main__":
     unittest.main()

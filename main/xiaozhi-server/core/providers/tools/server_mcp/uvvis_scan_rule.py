@@ -289,6 +289,14 @@ class UVVisScanRule:
                     response=reply,
                 )
 
+        if actual_tool_name in {"uvvis_measure_spectra", "uvvis_measure_kinetics"}:
+            reply = build_server_mcp_spoken_response(actual_tool_name, payload)
+            if reply:
+                return ActionResponse(
+                    action=Action.RESPONSE,
+                    response=reply,
+                )
+
         return None
 
     async def cleanup(self) -> None:

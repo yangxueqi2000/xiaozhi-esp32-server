@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .uvvis_spoken import build_uvvis_spoken_response, extract_blank_baseline_state
+
 
 _ARTIFACT_VALIDATION_SPECS = {
     "export_records_to_yaml": {
@@ -213,10 +215,16 @@ def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None):
     if conn is None:
         return
 
-    setattr(conn, "_last_server_mcp_tool_name", str(tool_name or "").strip())
+    actual_tool_name = str(tool_name or "").strip()
+    setattr(conn, "_last_server_mcp_tool_name", actual_tool_name)
     setattr(conn, "_last_server_mcp_payload", payload)
 
-    if str(tool_name or "").strip() != "export_records_to_yaml":
+    if actual_tool_name.startswith("uvvis_"):
+        blank_baseline_state = extract_blank_baseline_state(payload)
+        if blank_baseline_state is not None:
+            setattr(conn, "_last_uvvis_blank_baseline_state", blank_baseline_state)
+
+    if actual_tool_name != "export_records_to_yaml":
         return
 
     validation = payload.get("artifact_validation", {}) if isinstance(payload, dict) else {}
@@ -282,42 +290,14 @@ def build_server_mcp_spoken_response(
             return ""
         return str(default_reply or "已经打开照片了。").strip()
 
-    if actual_tool_name == "uvvis_scan_result":
-        result = data.get("result")
-        if not isinstance(result, dict):
-            result = {}
-        checked_files = validation.get("checked_files", [])
-        has_saved_artifact = any(
-            isinstance(item, dict) and item.get("exists") for item in checked_files
-        )
-        if validation and not has_saved_artifact:
-            return "这次扫描结果还没有保存到指定位置，请稍后再试。"
-        lambda_max_nm = result.get("lambda_max_nm")
-        max_absorbance = result.get("max_absorbance")
-        if lambda_max_nm is not None and max_absorbance is not None:
-            return (
-                f"最大吸收波长在{lambda_max_nm}纳米，"
-                f"最大吸光度是{max_absorbance}。"
-            )
-        if validation and not bool(validation.get("all_expected_outputs_exist", True)):
-            return "这次扫描结果还没有完整取到，请稍后再试。"
-        return str(default_reply or "").strip()
-
-    if actual_tool_name == "uvvis_scan_status":
-        state = pick_text(data.get("state"))
-        result = data.get("result")
-        if not state and isinstance(result, dict):
-            state = pick_text(result.get("state"))
-        state = state.lower()
-        if state == "running":
-            return "扫描还在进行中。"
-        if state == "queued":
-            return "扫描请求已经发出，正在等待真正开始。"
-        if state in {"failed", "error", "cancelled", "canceled"}:
-            return "这次扫描失败了，请再试一次。"
-        if state == "succeeded":
-            return "扫描已经结束了。"
-        return str(default_reply or "").strip()
+    uvvis_reply = build_uvvis_spoken_response(
+        actual_tool_name,
+        data,
+        validation=validation,
+        default_reply=default_reply,
+    )
+    if uvvis_reply is not None:
+        return uvvis_reply
 
     return str(default_reply or "").strip()
 
