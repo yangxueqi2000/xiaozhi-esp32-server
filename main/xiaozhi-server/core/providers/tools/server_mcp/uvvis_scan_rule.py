@@ -9,22 +9,20 @@ from typing import Any, Callable, Dict
 from plugins_func.register import Action, ActionResponse
 
 from .payload_utils import build_server_mcp_spoken_response, pick_text
+from .uvvis_spoken import (
+    build_uvvis_scan_start_failed_response,
+    build_uvvis_scan_status_followup_response,
+    get_uvvis_scan_context_required_response,
+    get_uvvis_scan_result_incomplete_response,
+    get_uvvis_scan_result_not_saved_response,
+    get_uvvis_scan_start_pending_response,
+)
 
 
 FAILED_SCAN_STATES = {"failed", "error", "cancelled", "canceled"}
 RUNNING_SCAN_STATE = "running"
 QUEUED_SCAN_STATE = "queued"
-SCAN_START_PENDING_RESPONSE = "我已发起扫描，先确认是否真正开始。"
-SCAN_START_WAITING_RESPONSE = (
-    "我已发起扫描，但状态还没显示真正开始。你先看一下仪器；如果还没开始，我马上重查。"
-)
-SCAN_STARTED_CONFIRMED_RESPONSE = (
-    "扫描已启动。扫完后告诉我扫描已经结束，我再读取最大吸收波长。"
-)
 DEFAULT_UVVIS_SCAN_OUTPUT_SUBDIR = Path("lab_runs") / "exp1_AgNPs_synthesis" / "data" / "uv_data_common"
-UVVIS_SCAN_CONTEXT_REQUIRED_RESPONSE = "还没有可查询的扫描任务，请先开始扫描。"
-UVVIS_SCAN_RESULT_INCOMPLETE_RESPONSE = "这次扫描结果还没有完整取到，请稍后再试。"
-UVVIS_SCAN_RESULT_NOT_SAVED_RESPONSE = "这次扫描结果还没有保存到指定位置，请稍后再试。"
 
 
 def _extract_uvvis_scan_context(
@@ -187,7 +185,7 @@ class UVVisScanRule:
                 if not pick_text(arguments.get("task_id")):
                     return ActionResponse(
                         action=Action.RESPONSE,
-                        response=UVVIS_SCAN_CONTEXT_REQUIRED_RESPONSE,
+                        response=get_uvvis_scan_context_required_response(),
                     )
             return None
 
@@ -225,7 +223,7 @@ class UVVisScanRule:
                 )
                 return ActionResponse(
                     action=Action.ERROR,
-                    response=f"扫描没有启动成功：{start_error}",
+                    response=build_uvvis_scan_start_failed_response(start_error),
                 )
             return await self._handle_uvvis_scan_start(payload)
 
@@ -248,12 +246,12 @@ class UVVisScanRule:
             if context is None:
                 return ActionResponse(
                     action=Action.RESPONSE,
-                    response=UVVIS_SCAN_CONTEXT_REQUIRED_RESPONSE,
+                    response=get_uvvis_scan_context_required_response(),
                 )
             self._clear_pending_scan_start_confirmation(context.get("task_id", ""))
             state = _extract_uvvis_scan_state(payload)
             if state and state != "succeeded":
-                reply = build_server_mcp_spoken_response("uvvis_scan_status", payload)
+                reply = build_uvvis_scan_status_followup_response(payload)
                 if reply:
                     return ActionResponse(
                         action=Action.RESPONSE,
@@ -274,13 +272,13 @@ class UVVisScanRule:
             if not has_saved_artifact:
                 return ActionResponse(
                     action=Action.RESPONSE,
-                    response=UVVIS_SCAN_RESULT_NOT_SAVED_RESPONSE,
+                    response=get_uvvis_scan_result_not_saved_response(),
                 )
             peak = _extract_scan_peak(payload)
             if peak is None:
                 return ActionResponse(
                     action=Action.RESPONSE,
-                    response=UVVIS_SCAN_RESULT_INCOMPLETE_RESPONSE,
+                    response=get_uvvis_scan_result_incomplete_response(),
                 )
             reply = build_server_mcp_spoken_response("uvvis_scan_result", payload)
             if reply:
@@ -505,7 +503,7 @@ class UVVisScanRule:
         self._mark_pending_scan_start_confirmation(context.get("task_id", ""))
         return ActionResponse(
             action=Action.RESPONSE,
-            response=SCAN_START_PENDING_RESPONSE,
+            response=get_uvvis_scan_start_pending_response(),
         )
 
     def _handle_uvvis_scan_status(self, payload) -> ActionResponse | None:
@@ -516,7 +514,7 @@ class UVVisScanRule:
         pending_task_id = self._get_pending_scan_start_task_id()
         task_id = context.get("task_id", "")
         if not pending_task_id or task_id != pending_task_id:
-            reply = build_server_mcp_spoken_response("uvvis_scan_status", payload)
+            reply = build_uvvis_scan_status_followup_response(payload)
             if reply:
                 return ActionResponse(
                     action=Action.RESPONSE,
@@ -529,19 +527,28 @@ class UVVisScanRule:
             self._clear_pending_scan_start_confirmation(task_id)
             return ActionResponse(
                 action=Action.RESPONSE,
-                response=SCAN_STARTED_CONFIRMED_RESPONSE,
+                response=build_uvvis_scan_status_followup_response(
+                    payload,
+                    pending_confirmation=True,
+                ),
             )
 
         if state == QUEUED_SCAN_STATE or not state:
             return ActionResponse(
                 action=Action.RESPONSE,
-                response=SCAN_START_WAITING_RESPONSE,
+                response=build_uvvis_scan_status_followup_response(
+                    payload,
+                    pending_confirmation=True,
+                ),
             )
 
         if state in FAILED_SCAN_STATES or state == "succeeded":
             self._clear_pending_scan_start_confirmation(task_id)
 
-        reply = build_server_mcp_spoken_response("uvvis_scan_status", payload)
+        reply = build_uvvis_scan_status_followup_response(
+            payload,
+            pending_confirmation=True,
+        )
         if reply:
             return ActionResponse(
                 action=Action.RESPONSE,

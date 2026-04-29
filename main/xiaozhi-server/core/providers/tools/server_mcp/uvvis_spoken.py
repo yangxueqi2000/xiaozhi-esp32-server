@@ -6,6 +6,16 @@ from typing import Any
 
 _FAILED_SCAN_STATES = {"failed", "error", "cancelled", "canceled"}
 _UVVIS_MEASUREMENT_TOOL_NAMES = {"uvvis_measure_spectra", "uvvis_measure_kinetics"}
+_SCAN_START_PENDING_RESPONSE = "我已发起扫描，先确认是否真正开始。"
+_SCAN_START_WAITING_RESPONSE = (
+    "我已发起扫描，但状态还没显示真正开始。你先看一下仪器；如果还没开始，我马上重查。"
+)
+_SCAN_STARTED_CONFIRMED_RESPONSE = (
+    "扫描已启动。扫完后告诉我扫描已经结束，我再读取最大吸收波长。"
+)
+_SCAN_CONTEXT_REQUIRED_RESPONSE = "还没有可查询的扫描任务，请先开始扫描。"
+_SCAN_RESULT_INCOMPLETE_RESPONSE = "这次扫描结果还没有完整取到，请稍后再试。"
+_SCAN_RESULT_NOT_SAVED_RESPONSE = "这次扫描结果还没有保存到指定位置，请稍后再试。"
 
 
 def _pick_text(*values: Any) -> str:
@@ -109,6 +119,37 @@ def _has_saved_artifact(validation) -> bool:
     )
 
 
+def get_uvvis_scan_start_pending_response() -> str:
+    return _SCAN_START_PENDING_RESPONSE
+
+
+def build_uvvis_scan_start_failed_response(start_error: Any) -> str:
+    detail = _pick_text(start_error)
+    if detail:
+        return f"扫描没有启动成功：{detail}"
+    return "扫描没有启动成功，请稍后再试。"
+
+
+def get_uvvis_scan_start_waiting_response() -> str:
+    return _SCAN_START_WAITING_RESPONSE
+
+
+def get_uvvis_scan_started_confirmed_response() -> str:
+    return _SCAN_STARTED_CONFIRMED_RESPONSE
+
+
+def get_uvvis_scan_context_required_response() -> str:
+    return _SCAN_CONTEXT_REQUIRED_RESPONSE
+
+
+def get_uvvis_scan_result_incomplete_response() -> str:
+    return _SCAN_RESULT_INCOMPLETE_RESPONSE
+
+
+def get_uvvis_scan_result_not_saved_response() -> str:
+    return _SCAN_RESULT_NOT_SAVED_RESPONSE
+
+
 def build_uvvis_spoken_response(
     tool_name: str,
     payload,
@@ -128,7 +169,7 @@ def build_uvvis_spoken_response(
         if not isinstance(result, dict):
             result = {}
         if validation and not _has_saved_artifact(validation):
-            return "这次扫描结果还没有保存到指定位置，请稍后再试。"
+            return get_uvvis_scan_result_not_saved_response()
         lambda_max_nm = result.get("lambda_max_nm")
         max_absorbance = result.get("max_absorbance")
         if lambda_max_nm is not None and max_absorbance is not None:
@@ -137,7 +178,7 @@ def build_uvvis_spoken_response(
                 f"最大吸光度是{max_absorbance}。"
             )
         if validation and not bool(validation.get("all_expected_outputs_exist", True)):
-            return "这次扫描结果还没有完整取到，请稍后再试。"
+            return get_uvvis_scan_result_incomplete_response()
         return str(default_reply or "").strip()
 
     if actual_tool_name == "uvvis_scan_status":
@@ -159,3 +200,23 @@ def build_uvvis_spoken_response(
         return str(default_reply or "").strip()
 
     return None
+
+
+def build_uvvis_scan_status_followup_response(
+    payload,
+    *,
+    pending_confirmation: bool = False,
+    default_reply: str = "",
+):
+    data = payload if isinstance(payload, dict) else {}
+    state = _extract_scan_state(data)
+    if pending_confirmation:
+        if state == "running":
+            return get_uvvis_scan_started_confirmed_response()
+        if state == "queued" or not state:
+            return get_uvvis_scan_start_waiting_response()
+    return build_uvvis_spoken_response(
+        "uvvis_scan_status",
+        data,
+        default_reply=default_reply,
+    )

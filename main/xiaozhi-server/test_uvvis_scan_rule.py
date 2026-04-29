@@ -39,6 +39,20 @@ class UVVisScanRuleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Action.RESPONSE, response.action)
         self.assertEqual("还没有可查询的扫描任务，请先开始扫描。", response.response)
 
+    async def test_after_execute_returns_spoken_scan_start_failure(self):
+        conn = _FakeConn()
+        rule = UVVisScanRule(conn, lambda: None)
+
+        response = await rule.after_execute(
+            "uvvis_scan_start",
+            {},
+            {"success": False, "error": "设备忙"},
+        )
+
+        self.assertIsNotNone(response)
+        self.assertEqual(Action.ERROR, response.action)
+        self.assertEqual("扫描没有启动成功：设备忙", response.response)
+
     async def test_after_execute_returns_peak_from_saved_absorbance_csv(self):
         conn = _FakeConn()
         rule = UVVisScanRule(conn, lambda: None)
