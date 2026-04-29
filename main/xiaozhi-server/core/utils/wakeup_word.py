@@ -1,10 +1,11 @@
+import hashlib
 import os
 import re
-import yaml
 import time
-import hashlib
-import portalocker
 from typing import Dict
+
+import portalocker
+import yaml
 
 
 class FileLock:
@@ -35,19 +36,20 @@ class WakeupWordsConfig:
         self._ensure_directories()
         self._config_cache = None
         self._last_load_time = 0
-        self._cache_ttl = 1  # 缓存有效期（秒）
-        self._lock_timeout = 5  # 文件锁超时时间（秒）
+        self._cache_ttl = 1
+        self._lock_timeout = 5
 
     def _ensure_directories(self):
-        """确保必要的目录存在"""
         os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
         os.makedirs(self.assets_dir, exist_ok=True)
 
-    def _load_config(self) -> Dict:
-        """加载配置文件，使用缓存机制"""
-        current_time = time.time()
+    @staticmethod
+    def _hash_voice(voice: str) -> str:
+        normalized_voice = str(voice or "default").strip() or "default"
+        return hashlib.md5(normalized_voice.encode("utf-8")).hexdigest()
 
-        # 如果缓存有效，直接返回缓存
+    def _load_config(self) -> Dict:
+        current_time = time.time()
         if (
             self._config_cache is not None
             and current_time - self._last_load_time < self._cache_ttl
@@ -55,86 +57,80 @@ class WakeupWordsConfig:
             return self._config_cache
 
         try:
-            with open(self.config_file, "a+", encoding="utf-8") as f:
-                with FileLock(f, timeout=self._lock_timeout):
-                    f.seek(0)
-                    content = f.read()
+            with open(self.config_file, "a+", encoding="utf-8") as file_obj:
+                with FileLock(file_obj, timeout=self._lock_timeout):
+                    file_obj.seek(0)
+                    content = file_obj.read()
                     config = yaml.safe_load(content) if content else {}
+                    if not isinstance(config, dict):
+                        config = {}
                     self._config_cache = config
                     self._last_load_time = current_time
                     return config
-        except (TimeoutError, IOError) as e:
-            print(f"加载配置文件失败: {e}")
+        except (TimeoutError, IOError) as exc:
+            print(f"加载唤醒词配置失败: {exc}")
             return {}
-        except Exception as e:
-            print(f"加载配置文件时发生未知错误: {e}")
+        except Exception as exc:
+            print(f"加载唤醒词配置时发生未知错误: {exc}")
             return {}
 
     def _save_config(self, config: Dict):
-        """保存配置到文件，使用文件锁保护"""
         try:
-            with open(self.config_file, "w", encoding="utf-8") as f:
-                with FileLock(f, timeout=self._lock_timeout):
-                    yaml.dump(config, f, allow_unicode=True)
+            with open(self.config_file, "w", encoding="utf-8") as file_obj:
+                with FileLock(file_obj, timeout=self._lock_timeout):
+                    yaml.dump(config, file_obj, allow_unicode=True)
                     self._config_cache = config
                     self._last_load_time = time.time()
-        except (TimeoutError, IOError) as e:
-            print(f"保存配置文件失败: {e}")
+        except (TimeoutError, IOError) as exc:
+            print(f"保存唤醒词配置失败: {exc}")
             raise
-        except Exception as e:
-            print(f"保存配置文件时发生未知错误: {e}")
+        except Exception as exc:
+            print(f"保存唤醒词配置时发生未知错误: {exc}")
             raise
 
     def get_wakeup_response(self, voice: str) -> Dict:
-        voice = hashlib.md5(voice.encode()).hexdigest()
-        """获取唤醒词回复配置"""
         config = self._load_config()
-
-        if not config or voice not in config:
+        voice_hash = self._hash_voice(voice)
+        if not config or voice_hash not in config:
             return None
 
-        # 检查文件大小
-        file_path = config[voice]["file_path"]
-        if not os.path.exists(file_path) or os.stat(file_path).st_size < (15 * 1024):
+        response = config[voice_hash]
+        file_path = str(response.get("file_path") or "").strip()
+        if not file_path or not os.path.exists(file_path):
             return None
 
-        return config[voice]
+        try:
+            if os.stat(file_path).st_size < (15 * 1024):
+                return None
+        except OSError:
+            return None
+
+        return response
 
     def update_wakeup_response(self, voice: str, file_path: str, text: str):
-        """更新唤醒词回复配置"""
         try:
-            # 过滤表情符号
-            filtered_text = re.sub(r'[\U0001F600-\U0001F64F\U0001F900-\U0001F9FF]', '', text)
-            
+            filtered_text = re.sub(
+                r"[\U0001F600-\U0001F64F\U0001F900-\U0001F9FF]",
+                "",
+                str(text or ""),
+            )
             config = self._load_config()
-            voice_hash = hashlib.md5(voice.encode()).hexdigest()
+            voice_hash = self._hash_voice(voice)
             config[voice_hash] = {
-                "voice": voice,
+                "voice": str(voice or "default").strip() or "default",
                 "file_path": file_path,
                 "time": time.time(),
                 "text": filtered_text,
             }
             self._save_config(config)
-        except Exception as e:
-            print(f"更新唤醒词回复配置失败: {e}")
+        except Exception as exc:
+            print(f"更新唤醒词配置失败: {exc}")
             raise
 
     def generate_file_path(self, voice: str) -> str:
-        """生成音频文件路径，使用voice的哈希值作为文件名"""
         try:
-            # 生成voice的哈希值
-            voice_hash = hashlib.md5(voice.encode()).hexdigest()
-            file_path = os.path.join(self.assets_dir, f"{voice_hash}.wav")
-
-            # 如果文件已存在，先删除
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception as e:
-                    print(f"删除已存在的音频文件失败: {e}")
-                    raise
-
-            return file_path
-        except Exception as e:
-            print(f"生成音频文件路径失败: {e}")
+            voice_hash = self._hash_voice(voice)
+            return os.path.join(self.assets_dir, f"{voice_hash}.wav")
+        except Exception as exc:
+            print(f"生成唤醒词音频路径失败: {exc}")
             raise

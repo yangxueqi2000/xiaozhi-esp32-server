@@ -2,6 +2,9 @@ import json
 import re
 import uuid
 import asyncio
+from pathlib import Path
+
+import yaml
 from core.utils.dialogue import Message
 from core.providers.tts.dto.dto import ContentType
 from core.handle.helloHandle import checkWakeupWords
@@ -499,14 +502,13 @@ def _extract_experiment_overview_title(payload) -> str:
 
 def _compose_experiment_start_reply(experiment_title: str, step_reply: str) -> str:
     title = " ".join(str(experiment_title or "").split()).strip()
-    reply = " ".join(str(step_reply or "").split()).strip()
     if title:
         if title.startswith("《") and title.endswith("》"):
             formatted_title = title
         else:
             formatted_title = f"《{title.strip('《》')}》"
         return f"今天我们做{formatted_title}。你准备好开始了吗？"
-    return reply
+    return "今天我们做当前实验。你准备好开始了吗？"
 
 
 def _is_explicit_experiment_start_request(filtered_text: str) -> bool:
@@ -514,6 +516,12 @@ def _is_explicit_experiment_start_request(filtered_text: str) -> bool:
     if not norm:
         return False
     explicit_tokens = (
+        "开始流程",
+        "开始当前实验流程",
+        "开始当前实验",
+        "准备开始",
+        "准备开始实验",
+        "准备开始流程",
         "开始今天的实验",
         "开始今天实验",
         "开始本次实验",
@@ -524,6 +532,36 @@ def _is_explicit_experiment_start_request(filtered_text: str) -> bool:
         "开始今天做的实验",
     )
     return _contains_any(norm, explicit_tokens)
+
+
+def _load_experiment_title_from_yaml_path(yaml_path: str) -> str:
+    path_text = str(yaml_path or "").strip()
+    if not path_text:
+        return ""
+
+    try:
+        yaml_file = Path(path_text).expanduser()
+        if not yaml_file.is_absolute():
+            yaml_file = yaml_file.resolve()
+        if not yaml_file.exists():
+            return ""
+        payload = yaml.safe_load(yaml_file.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ""
+
+    candidates = []
+    if isinstance(payload, dict):
+        candidates.append(payload)
+        experiment = payload.get("experiment")
+        if isinstance(experiment, dict):
+            candidates.append(experiment)
+
+    for candidate in candidates:
+        for key in ("title", "experiment_title", "name"):
+            value = " ".join(str(candidate.get(key, "")).split()).strip()
+            if value:
+                return value
+    return ""
 
 
 def _looks_like_experiment_detail_request(norm: str) -> bool:
@@ -780,21 +818,30 @@ async def _load_experiment_overview_title(conn) -> str:
         return title
 
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
-    if not session_id:
-        return ""
+    if session_id:
+        try:
+            overview_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "get_overview",
+                {"session_id": session_id},
+                priority="foreground",
+            )
+        except Exception:
+            overview_payload = None
 
-    try:
-        overview_payload = await _call_experiment_graph_tool_fast(
-            conn,
-            "get_overview",
-            {"session_id": session_id},
-            priority="foreground",
-        )
-    except Exception:
-        return ""
+        if overview_payload is not None:
+            conn.experiment_overview = overview_payload
+            title = _extract_experiment_overview_title(overview_payload)
+            if title:
+                return title
 
-    conn.experiment_overview = overview_payload
-    return _extract_experiment_overview_title(overview_payload)
+    yaml_path = str(getattr(conn, "experiment_yaml_path", "") or "").strip()
+    if not yaml_path and hasattr(conn, "_resolve_experiment_yaml_path"):
+        try:
+            yaml_path = str(conn._resolve_experiment_yaml_path() or "").strip()
+        except Exception:
+            yaml_path = ""
+    return _load_experiment_title_from_yaml_path(yaml_path)
 
 
 async def _refresh_experiment_step_cache(conn, session_id: str):
@@ -1365,6 +1412,15 @@ async def handle_experiment_control_fast_intent(
 ) -> bool:
     if not _is_experiment_fast_path_available(conn):
         return False
+
+    if _is_explicit_experiment_start_request(filtered_text):
+        experiment_title = await _load_experiment_overview_title(conn)
+        reply = _compose_experiment_start_reply(experiment_title, "")
+        if not reply:
+            return False
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
 
     action = _classify_short_experiment_control(conn, filtered_text)
     if not action:
