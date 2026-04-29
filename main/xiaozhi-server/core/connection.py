@@ -50,7 +50,10 @@ from core.utils.experiment_resume import (
     build_resume_tool_message,
     enrich_latest_user_utterance_log,
 )
-from core.providers.tools.server_mcp.payload_utils import extract_server_mcp_payload
+from core.providers.tools.server_mcp.payload_utils import (
+    finalize_server_mcp_payload,
+    sync_server_mcp_payload_state,
+)
 from core.session import (
     load_experiment_session_binding,
     save_experiment_session_binding,
@@ -1724,7 +1727,17 @@ class ConnectionHandler:
             arguments,
             priority=priority,
         )
-        return extract_server_mcp_payload(raw_result)
+        payload = finalize_server_mcp_payload(
+            raw_result,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        sync_server_mcp_payload_state(
+            self,
+            tool_name=tool_name,
+            payload=payload,
+        )
+        return payload
 
     async def _run_experiment_prewarm_deep_stage(
         self,
@@ -3655,7 +3668,8 @@ class ConnectionHandler:
 
         # 存储对话内容
         if len(response_message) > 0:
-            text_buff = textUtils.normalize_spoken_text(
+            text_buff = textUtils.prepare_runtime_spoken_text_for_conn(
+                self,
                 "".join(response_message)
             )
             self.tts_MessageText = text_buff
@@ -3693,7 +3707,7 @@ class ConnectionHandler:
                 Action.ERROR,
             ]:  # 直接回复前端
                 text = result.response if result.response else result.result
-                text = textUtils.normalize_spoken_text(text)
+                text = textUtils.prepare_runtime_spoken_text_for_conn(self, text)
                 if text:
                     self.tts.tts_one_sentence(
                         self, ContentType.TEXT, content_detail=text

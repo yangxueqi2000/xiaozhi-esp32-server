@@ -4,7 +4,11 @@ from plugins_func.register import Action, ActionResponse
 
 from ..base import ToolDefinition, ToolExecutor, ToolType
 from .mcp_manager import ServerMCPManager
-from .payload_utils import extract_server_mcp_payload, serialize_result_for_llm
+from .payload_utils import (
+    finalize_server_mcp_payload,
+    serialize_result_for_llm,
+    sync_server_mcp_payload_state,
+)
 from .photo_capture_rule import ServerPhotoCaptureRule
 from .uvvis_scan_rule import UVVisScanRule
 
@@ -52,7 +56,16 @@ class ServerMCPExecutor(ToolExecutor):
 
         try:
             result = await self.mcp_manager.execute_tool(actual_tool_name, call_args)
-            payload = extract_server_mcp_payload(result)
+            payload = finalize_server_mcp_payload(
+                result,
+                tool_name=actual_tool_name,
+                arguments=call_args,
+            )
+            sync_server_mcp_payload_state(
+                self.conn,
+                tool_name=actual_tool_name,
+                payload=payload,
+            )
             follow_up_response = await self.uvvis_scan_rule.after_execute(
                 actual_tool_name,
                 call_args,

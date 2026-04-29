@@ -524,8 +524,548 @@ def normalize_spoken_text(text):
     return re.sub(r"\s+", " ", str(text)).strip()
 
 
+_DEFAULT_TTS_SPOKEN_ALIASES = {
+    "AgNPs": "银纳米粒子",
+    "AuNPs": "金纳米粒子",
+    "H2O": "水",
+    "H2O2": "过氧化氢",
+    "HCl": "盐酸",
+    "HBr": "氢溴酸",
+    "HI": "氢碘酸",
+    "HF": "氢氟酸",
+    "HNO3": "硝酸",
+    "H2SO4": "硫酸",
+    "H2SO3": "亚硫酸",
+    "H3PO4": "磷酸",
+    "NaBH4": "硼氢化钠",
+    "Na3Cit": "柠檬酸钠",
+    "NH3·H2O": "氨水",
+    "NH4OH": "氨水",
+    "CH3COOH": "乙酸",
+    "C2H5OH": "乙醇",
+    "EtOH": "乙醇",
+    "CH3OH": "甲醇",
+    "MeOH": "甲醇",
+    "IPA": "异丙醇",
+    "4-NP": "4-硝基苯酚",
+    "4-AP": "4-氨基苯酚",
+    "PVP": "聚乙烯吡咯烷酮",
+    "PEG": "聚乙二醇",
+    "CTAB": "十六烷基三甲基溴化铵",
+    "SDS": "十二烷基硫酸钠",
+}
+
+_CHEMICAL_ELEMENT_NAMES = {
+    "H": "氢",
+    "He": "氦",
+    "Li": "锂",
+    "Be": "铍",
+    "B": "硼",
+    "C": "碳",
+    "N": "氮",
+    "O": "氧",
+    "F": "氟",
+    "Ne": "氖",
+    "Na": "钠",
+    "Mg": "镁",
+    "Al": "铝",
+    "Si": "硅",
+    "P": "磷",
+    "S": "硫",
+    "Cl": "氯",
+    "Ar": "氩",
+    "K": "钾",
+    "Ca": "钙",
+    "Sc": "钪",
+    "Ti": "钛",
+    "V": "钒",
+    "Cr": "铬",
+    "Mn": "锰",
+    "Fe": "铁",
+    "Co": "钴",
+    "Ni": "镍",
+    "Cu": "铜",
+    "Zn": "锌",
+    "Ga": "镓",
+    "Ge": "锗",
+    "As": "砷",
+    "Se": "硒",
+    "Br": "溴",
+    "Kr": "氪",
+    "Rb": "铷",
+    "Sr": "锶",
+    "Ag": "银",
+    "Cd": "镉",
+    "Sn": "锡",
+    "Sb": "锑",
+    "I": "碘",
+    "Ba": "钡",
+    "Pt": "铂",
+    "Au": "金",
+    "Hg": "汞",
+    "Pb": "铅",
+    "Bi": "铋",
+}
+
+_CHEMICAL_GROUP_SALT_STEMS = {
+    "OH": "氢氧化",
+    "O2": "过氧化",
+    "NO2": "亚硝酸",
+    "NO3": "硝酸",
+    "SO3": "亚硫酸",
+    "HSO3": "亚硫酸氢",
+    "SO4": "硫酸",
+    "HSO4": "硫酸氢",
+    "CO3": "碳酸",
+    "HCO3": "碳酸氢",
+    "PO4": "磷酸",
+    "HPO4": "磷酸氢",
+    "H2PO4": "磷酸二氢",
+    "MnO4": "高锰酸",
+    "CrO4": "铬酸",
+    "Cr2O7": "重铬酸",
+    "S2O3": "硫代硫酸",
+    "CH3COO": "乙酸",
+    "C2H3O2": "乙酸",
+    "HCOO": "甲酸",
+    "C2O4": "草酸",
+    "C6H5O7": "柠檬酸",
+    "ClO": "次氯酸",
+    "ClO2": "亚氯酸",
+    "ClO3": "氯酸",
+    "ClO4": "高氯酸",
+    "BrO3": "溴酸",
+    "IO3": "碘酸",
+    "CN": "氰化",
+    "SCN": "硫氰酸",
+}
+
+_BINARY_ANION_STEMS = {
+    "F": "氟化",
+    "Cl": "氯化",
+    "Br": "溴化",
+    "I": "碘化",
+    "O": "氧化",
+    "S": "硫化",
+    "N": "氮化",
+    "P": "磷化",
+    "H": "氢化",
+    "C": "碳化",
+}
+
+_CHEMICAL_FORMULA_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9().·+\-]{1,})(?![A-Za-z0-9])"
+)
+
+
+def _count_to_chinese(count: int) -> str:
+    mapping = {
+        0: "零",
+        1: "一",
+        2: "二",
+        3: "三",
+        4: "四",
+        5: "五",
+        6: "六",
+        7: "七",
+        8: "八",
+        9: "九",
+        10: "十",
+    }
+    if count in mapping:
+        return mapping[count]
+    if count < 20:
+        return "十" + mapping[count % 10]
+    if count < 100:
+        tens, ones = divmod(count, 10)
+        text = mapping[tens] + "十"
+        if ones:
+            text += mapping[ones]
+        return text
+    return str(count)
+
+
+def _with_stoich_prefix(stem: str, count: int) -> str:
+    if count <= 1:
+        return stem
+    return f"{_count_to_chinese(count)}{stem}"
+
+
+def _parse_simple_cation(formula: str):
+    token = str(formula or "").strip()
+    if not token:
+        return None
+
+    ammonium_match = re.fullmatch(r"(NH4)(\d*)", token)
+    if ammonium_match:
+        count_text = ammonium_match.group(2)
+        return "铵", int(count_text or "1")
+
+    element_match = re.fullmatch(r"([A-Z][a-z]?)(\d*)", token)
+    if not element_match:
+        return None
+
+    symbol = element_match.group(1)
+    if symbol not in _CHEMICAL_ELEMENT_NAMES:
+        return None
+    count_text = element_match.group(2)
+    return _CHEMICAL_ELEMENT_NAMES[symbol], int(count_text or "1")
+
+
+def _replace_range_for_tts(text: str) -> str:
+    patterns = (
+        r"(\d+)\s*[-~—–至到]+\s*(\d+)\s*号样品",
+        r"(\d+)\s*[-~—–至到]+\s*(\d+)\s*号样本",
+        r"(\d+)\s*[-~—–至到]+\s*(\d+)\s*号烧杯",
+        r"(\d+)\s*[-~—–至到]+\s*(\d+)\s*号试管",
+        r"(\d+)\s*[-~—–至到]+\s*(\d+)\s*组",
+    )
+
+    def _repl(match: re.Match) -> str:
+        start = match.group(1)
+        end = match.group(2)
+        suffix = match.group(0)[match.end(2) :]
+        suffix = re.sub(r"^\s*", "", suffix)
+        return f"{start}到{end}{suffix}"
+
+    result = text
+    for pattern in patterns:
+        result = re.sub(pattern, _repl, result)
+    return result
+
+
+def _replace_units_for_tts(text: str) -> str:
+    replacements = (
+        (r"(?i)\bmmol\s*/\s*L\b", "毫摩尔每升"),
+        (r"(?i)\bμmol\s*/\s*L\b", "微摩尔每升"),
+        (r"(?i)\bµmol\s*/\s*L\b", "微摩尔每升"),
+        (r"(?i)\bumol\s*/\s*L\b", "微摩尔每升"),
+        (r"(?i)\bmol\s*/\s*L\b", "摩尔每升"),
+        (r"(?i)\bmmol\s*·\s*L-?1\b", "毫摩尔每升"),
+        (r"(?i)\bμmol\s*·\s*L-?1\b", "微摩尔每升"),
+        (r"(?i)\bµmol\s*·\s*L-?1\b", "微摩尔每升"),
+        (r"(?i)\bumol\s*·\s*L-?1\b", "微摩尔每升"),
+        (r"(?i)\bmol\s*·\s*L-?1\b", "摩尔每升"),
+        (r"(?i)\bmg\s*/\s*mL\b", "毫克每毫升"),
+        (r"(?i)\bg\s*/\s*L\b", "克每升"),
+        (r"(?i)\bwt%\b", "质量百分比"),
+        (r"(?i)\bvol%\b", "体积百分比"),
+        (r"(?i)(?<=\d)\s*μL\b", "微升"),
+        (r"(?i)(?<=\d)\s*µL\b", "微升"),
+        (r"(?i)(?<=\d)\s*uL\b", "微升"),
+        (r"(?i)(?<=\d)\s*mL\b", "毫升"),
+        (r"(?i)(?<=\d)\s*L\b", "升"),
+        (r"(?i)(?<=\d)\s*mg\b", "毫克"),
+        (r"(?i)(?<=\d)\s*μg\b", "微克"),
+        (r"(?i)(?<=\d)\s*µg\b", "微克"),
+        (r"(?i)(?<=\d)\s*ug\b", "微克"),
+        (r"(?i)(?<=\d)\s*g\b", "克"),
+        (r"(?i)(?<=\d)\s*nm\b", "纳米"),
+        (r"(?i)(?<=\d)\s*μm\b", "微米"),
+        (r"(?i)(?<=\d)\s*µm\b", "微米"),
+        (r"(?i)(?<=\d)\s*mm\b", "毫米"),
+        (r"(?i)(?<=\d)\s*cm\b", "厘米"),
+        (r"(?i)(?<=\d)\s*kHz\b", "千赫兹"),
+        (r"(?i)(?<=\d)\s*Hz\b", "赫兹"),
+        (r"(?i)(?<=\d)\s*min\b", "分钟"),
+        (r"(?i)(?<=\d)\s*mins\b", "分钟"),
+        (r"(?i)(?<=\d)\s*sec\b", "秒"),
+        (r"(?i)(?<=\d)\s*s\b", "秒"),
+        (r"(?i)(?<=\d)\s*h\b", "小时"),
+        (r"(?i)(?<=\d)\s*rpm\b", "转每分钟"),
+        (r"(?i)(?<=\d)\s*V\b", "伏"),
+        (r"(?i)(?<=\d)\s*mV\b", "毫伏"),
+        (r"(?i)(?<=\d)\s*A\b", "安"),
+        (r"(?i)(?<=\d)\s*mA\b", "毫安"),
+        (r"(?i)(?<=\d)\s*W\b", "瓦"),
+        (r"(?i)(?<=\d)\s*°C\b", "摄氏度"),
+        (r"(?<=\d)\s*℃", "摄氏度"),
+    )
+
+    result = text
+    for pattern, replacement in replacements:
+        result = re.sub(pattern, replacement, result)
+    return result
+
+
+def _replace_generic_nanostructure_aliases_for_tts(text: str) -> str:
+    patterns = (
+        (re.compile(r"\b([A-Z][a-z]?)NPs?\b"), "纳米粒子"),
+        (re.compile(r"\b([A-Z][a-z]?)NRs?\b"), "纳米棒"),
+        (re.compile(r"\b([A-Z][a-z]?)NWs?\b"), "纳米线"),
+        (re.compile(r"\b([A-Z][a-z]?)NSs?\b"), "纳米片"),
+        (re.compile(r"\b([A-Z][a-z]?)QDs?\b"), "量子点"),
+    )
+
+    result = text
+    for pattern, suffix in patterns:
+        def _repl(match: re.Match) -> str:
+            symbol = match.group(1)
+            element_name = _CHEMICAL_ELEMENT_NAMES.get(symbol)
+            if not element_name:
+                return match.group(0)
+            return f"{element_name}{suffix}"
+
+        result = pattern.sub(_repl, result)
+    return result
+
+
+def _replace_formula_aliases_for_tts(text: str, custom_aliases=None) -> str:
+    merged_aliases = dict(_DEFAULT_TTS_SPOKEN_ALIASES)
+    if isinstance(custom_aliases, dict):
+        for key, value in custom_aliases.items():
+            key_text = str(key or "").strip()
+            value_text = str(value or "").strip()
+            if key_text and value_text:
+                merged_aliases[key_text] = value_text
+
+    result = text
+    for source, target in sorted(
+        merged_aliases.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(source)}(?![A-Za-z0-9])"
+        result = re.sub(pattern, target, result)
+    return result
+
+
+def _is_formula_part_structure(part: str) -> bool:
+    formula_part = str(part or "").strip()
+    if not formula_part:
+        return False
+
+    def _parse(index: int, stop_char=None):
+        saw_token = False
+        while index < len(formula_part):
+            current = formula_part[index]
+            if stop_char and current == stop_char:
+                return saw_token, index + 1
+            if current == "(":
+                inner_ok, next_index = _parse(index + 1, ")")
+                if not inner_ok:
+                    return False, next_index
+                index = next_index
+                while index < len(formula_part) and formula_part[index].isdigit():
+                    index += 1
+                saw_token = True
+                continue
+            if not current.isupper():
+                return False, index
+
+            symbol = current
+            index += 1
+            if index < len(formula_part) and formula_part[index].islower():
+                symbol += formula_part[index]
+                index += 1
+            if symbol not in _CHEMICAL_ELEMENT_NAMES:
+                return False, index
+            while index < len(formula_part) and formula_part[index].isdigit():
+                index += 1
+            saw_token = True
+
+        if stop_char:
+            return False, index
+        return saw_token, index
+
+    parsed_ok, final_index = _parse(0)
+    return parsed_ok and final_index == len(formula_part)
+
+
+def _looks_like_chemical_formula(token: str) -> bool:
+    core = str(token or "").strip("+-")
+    if not core or not any(ch.isupper() for ch in core):
+        return False
+    if not (
+        any(ch.isdigit() for ch in core)
+        or "(" in core
+        or ")" in core
+        or "·" in core
+        or "." in core
+        or re.search(r"[a-z]", core)
+    ):
+        return False
+
+    parts = re.split(r"[·.]", core)
+    for part in parts:
+        stripped_part = re.sub(r"^\d+", "", part)
+        if not _is_formula_part_structure(stripped_part):
+            return False
+    return True
+
+
+def _maybe_convert_hydrate_formula(formula: str):
+    hydrate_match = re.fullmatch(r"(.+?)[·.]((\d+)?)H2O", formula)
+    if not hydrate_match:
+        return None
+
+    base_formula = hydrate_match.group(1)
+    hydrate_count = int(hydrate_match.group(3) or "1")
+    base_spoken = _maybe_convert_formula_for_tts(base_formula)
+    if not base_spoken:
+        return None
+
+    if hydrate_count <= 1:
+        return f"{base_spoken}水合物"
+    return f"{base_spoken}{_count_to_chinese(hydrate_count)}水合物"
+
+
+def _maybe_convert_parenthesized_salt_formula(formula: str):
+    match = re.fullmatch(r"((?:NH4)|(?:[A-Z][a-z]?))(\d*)\(([^()]+)\)(\d*)", formula)
+    if not match:
+        return None
+
+    cation_formula = f"{match.group(1)}{match.group(2)}"
+    anion_formula = match.group(3)
+    cation = _parse_simple_cation(cation_formula)
+    anion_stem = _CHEMICAL_GROUP_SALT_STEMS.get(anion_formula)
+    if not cation or not anion_stem:
+        return None
+
+    cation_name, _ = cation
+    return f"{anion_stem}{cation_name}"
+
+
+def _maybe_convert_simple_salt_formula(formula: str):
+    cation = None
+    anion_stem = None
+
+    for group_formula in sorted(
+        _CHEMICAL_GROUP_SALT_STEMS.keys(), key=len, reverse=True
+    ):
+        if not formula.endswith(group_formula):
+            continue
+        cation = _parse_simple_cation(formula[: -len(group_formula)])
+        if not cation:
+            continue
+        anion_stem = _CHEMICAL_GROUP_SALT_STEMS[group_formula]
+        break
+
+    if not cation or not anion_stem:
+        for anion_symbol, binary_stem in sorted(
+            _BINARY_ANION_STEMS.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            if not formula.endswith(anion_symbol):
+                continue
+            cation = _parse_simple_cation(formula[: -len(anion_symbol)])
+            if not cation:
+                continue
+            anion_stem = binary_stem
+            break
+
+    if not cation or not anion_stem:
+        return None
+
+    cation_name, _ = cation
+    return f"{anion_stem}{cation_name}"
+
+
+def _maybe_convert_binary_formula(formula: str):
+    match = re.fullmatch(r"([A-Z][a-z]?)(\d*)([A-Z][a-z]?)(\d*)", formula)
+    if not match:
+        return None
+
+    cation_symbol = match.group(1)
+    cation_count = int(match.group(2) or "1")
+    anion_symbol = match.group(3)
+    anion_count = int(match.group(4) or "1")
+
+    cation_name = _CHEMICAL_ELEMENT_NAMES.get(cation_symbol)
+    anion_stem = _BINARY_ANION_STEMS.get(anion_symbol)
+    if not cation_name or not anion_stem:
+        return None
+
+    spoken_anion = _with_stoich_prefix(anion_stem, anion_count)
+    spoken_cation = _with_stoich_prefix(cation_name, cation_count)
+    return f"{spoken_anion}{spoken_cation}"
+
+
+def _maybe_convert_formula_for_tts(formula: str):
+    token = str(formula or "").strip()
+    if not token or not _looks_like_chemical_formula(token):
+        return None
+
+    return (
+        _maybe_convert_hydrate_formula(token)
+        or _maybe_convert_parenthesized_salt_formula(token)
+        or _maybe_convert_simple_salt_formula(token)
+        or _maybe_convert_binary_formula(token)
+    )
+
+
+def _replace_generic_formulae_for_tts(text: str) -> str:
+    def _repl(match: re.Match) -> str:
+        token = match.group(1)
+        replacement = _maybe_convert_formula_for_tts(token)
+        if replacement:
+            return replacement
+        return token
+
+    return _CHEMICAL_FORMULA_TOKEN_RE.sub(_repl, text)
+
+
+def normalize_tts_text(text, custom_aliases=None):
+    """Normalize final spoken text for Chinese TTS pronunciation."""
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return ""
+
+    normalized = _replace_range_for_tts(normalized)
+    normalized = _replace_units_for_tts(normalized)
+    normalized = _replace_generic_nanostructure_aliases_for_tts(normalized)
+    normalized = _replace_formula_aliases_for_tts(
+        normalized, custom_aliases=custom_aliases
+    )
+    normalized = _replace_generic_formulae_for_tts(normalized)
+    normalized = _replace_decimal_numbers_for_tts(normalized)
+    normalized = normalized.replace("×", "乘")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
 CANONICAL_OPENING_RE = re.compile(
     r"今天我们做《[^》\n]{1,80}》。你准备好开始了吗[？?]"
+)
+_DIGIT_TO_CHINESE = {
+    "0": "零",
+    "1": "一",
+    "2": "二",
+    "3": "三",
+    "4": "四",
+    "5": "五",
+    "6": "六",
+    "7": "七",
+    "8": "八",
+    "9": "九",
+}
+_SPOKEN_DECIMAL_RE = re.compile(
+    r"(?<![0-9A-Za-z_-])([+-]?\d+)\.(\d+)(?![0-9A-Za-z_.-])"
+)
+_SPOKEN_URL_RE = re.compile(r"\b(?:https?|wss?)://\S+", re.IGNORECASE)
+_SPOKEN_WINDOWS_PATH_RE = re.compile(
+    r"(?<!\w)(?:[A-Za-z]:\\|\\\\)[^\s，。！？；]+"
+)
+_SPOKEN_FILE_NAME_RE = re.compile(
+    r"\b[^\s\\/]+\.(?:pdf|ya?ml|json|csv|png|jpe?g|wav)\b",
+    re.IGNORECASE,
+)
+_SPOKEN_TECHNICAL_FIELD_RE = re.compile(
+    r"\b(?:device_id|session_id|chat_session_id|transport_session_id|"
+    r"connection_session_id|model_session_key|local_path|file_path|output_path|"
+    r"yaml_path|pdf_path|photo_path|task_id|client_id|tool_name|function_name|"
+    r"jsonrpc|serverinfo|capabilities)\b"
+    r"\s*[:=：]?\s*[^\s，。！？；]*",
+    re.IGNORECASE,
+)
+_SPOKEN_TOOL_NAME_RE = re.compile(
+    r"\b(?:create_session|get_overview|list_steps|get_step|get_schema|"
+    r"get_current_progress|get_progress_summary|start_trial|add_field|add_fields|"
+    r"finish_trial|can_proceed|proceed_to_next_step|get_modifiable_records|"
+    r"modify_record|redo_trial|redirect_to_step|cancel_trial|"
+    r"get_experiment_reference|search_experiment_reference|export_records|"
+    r"export_records_to_yaml|xiaozhi_[a-z_]+|uvvis_[a-z_]+|self_[a-z_]+)\b"
+)
+_SPOKEN_TRAILING_TECHNICAL_TAIL_RE = re.compile(
+    r"(?:[，,、 ]*(?:路径|位置|地址)\s*(?:是|为|在)?|"
+    r"[，,、 ]*(?:已保存为|保存为|保存到|保存在|输出到|位于))\s*$"
 )
 
 
@@ -546,6 +1086,211 @@ def _collapse_duplicated_canonical_opening(text: str) -> str:
     if repeated_opening_re.fullmatch(normalized):
         return opening
 
+    return normalized
+
+
+def _section_to_chinese(section: int) -> str:
+    digits = "零一二三四五六七八九"
+    units = ["", "十", "百", "千"]
+    result = []
+    zero_pending = False
+    remaining = int(section)
+
+    for power in range(3, -1, -1):
+        divisor = 10**power
+        digit = remaining // divisor
+        remaining %= divisor
+        if digit == 0:
+            if result:
+                zero_pending = True
+            continue
+        if zero_pending:
+            result.append("零")
+            zero_pending = False
+        if not (digit == 1 and power == 1 and not result):
+            result.append(digits[digit])
+        result.append(units[power])
+    return "".join(result) or "零"
+
+
+def _integer_to_chinese(num_text: str) -> str:
+    try:
+        number = int(str(num_text or "").strip())
+    except Exception:
+        return str(num_text or "")
+
+    if number == 0:
+        return "零"
+
+    negative = number < 0
+    if negative:
+        number = abs(number)
+
+    big_units = ["", "万", "亿", "兆"]
+    sections = []
+    while number > 0:
+        sections.append(number % 10000)
+        number //= 10000
+
+    parts = []
+    need_zero = False
+    for index in range(len(sections) - 1, -1, -1):
+        section = sections[index]
+        if section == 0:
+            need_zero = bool(parts)
+            continue
+        if parts and (need_zero or section < 1000):
+            parts.append("零")
+        parts.append(_section_to_chinese(section) + big_units[index])
+        need_zero = False
+
+    result = re.sub(r"零+", "零", "".join(parts)).rstrip("零")
+    return f"负{result}" if negative else result
+
+
+def _replace_decimal_numbers_for_tts(text: str) -> str:
+    def _repl(match: re.Match) -> str:
+        integer_part = _integer_to_chinese(match.group(1))
+        fractional_part = "".join(
+            _DIGIT_TO_CHINESE.get(ch, ch) for ch in match.group(2)
+        )
+        return f"{integer_part}点{fractional_part}"
+
+    return _SPOKEN_DECIMAL_RE.sub(_repl, text)
+
+
+def _split_spoken_sentence_chunks(text: str):
+    chunks = re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?", str(text or ""))
+    return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+
+def _strip_spoken_technical_details(text: str) -> str:
+    cleaned_sentences = []
+    for sentence in _split_spoken_sentence_chunks(text):
+        cleaned = sentence
+        cleaned = _SPOKEN_URL_RE.sub("", cleaned)
+        cleaned = _SPOKEN_WINDOWS_PATH_RE.sub("", cleaned)
+        cleaned = _SPOKEN_TECHNICAL_FIELD_RE.sub("", cleaned)
+        cleaned = _SPOKEN_TOOL_NAME_RE.sub("", cleaned)
+        cleaned = _SPOKEN_FILE_NAME_RE.sub("", cleaned)
+        cleaned = _SPOKEN_TRAILING_TECHNICAL_TAIL_RE.sub("", cleaned)
+        cleaned = re.sub(r"[，,、]+\s*([。！？!?；;])", r"\1", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,、:：；;")
+        cleaned = re.sub(r"[，,、]{2,}", "，", cleaned)
+        if not cleaned:
+            continue
+        if cleaned[-1] not in "。！？!?；;":
+            cleaned += "。"
+        visible = get_string_no_punctuation_or_emoji(cleaned)
+        if not visible:
+            continue
+        cleaned_sentences.append(cleaned)
+    return "".join(cleaned_sentences).strip()
+
+
+def _limit_spoken_sentence_count(text: str, max_sentences: int = 2) -> str:
+    sentences = _split_spoken_sentence_chunks(text)
+    if len(sentences) <= max_sentences:
+        return "".join(sentences).strip()
+    if max_sentences <= 1:
+        return sentences[0].strip()
+
+    kept = list(sentences[: max_sentences - 1])
+    tail_parts = []
+    tail_sentences = sentences[max_sentences - 1 :]
+    for index, sentence in enumerate(tail_sentences):
+        segment = sentence.strip()
+        if index < len(tail_sentences) - 1:
+            segment = segment.rstrip("。！？!?；;，,、 ")
+        tail_parts.append(segment)
+
+    merged_tail = "，".join(part for part in tail_parts if part).strip("，,、 ")
+    if merged_tail and merged_tail[-1] not in "。！？!?；;":
+        merged_tail += "。"
+    if merged_tail:
+        kept.append(merged_tail)
+    return "".join(part.strip() for part in kept if part).strip()
+
+
+def _get_recent_assistant_text_from_conn(conn, limit: int = 3) -> str:
+    if conn is None:
+        return ""
+    dialogue = getattr(getattr(conn, "dialogue", None), "dialogue", None)
+    if not isinstance(dialogue, list):
+        return ""
+
+    pieces = []
+    for message in reversed(dialogue):
+        role = str(getattr(message, "role", "") or "").strip().lower()
+        content = str(getattr(message, "content", "") or "").strip()
+        if role != "assistant" or not content:
+            continue
+        pieces.append(content)
+        if len(pieces) >= limit:
+            break
+    pieces.reverse()
+    return normalize_spoken_text(" ".join(pieces))
+
+
+def _conn_is_waiting_for_experiment_ready(conn) -> bool:
+    last_text = _get_recent_assistant_text_from_conn(conn, limit=3)
+    if not last_text:
+        return False
+    normalized = re.sub(r"\s+", "", last_text)
+    tokens = (
+        "准备好开始了吗",
+        "准备好了吗",
+        "可以开始了吗",
+        "现在开始吗",
+        "要开始了吗",
+    )
+    return any(token in normalized for token in tokens)
+
+
+def _looks_like_step_guidance_text(text: str) -> bool:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return False
+    guidance_tokens = (
+        "现在做这一步",
+        "接下来做这一步",
+        "当前这一步",
+        "做好后告诉我",
+    )
+    return any(token in normalized for token in guidance_tokens)
+
+
+def _apply_experiment_ready_guard(conn, text: str) -> str:
+    if not text or conn is None:
+        return text
+    if not _conn_is_waiting_for_experiment_ready(conn):
+        return text
+    if CANONICAL_OPENING_RE.search(text):
+        return text
+    if not _looks_like_step_guidance_text(text):
+        return text
+    return "你准备好后告诉我准备好了，我再带你开始第一步。"
+
+
+def _apply_export_artifact_guard(conn, text: str) -> str:
+    if not text or conn is None:
+        return text
+
+    guard = getattr(conn, "_pending_export_report_validation", None)
+    if not isinstance(guard, dict) or not guard.get("active"):
+        return text
+
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return normalized
+
+    report_keywords = ("实验报告", "报告", "PDF", "pdf", "导出")
+    if not any(keyword in normalized for keyword in report_keywords):
+        return normalized
+
+    all_expected_outputs_exist = bool(guard.get("all_expected_outputs_exist", False))
+    if not all_expected_outputs_exist:
+        return "实验报告还没有完整生成成功，请稍后再试。"
     return normalized
 
 
@@ -715,3 +1460,24 @@ def filter_spoken_backstage_text(text):
         return ""
 
     return rewritten
+
+
+def prepare_runtime_spoken_text(text):
+    """Apply shared runtime speech policy before enqueueing any spoken reply."""
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return ""
+
+    filtered = filter_spoken_backstage_text(normalized)
+    filtered = _strip_spoken_technical_details(filtered)
+    filtered = _limit_spoken_sentence_count(filtered, max_sentences=2)
+    return normalize_spoken_text(filtered)
+
+
+def prepare_runtime_spoken_text_for_conn(conn, text):
+    prepared = prepare_runtime_spoken_text(text)
+    if not prepared:
+        return ""
+    prepared = _apply_experiment_ready_guard(conn, prepared)
+    prepared = _apply_export_artifact_guard(conn, prepared)
+    return normalize_spoken_text(prepared)

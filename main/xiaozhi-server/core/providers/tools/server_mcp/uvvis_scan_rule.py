@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict
 
 from plugins_func.register import Action, ActionResponse
 
-from .payload_utils import pick_text
+from .payload_utils import build_server_mcp_spoken_response, pick_text
 
 
 FAILED_SCAN_STATES = {"failed", "error", "cancelled", "canceled"}
@@ -219,6 +219,12 @@ class UVVisScanRule:
             )
             if context is not None:
                 self._clear_pending_scan_start_confirmation(context.get("task_id", ""))
+            reply = build_server_mcp_spoken_response("uvvis_scan_result", payload)
+            if reply:
+                return ActionResponse(
+                    action=Action.RESPONSE,
+                    response=reply,
+                )
 
         return None
 
@@ -406,6 +412,12 @@ class UVVisScanRule:
         pending_task_id = self._get_pending_scan_start_task_id()
         task_id = context.get("task_id", "")
         if not pending_task_id or task_id != pending_task_id:
+            reply = build_server_mcp_spoken_response("uvvis_scan_status", payload)
+            if reply:
+                return ActionResponse(
+                    action=Action.RESPONSE,
+                    response=reply,
+                )
             return None
 
         state = _extract_uvvis_scan_state(payload)
@@ -425,6 +437,12 @@ class UVVisScanRule:
         if state in FAILED_SCAN_STATES or state == "succeeded":
             self._clear_pending_scan_start_confirmation(task_id)
 
+        reply = build_server_mcp_spoken_response("uvvis_scan_status", payload)
+        if reply:
+            return ActionResponse(
+                action=Action.RESPONSE,
+                response=reply,
+            )
         return None
 
     def _get_pending_scan_start_task_id(self) -> str:

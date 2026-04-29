@@ -46,6 +46,28 @@ def _get_open_websocket(conn):
     return ws
 
 
+def _get_force_independent_tts_sentence_ids(conn):
+    sentence_ids = getattr(conn, "_force_independent_tts_sentence_ids", None)
+    if sentence_ids is None:
+        sentence_ids = set()
+        setattr(conn, "_force_independent_tts_sentence_ids", sentence_ids)
+    return sentence_ids
+
+
+def _should_force_independent_tts_cycle(conn, sentence_id=None):
+    active_sentence_id = str(sentence_id or "").strip()
+    if not active_sentence_id:
+        return False
+    return active_sentence_id in _get_force_independent_tts_sentence_ids(conn)
+
+
+def _clear_forced_tts_cycle(conn, sentence_id=None):
+    active_sentence_id = str(sentence_id or "").strip()
+    if not active_sentence_id:
+        return
+    _get_force_independent_tts_sentence_ids(conn).discard(active_sentence_id)
+
+
 def _queue_has_pending_followup_tts(conn, sentence_id=None):
     tts = getattr(conn, "tts", None)
     if not tts:
@@ -84,11 +106,26 @@ def _queue_has_pending_followup_tts(conn, sentence_id=None):
 
 async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
     active_sentence_id = str(sentence_id or getattr(conn, "sentence_id", "") or "").strip()
+    force_independent_cycle = _should_force_independent_tts_cycle(
+        conn, active_sentence_id
+    )
     if conn.tts.tts_audio_first_sentence:
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
         conn.tts.tts_audio_first_sentence = False
-        if not conn.client_is_speaking:
+        if force_independent_cycle and conn.client_is_speaking:
+            conn.logger.bind(tag=TAG).info(
+                "force fresh tts start for system prompt: "
+                f"sentence_id={active_sentence_id or 'unknown'}"
+            )
+            conn.clearSpeakStatus()
+        if force_independent_cycle or not conn.client_is_speaking:
             await send_tts_message(conn, "start", None)
+            conn.client_is_speaking = True
+            conn.logger.bind(tag=TAG).info(
+                "tts speaking state entered: "
+                f"sentence_id={active_sentence_id or 'unknown'}, "
+                f"force_independent={force_independent_cycle}"
+            )
         else:
             conn.logger.bind(tag=TAG).debug(
                 f"reuse active speaking state for sentence_id={active_sentence_id or 'unknown'}"
@@ -116,13 +153,16 @@ async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
 
     # 发送结束消息（如果是最后一个文本）
     if sentenceType == SentenceType.LAST:
-        if _queue_has_pending_followup_tts(conn, active_sentence_id):
+        if not force_independent_cycle and _queue_has_pending_followup_tts(
+            conn, active_sentence_id
+        ):
             conn.logger.bind(tag=TAG).info(
                 f"skip tts stop because follow-up speech is pending: sentence_id={active_sentence_id or 'unknown'}"
             )
             return
         await send_tts_message(conn, "stop", None)
         conn.client_is_speaking = False
+        _clear_forced_tts_cycle(conn, active_sentence_id)
         if conn.close_after_chat:
             await conn.close()
 

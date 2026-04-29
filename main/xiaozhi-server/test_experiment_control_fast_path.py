@@ -122,6 +122,69 @@ class _FakeConn:
 
 
 class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
+    def test_runtime_spoken_text_keeps_only_canonical_opening(self):
+        text = (
+            "今天我们做《银纳米粒子实验》。你准备好开始了吗？"
+            "我先读取一下当前步骤。"
+        )
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual(
+            "今天我们做《银纳米粒子实验》。你准备好开始了吗？",
+            result,
+        )
+
+    def test_runtime_spoken_text_strips_technical_details(self):
+        text = (
+            "实验报告已经生成，pdf_path=C:\\demo\\report.pdf，"
+            "session_id=abc123。"
+        )
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual("实验报告已经生成。", result)
+
+    def test_runtime_spoken_text_limits_to_two_sentences(self):
+        text = "现在做这一步。注意不要污染。做好后告诉我。"
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual("现在做这一步。注意不要污染，做好后告诉我。", result)
+
+    def test_conn_runtime_spoken_text_blocks_false_export_success(self):
+        conn = _FakeConn()
+        conn._pending_export_report_validation = {
+            "active": True,
+            "all_expected_outputs_exist": False,
+        }
+
+        result = textUtils.prepare_runtime_spoken_text_for_conn(
+            conn,
+            "实验报告已经生成完成。",
+        )
+
+        self.assertEqual("实验报告还没有完整生成成功，请稍后再试。", result)
+
+    def test_normalize_tts_text_reads_decimals_digit_by_digit(self):
+        result = textUtils.normalize_tts_text("加入1.849mL AgNO3。")
+
+        self.assertIn("一点八四九毫升", result)
+        self.assertIn("硝酸银", result)
+
+    def test_repeat_reply_is_direct_and_requests_completion(self):
+        reply = intentHandler._compose_experiment_step_reply(
+            {
+                "title": "1-5号样品：统一加入柠檬酸钠",
+                "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                "safety": "加液时保持移液操作稳定。",
+            },
+            mode="repeat",
+        )
+
+        self.assertNotIn("我再简短说一遍", reply)
+        self.assertIn("当前这一步", reply)
+        self.assertIn("做好后告诉我", reply)
     def test_neutral_ack_follows_completion_context(self):
         conn = _FakeConn()
         conn.dialogue.put(
@@ -315,8 +378,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(["没听懂"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("我再简短说一遍", spoken[0])
+        self.assertIn("当前这一步", spoken[0])
         self.assertIn("烧杯编号和磁转子放置", spoken[0])
+        self.assertIn("做好后告诉我", spoken[0])
 
     async def test_explicit_start_guide_reply_includes_experiment_title(self):
         conn = _FakeConn()
@@ -359,15 +423,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(["开始今天的实验"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("今天我们做的是Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究", spoken[0])
-        self.assertIn("你准备好开始了吗", spoken[0])
+        self.assertEqual(
+            "今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+            spoken[0],
+        )
 
     async def test_ready_reply_after_start_prompt_returns_current_step(self):
         conn = _FakeConn()
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="今天我们做的是Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究。你准备好开始了吗？",
+                content="今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
             )
         )
         conn.experiment_current_step = {
@@ -404,6 +470,50 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(spoken))
         self.assertIn("现在做这一步", spoken[0])
         self.assertIn("烧杯编号和磁转子放置", spoken[0])
+
+    async def test_continue_before_ready_does_not_broadcast_step(self):
+        conn = _FakeConn()
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+            )
+        )
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_prepare_setup_all",
+                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "prompts": {
+                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                    },
+                }
+            }
+        }
+        spoken = []
+        sent = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "继续",
+                    "继续",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["继续"], sent)
+        self.assertEqual(
+            ["你准备好后告诉我准备好了，我再带你开始第一步。"],
+            spoken,
+        )
 
     async def test_advance_fast_path_records_and_moves_to_next_step(self):
         conn = _FakeConn()

@@ -190,6 +190,7 @@ class TTSProvider(TTSProviderBase):
     def to_tts_single_stream(self, text, is_last=False):
         clean_text = MarkdownCleaner.clean_markdown(text)
         clean_text = textUtils.filter_spoken_backstage_text(clean_text)
+        clean_text = self._normalize_text_for_tts(clean_text)
         if not clean_text:
             if is_last:
                 self._process_before_stop_play_files()
@@ -338,6 +339,7 @@ class TTSProvider(TTSProviderBase):
     def to_tts(self, text):
         clean_text = MarkdownCleaner.clean_markdown(text)
         clean_text = textUtils.filter_spoken_backstage_text(clean_text)
+        clean_text = self._normalize_text_for_tts(clean_text)
         if not clean_text:
             return []
 

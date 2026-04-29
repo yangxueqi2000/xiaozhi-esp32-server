@@ -14,6 +14,11 @@ from core.utils import textUtils
 from core.utils.util import remove_punctuation_and_length, sanitize_tool_name
 from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType
 from core.providers.tools.device_mcp import call_mcp_tool
+from core.providers.tools.server_mcp.payload_utils import (
+    build_server_mcp_spoken_response,
+    finalize_server_mcp_payload,
+    sync_server_mcp_payload_state,
+)
 
 TAG = __name__
 
@@ -452,9 +457,12 @@ def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
         core = instruction
 
     if mode == "repeat":
-        parts = [f"我再简短说一遍：{core}。"]
+        parts = [f"当前这一步：{core}。"]
         if safety:
             parts.append(f"注意{safety}。")
+        elif tip:
+            parts.append(f"{tip}。")
+        parts.append("做好后告诉我。")
         return "".join(parts)
 
     if mode == "next":
@@ -468,6 +476,24 @@ def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
         parts.append(f"{tip}。")
     parts.append("做好后告诉我。")
     return "".join(parts)
+
+
+def _prepare_fastpath_spoken_reply(
+    text: str,
+    *,
+    fallback_step_meta: dict | None = None,
+    fallback_mode: str = "guide",
+) -> str:
+    prepared = textUtils.prepare_runtime_spoken_text(text)
+    if prepared:
+        return prepared
+    if fallback_step_meta:
+        fallback_text = _compose_experiment_step_reply(
+            fallback_step_meta,
+            mode=fallback_mode,
+        )
+        return textUtils.prepare_runtime_spoken_text(fallback_text)
+    return ""
 
 
 def _extract_experiment_overview_title(payload) -> str:
@@ -647,6 +673,28 @@ def _assistant_waiting_for_step_start(conn) -> bool:
     return _contains_any(last_text, tokens)
 
 
+def _is_explicit_ready_to_start_reply(filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    if not norm:
+        return False
+
+    ready_tokens = (
+        "准备好了",
+        "我准备好了",
+        "已经准备好了",
+        "可以开始",
+        "可以开始了",
+        "开始吧",
+        "开始做吧",
+        "ready",
+    )
+    return _contains_any(norm, ready_tokens)
+
+
+def _compose_waiting_ready_reply() -> str:
+    return "你准备好后告诉我准备好了，我再带你开始第一步。"
+
+
 PURE_SHORT_COMPLETION_PATTERNS = (
     re.compile(
         r"^(?:(?:我|这步|这一步|当前步骤|当前这步|本步|这轮|已经|已|都|就|现在|目前|刚刚|这里|这边|样品)){0,3}"
@@ -746,6 +794,14 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
 
 
 def _is_experiment_fast_path_available(conn) -> bool:
+    raw_enabled = conn.config.get("experiment_fast_path_enabled", True)
+    if isinstance(raw_enabled, str):
+        enabled = raw_enabled.strip().lower() in ("1", "true", "yes", "on")
+    else:
+        enabled = bool(raw_enabled)
+    if not enabled:
+        return False
+
     if getattr(conn, "experiment_session_id", ""):
         return True
     step_meta = _get_cached_experiment_step_meta(conn)
@@ -766,7 +822,17 @@ async def _call_experiment_graph_tool_fast(
             priority=priority,
         )
     raw_result = await _execute_server_mcp_tool_direct(conn, tool_name, arguments)
-    return _extract_server_mcp_payload(raw_result)
+    payload = finalize_server_mcp_payload(
+        raw_result,
+        tool_name=tool_name,
+        arguments=arguments,
+    )
+    sync_server_mcp_payload_state(
+        conn,
+        tool_name=tool_name,
+        payload=payload,
+    )
+    return payload
 
 
 async def _load_experiment_step_meta(conn) -> dict:
@@ -1099,6 +1165,12 @@ async def _handle_confirmation_step_semantic_fast_intent(
         )
         return False
 
+    next_step_meta = _get_cached_experiment_step_meta(conn)
+    reply = _prepare_fastpath_spoken_reply(
+        reply,
+        fallback_step_meta=next_step_meta,
+        fallback_mode="guide",
+    )
     if not reply:
         return False
 
@@ -1331,7 +1403,7 @@ async def _advance_experiment_step_fast(conn, session_id: str) -> str:
             reply = _compose_experiment_step_reply(next_meta, mode="next")
             if reply:
                 return reply
-            return "好，这一步结束了，接着按当前下一步继续做，做好后告诉我。"
+            return ""
 
     current_progress = _extract_experiment_current_progress(progress_payload)
     if current_progress is None:
@@ -1404,7 +1476,7 @@ async def _advance_experiment_step_fast(conn, session_id: str) -> str:
     reply = _compose_experiment_step_reply(next_meta, mode="next")
     if reply:
         return reply
-    return "好，这一步结束了，接着按当前下一步继续做，做好后告诉我。"
+    return ""
 
 
 async def handle_experiment_control_fast_intent(
@@ -1416,6 +1488,7 @@ async def handle_experiment_control_fast_intent(
     if _is_explicit_experiment_start_request(filtered_text):
         experiment_title = await _load_experiment_overview_title(conn)
         reply = _compose_experiment_start_reply(experiment_title, "")
+        reply = _prepare_fastpath_spoken_reply(reply)
         if not reply:
             return False
         await _start_direct_intent_turn(conn, original_text)
@@ -1434,6 +1507,28 @@ async def handle_experiment_control_fast_intent(
         f"experiment control fast path hit: action={action}, text={filtered_text}"
     )
 
+    waiting_for_step_start = _assistant_waiting_for_step_start(conn)
+    explicitly_ready_to_start = _is_explicit_ready_to_start_reply(filtered_text)
+
+    if waiting_for_step_start and action == "repeat":
+        experiment_title = await _load_experiment_overview_title(conn)
+        reply = _prepare_fastpath_spoken_reply(
+            _compose_experiment_start_reply(experiment_title, "")
+        )
+        if not reply:
+            return False
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
+
+    if waiting_for_step_start and action in {"guide", "advance"} and not explicitly_ready_to_start:
+        reply = _prepare_fastpath_spoken_reply(_compose_waiting_ready_reply())
+        if not reply:
+            return False
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
+
     if action in {"guide", "repeat"}:
         step_meta = await _load_experiment_step_meta(conn)
         reply = _compose_experiment_step_reply(
@@ -1443,6 +1538,13 @@ async def handle_experiment_control_fast_intent(
         if action == "guide" and _is_explicit_experiment_start_request(filtered_text):
             experiment_title = await _load_experiment_overview_title(conn)
             reply = _compose_experiment_start_reply(experiment_title, reply)
+            reply = _prepare_fastpath_spoken_reply(reply)
+        else:
+            reply = _prepare_fastpath_spoken_reply(
+                reply,
+                fallback_step_meta=step_meta,
+                fallback_mode="repeat" if action == "repeat" else "guide",
+            )
         if not reply:
             return False
         await _start_direct_intent_turn(conn, original_text)
@@ -1468,6 +1570,12 @@ async def handle_experiment_control_fast_intent(
             )
             return False
 
+        next_step_meta = _get_cached_experiment_step_meta(conn)
+        reply = _prepare_fastpath_spoken_reply(
+            reply,
+            fallback_step_meta=next_step_meta,
+            fallback_mode="guide",
+        )
         if not reply:
             return False
 
@@ -2303,7 +2411,16 @@ async def _execute_server_photo_intent(conn, arguments: dict) -> bool:
         speak_txt(conn, f"\u62cd\u7167\u5931\u8d25\uff1a{e}")
         return True
 
-    payload = _extract_server_mcp_payload(result)
+    payload = finalize_server_mcp_payload(
+        result,
+        tool_name="xiaozhi_take_photo",
+        arguments=arguments,
+    )
+    sync_server_mcp_payload_state(
+        conn,
+        tool_name="xiaozhi_take_photo",
+        payload=payload,
+    )
     if isinstance(payload, dict) and payload.get("success") is False:
         msg = (
             str(payload.get("message", "")).strip()
@@ -2313,15 +2430,11 @@ async def _execute_server_photo_intent(conn, arguments: dict) -> bool:
         speak_txt(conn, msg)
         return True
 
-    reply = _extract_text_from_result_payload(payload)
-    if not reply:
-        photo_meta = payload.get("photo_meta") if isinstance(payload, dict) else None
-        if isinstance(photo_meta, dict):
-            file_name = str(photo_meta.get("file_name", "")).strip()
-            if file_name:
-                reply = f"\u62cd\u597d\u4e86\uff0c\u5df2\u4fdd\u5b58\u4e3a {file_name}"
-    if not reply:
-        reply = "\u62cd\u597d\u4e86\u3002"
+    reply = build_server_mcp_spoken_response(
+        "xiaozhi_take_photo",
+        payload,
+        default_reply="\u62cd\u597d\u4e86\u3002",
+    ) or _extract_text_from_result_payload(payload) or "\u62cd\u597d\u4e86\u3002"
     try:
         local_reply = await _advance_photo_confirmation_step_locally(
             conn,
@@ -2468,13 +2581,28 @@ async def handle_direct_photo_navigation_intent(
         speak_txt(conn, f"\u6253\u5f00\u7167\u7247\u5931\u8d25\uff1a{e}")
         return True
 
-    payload = _extract_server_mcp_payload(result)
+    payload = finalize_server_mcp_payload(
+        result,
+        tool_name=tool_name,
+        arguments={"device_id": safe_device_id, "photo_index": 0}
+        if nav_type != "previous"
+        else {"device_id": safe_device_id},
+    )
+    sync_server_mcp_payload_state(
+        conn,
+        tool_name=tool_name,
+        payload=payload,
+    )
     if isinstance(payload, dict) and payload.get("success") is False:
         msg = str(payload.get("message", "")).strip() or "\u6253\u5f00\u7167\u7247\u5931\u8d25\u3002"
         speak_txt(conn, msg)
         return True
 
-    reply = _extract_text_from_result_payload(payload) or default_reply
+    reply = build_server_mcp_spoken_response(
+        tool_name,
+        payload,
+        default_reply=default_reply,
+    ) or _extract_text_from_result_payload(payload) or default_reply
     speak_txt(conn, reply)
     return True
 
@@ -2633,7 +2761,7 @@ async def process_intent_result(conn, intent_result, original_text):
 
 
 def speak_txt(conn, text):
-    text = textUtils.normalize_spoken_text(text)
+    text = textUtils.prepare_runtime_spoken_text_for_conn(conn, text)
     if not text:
         return
 

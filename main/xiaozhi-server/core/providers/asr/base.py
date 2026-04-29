@@ -18,6 +18,7 @@ from core.utils.experiment_resume import (
     build_resume_context,
     should_load_device_log_context,
 )
+from core.utils import textUtils
 from core.utils.util import remove_punctuation_and_length
 from core.handle.receiveAudioHandle import handleAudioMessage
 from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType, ContentType
@@ -325,6 +326,7 @@ class ASRProviderBase(ABC):
 
     def _enqueue_system_tts(self, conn, text: str):
         """直接下发系统 TTS，不走 LLM 流程。"""
+        text = textUtils.prepare_runtime_spoken_text_for_conn(conn, text)
         if not text:
             return
         if not getattr(conn, "tts", None):
@@ -332,7 +334,15 @@ class ASRProviderBase(ABC):
             return
 
         try:
+            forced_sentence_ids = getattr(
+                conn, "_force_independent_tts_sentence_ids", None
+            )
+            if forced_sentence_ids is None:
+                forced_sentence_ids = set()
+                conn._force_independent_tts_sentence_ids = forced_sentence_ids
+
             conn.sentence_id = str(uuid.uuid4().hex)
+            forced_sentence_ids.add(conn.sentence_id)
             conn.tts_MessageText = text
             conn.tts.tts_text_queue.put(
                 TTSMessageDTO(

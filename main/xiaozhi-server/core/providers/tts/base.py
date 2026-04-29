@@ -103,6 +103,13 @@ class TTSProviderBase(ABC):
     def handle_audio_file(self, file_audio: bytes, text):
         self.before_stop_play_files.append((file_audio, text))
 
+    def _normalize_text_for_tts(self, text: str) -> str:
+        aliases = None
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            aliases = conn.config.get("spoken_aliases")
+        return textUtils.normalize_tts_text(text, custom_aliases=aliases)
+
     def set_fallback_provider(self, provider, provider_name: str = ""):
         self.fallback_provider = provider
         self.fallback_provider_name = str(provider_name or "").strip()
@@ -128,7 +135,8 @@ class TTSProviderBase(ABC):
 
     def to_tts_stream(self, text, opus_handler: Callable[[bytes], None] = None) -> None:
         text = MarkdownCleaner.clean_markdown(text)
-        text = textUtils.filter_spoken_backstage_text(text)
+        text = textUtils.prepare_runtime_spoken_text_for_conn(self.conn, text)
+        text = self._normalize_text_for_tts(text)
         if not text:
             return None
         max_repeat_time = 5
@@ -207,7 +215,8 @@ class TTSProviderBase(ABC):
     
     def to_tts(self, text):
         text = MarkdownCleaner.clean_markdown(text)
-        text = textUtils.filter_spoken_backstage_text(text)
+        text = textUtils.prepare_runtime_spoken_text_for_conn(self.conn, text)
+        text = self._normalize_text_for_tts(text)
         if not text:
             return None
         max_repeat_time = 5
