@@ -44,28 +44,29 @@ async def handle_user_intent(conn, text):
     if await checkWakeupWords(conn, filtered_text):
         return True
 
-    if await handle_pending_direct_photo_confirmation(conn, text, filtered_text):
-        return True
-
-    if await handle_pending_server_photo_confirmation(conn, text, filtered_text):
-        return True
-
+    # Experiment/runtime fast paths stay retired, but photo capture and preview
+    # should still bypass Codex when the request can be resolved locally.
     _update_server_photo_confirmation_state(conn, filtered_text)
 
-    # Fast path: photo-navigation commands go directly to MCP (no Codex).
-    if await handle_direct_photo_navigation_intent(conn, text, filtered_text):
-        return True
-
-    # Fast path: take-photo commands go directly to MCP (no Codex).
-    if await handle_direct_photo_intent(conn, text, filtered_text):
-        return True
-
-    # Fast path: short experiment control utterances go directly to
-    # experiment flow handling instead of a full Codex turn.
-    if await handle_experiment_control_fast_intent(conn, text, filtered_text):
-        return True
+    photo_direct_handlers = (
+        handle_pending_direct_photo_confirmation,
+        handle_pending_server_photo_confirmation,
+        handle_direct_photo_navigation_intent,
+        handle_direct_photo_intent,
+    )
+    for handler in photo_direct_handlers:
+        try:
+            handled = await handler(conn, text, filtered_text)
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"photo direct handler failed: handler={handler.__name__}, error={exc}"
+            )
+            continue
+        if handled:
+            return True
 
     if conn.intent_type == "function_call":
+        _maybe_stage_experiment_ready_guard_bypass_for_normal_turn(conn, filtered_text)
         # 使用支持function calling的聊天方法,不再进行意图分析
         return False
     # 使用LLM进行意图分析
@@ -74,6 +75,13 @@ async def handle_user_intent(conn, text):
         return False
     # 会话开始时生成sentence_id
     conn.sentence_id = str(uuid.uuid4().hex)
+    if _assistant_waiting_for_step_start(conn) and _is_explicit_ready_to_start_reply(
+        filtered_text
+    ):
+        textUtils.activate_experiment_ready_guard_bypass_for_current_sentence(
+            conn,
+            force=True,
+        )
     # 处理各种意图
     return await process_intent_result(conn, intent_result, text)
 
@@ -707,17 +715,23 @@ def _compose_waiting_ready_reply() -> str:
 def _grant_experiment_ready_guard_bypass(conn, count: int = 1) -> None:
     if conn is None:
         return
-    try:
-        delta = int(count or 0)
-    except (TypeError, ValueError):
-        delta = 0
-    if delta <= 0:
-        delta = 1
-    try:
-        current = int(getattr(conn, "_experiment_ready_guard_bypass_count", 0) or 0)
-    except (TypeError, ValueError):
-        current = 0
-    conn._experiment_ready_guard_bypass_count = max(0, current) + delta
+    if textUtils.activate_experiment_ready_guard_bypass_for_current_sentence(
+        conn,
+        force=True,
+    ):
+        return
+    textUtils.stage_experiment_ready_guard_bypass_for_next_turn(conn, count=count)
+
+
+def _maybe_stage_experiment_ready_guard_bypass_for_normal_turn(
+    conn,
+    filtered_text: str,
+) -> None:
+    if not _assistant_waiting_for_step_start(conn):
+        return
+    if not _is_explicit_ready_to_start_reply(filtered_text):
+        return
+    textUtils.stage_experiment_ready_guard_bypass_for_next_turn(conn)
 
 
 PURE_SHORT_COMPLETION_PATTERNS = (
@@ -2445,8 +2459,8 @@ def _coerce_positive_int(value, default: int) -> int:
 def _resolve_server_photo_timeout_settings(conn) -> tuple[int, int, float]:
     shortcut_cfg = conn.config.get("device_mcp_shortcuts", {}) or {}
     tool_timeout = _coerce_positive_int(
-        shortcut_cfg.get("server_photo_timeout", shortcut_cfg.get("photo_timeout", 45)),
-        45,
+        shortcut_cfg.get("server_photo_timeout", shortcut_cfg.get("photo_timeout", 20)),
+        20,
     )
     default_request_timeout = max(tool_timeout + 15, 60)
     request_timeout = _coerce_positive_int(

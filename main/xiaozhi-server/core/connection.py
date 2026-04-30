@@ -3280,6 +3280,7 @@ class ConnectionHandler:
                 self._thinking_event_active = False
                 self._thinking_finish_on_tts_start_pending = False
             self.sentence_id = str(uuid.uuid4().hex)
+            textUtils.activate_experiment_ready_guard_bypass_for_current_sentence(self)
             self.dialogue.put(Message(role="user", content=query))
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(

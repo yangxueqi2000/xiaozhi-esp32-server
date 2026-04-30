@@ -100,15 +100,43 @@ async def send_mcp_message(conn, payload: dict):
     """Helper to send MCP messages, encapsulating common logic."""
     if not conn.features.get("mcp"):
         logger.bind(tag=TAG).warning("客户端不支持MCP，无法发送MCP消息")
-        return
+        return False
+
+    ws = getattr(conn, "websocket", None)
+    if ws is None:
+        logger.bind(tag=TAG).warning(
+            "MCP transport is unavailable: websocket is not attached"
+        )
+        return False
+
+    if hasattr(ws, "state"):
+        try:
+            if ws.state.name == "CLOSED":
+                logger.bind(tag=TAG).warning(
+                    "MCP transport is unavailable: websocket state is CLOSED"
+                )
+                return False
+        except Exception:
+            pass
+    elif hasattr(ws, "closed"):
+        try:
+            if ws.closed:
+                logger.bind(tag=TAG).warning(
+                    "MCP transport is unavailable: websocket is closed"
+                )
+                return False
+        except Exception:
+            pass
 
     message = json.dumps({"type": "mcp", "payload": payload})
 
     try:
-        await conn.websocket.send(message)
+        await ws.send(message)
         logger.bind(tag=TAG).debug(f"成功发送MCP消息: {message}")
+        return True
     except Exception as e:
         logger.bind(tag=TAG).error(f"发送MCP消息失败: {e}")
+        return False
 
 
 async def handle_mcp_message(conn, mcp_client: MCPClient, payload: dict):
@@ -371,7 +399,10 @@ async def call_mcp_tool(
     }
 
     logger.bind(tag=TAG).info(f"发送客户端mcp工具调用请求: {actual_name}，参数: {args}")
-    await send_mcp_message(conn, payload)
+    sent = await send_mcp_message(conn, payload)
+    if not sent:
+        await mcp_client.cleanup_call_result(tool_call_id)
+        raise ConnectionError("device MCP transport is not connected")
 
     try:
         # Wait for response or timeout

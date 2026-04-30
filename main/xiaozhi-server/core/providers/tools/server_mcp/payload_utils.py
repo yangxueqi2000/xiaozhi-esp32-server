@@ -14,7 +14,7 @@ _ARTIFACT_VALIDATION_SPECS = {
         "directory_argument_fields": ("output_path",),
     },
     "xiaozhi_take_photo": {
-        "file_fields": ("mirrored_path",),
+        "file_fields": ("mirrored_path", "photo_path", "saved_photo_path", "local_path"),
         "directory_argument_fields": (),
     },
     "uvvis_scan_result": {

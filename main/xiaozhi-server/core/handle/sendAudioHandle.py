@@ -17,6 +17,14 @@ def _resolve_tts_stop_protocol_floor_ms(frame_duration_ms):
     return max((PRE_BUFFER_COUNT + 2) * frame_duration_ms, 360)
 
 
+def _resolve_tts_stop_drain_guard_ms(conn):
+    raw_guard_ms = conn.config.get("tts_stop_drain_guard_ms", 600)
+    try:
+        return max(0, int(raw_guard_ms))
+    except (TypeError, ValueError):
+        return 600
+
+
 def _resolve_tts_stop_buffer_ms(conn, frame_duration_ms):
     protocol_floor_ms = _resolve_tts_stop_protocol_floor_ms(frame_duration_ms)
 
@@ -197,7 +205,8 @@ async def _wait_for_audio_completion(conn):
     requested_extra_ms, min_buffer_ms, protocol_floor_ms, effective_extra_ms = (
         _resolve_tts_stop_buffer_ms(conn, frame_duration_ms)
     )
-    total_wait_ms = remaining_ms + effective_extra_ms
+    drain_guard_ms = _resolve_tts_stop_drain_guard_ms(conn)
+    total_wait_ms = remaining_ms + effective_extra_ms + drain_guard_ms
     conn.logger.bind(tag=TAG).info(
         "tts stop wait: "
         f"packet_count={packet_count}, "
@@ -207,6 +216,7 @@ async def _wait_for_audio_completion(conn):
         f"min_buffer_ms={min_buffer_ms}, "
         f"protocol_floor_ms={protocol_floor_ms}, "
         f"effective_extra_ms={effective_extra_ms}, "
+        f"drain_guard_ms={drain_guard_ms}, "
         f"total_wait_ms={total_wait_ms:.0f}"
     )
     if total_wait_ms > 0:

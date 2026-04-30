@@ -18,6 +18,11 @@ export class WebSocketHandler {
         this.onChatMessage = null; // 新增：聊天消息回调
         this.currentSessionId = null;
         this.isRemoteSpeaking = false;
+        this.pendingStopPollTimer = null;
+        this.pendingStopToken = 0;
+        this.lastDisplayedTtsText = '';
+        this.lastDisplayedTtsSessionId = '';
+        this.lastDisplayedTtsAt = 0;
     }
 
     // 发送hello握手消息
@@ -127,21 +132,21 @@ export class WebSocketHandler {
     handleTTSMessage(message) {
         if (message.state === 'start') {
             log('服务器开始发送语音', 'info');
+            this.cancelPendingTtsStopFinalize();
             this.currentSessionId = message.session_id;
             this.isRemoteSpeaking = true;
             if (this.onSessionStateChange) {
                 this.onSessionStateChange(true);
             }
 
+            this.emitTtsTextIfNeeded(message);
+
             // 启动Live2D说话动画
             this.startLive2DTalking();
         } else if (message.state === 'sentence_start') {
             log(`服务器发送语音段: ${message.text}`, 'info');
             this.ttsSentenceCount = (this.ttsSentenceCount || 0) + 1;
-
-            if (message.text && this.onChatMessage) {
-                this.onChatMessage(message.text, false);
-            }
+            this.emitTtsTextIfNeeded(message);
 
             // 确保动画在句子开始时运行
             const live2dManager = window.chatApp?.live2dManager;
@@ -153,26 +158,140 @@ export class WebSocketHandler {
 
             // 句子结束时不清除动画，等待下一个句子或最终停止
         } else if (message.state === 'stop') {
-            log('服务器语音传输结束，清空所有音频缓冲', 'info');
+            log('服务器语音传输结束，等待本地音频播放完成后再切回聆听中', 'info');
+            this.deferTtsStopUntilPlaybackDrains(message.session_id);
+        }
+    }
 
-            // 清空所有音频缓冲并停止播放
+    emitTtsTextIfNeeded(message) {
+        const sessionId = message?.session_id || this.currentSessionId || '';
+        const text = typeof message?.text === 'string' ? message.text.trim() : '';
+        if (!text || !this.onChatMessage) {
+            return;
+        }
+
+        if (
+            sessionId &&
+            this.lastDisplayedTtsSessionId === sessionId &&
+            this.lastDisplayedTtsText === text &&
+            Date.now() - this.lastDisplayedTtsAt < 1500
+        ) {
+            return;
+        }
+
+        this.lastDisplayedTtsSessionId = sessionId;
+        this.lastDisplayedTtsText = text;
+        this.lastDisplayedTtsAt = Date.now();
+        this.onChatMessage(text, false);
+    }
+
+    cancelPendingTtsStopFinalize() {
+        this.pendingStopToken += 1;
+        if (this.pendingStopPollTimer) {
+            clearTimeout(this.pendingStopPollTimer);
+            this.pendingStopPollTimer = null;
+        }
+    }
+
+    resolveTtsStopPostDrainHoldMs() {
+        const config = getConfig?.();
+        const rawValue = config?.ttsStopPostDrainHoldMs;
+        const parsed = Number(rawValue);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+            return parsed;
+        }
+        // Keep a short tail-protection window after local playback drains so
+        // we don't flip back to listening in the last breath of the sentence.
+        return 1000;
+    }
+
+    finalizeTtsStopPlayback() {
+        this.cancelPendingTtsStopFinalize();
+        this.isRemoteSpeaking = false;
+        this.currentSessionId = null;
+        this.lastDisplayedTtsText = '';
+        this.lastDisplayedTtsSessionId = '';
+        this.lastDisplayedTtsAt = 0;
+
+        if (this.onRecordButtonStateChange) {
+            this.onRecordButtonStateChange(false);
+        }
+        if (this.onSessionStateChange) {
+            this.onSessionStateChange(false);
+        }
+
+        setTimeout(() => {
+            this.stopLive2DTalking();
+            this.ttsSentenceCount = 0;
+        }, 150);
+    }
+
+    resetRemoteSpeakingUiOnDisconnect() {
+        this.cancelPendingTtsStopFinalize();
+
+        try {
             const audioPlayer = getAudioPlayer();
             audioPlayer.clearAllAudio();
-
-            this.isRemoteSpeaking = false;
-            if (this.onRecordButtonStateChange) {
-                this.onRecordButtonStateChange(false);
-            }
-            if (this.onSessionStateChange) {
-                this.onSessionStateChange(false);
-            }
-
-            // 延迟停止Live2D说话动画，确保所有句子都播放完毕
-            setTimeout(() => {
-                this.stopLive2DTalking();
-                this.ttsSentenceCount = 0; // 重置计数器
-            }, 1000); // 1秒延迟，确保所有句子都完成
+        } catch (error) {
+            log(`断线后清理本地音频失败: ${error.message}`, 'warning');
         }
+
+        this.finalizeTtsStopPlayback();
+    }
+
+    deferTtsStopUntilPlaybackDrains(sessionId) {
+        const audioPlayer = getAudioPlayer();
+        const token = this.pendingStopToken + 1;
+        this.cancelPendingTtsStopFinalize();
+        this.pendingStopToken = token;
+
+        const maxDrainWaitMs = 12000;
+        const pollIntervalMs = 80;
+        const stableZeroPollsRequired = 2;
+        const postDrainHoldMs = this.resolveTtsStopPostDrainHoldMs();
+        const drainStartedAt = Date.now();
+        let stableZeroPolls = 0;
+
+        const poll = () => {
+            if (token !== this.pendingStopToken) {
+                return;
+            }
+
+            const stats = audioPlayer.getAudioStats();
+            const totalPending = Number(stats?.totalPending || 0);
+
+            if (totalPending <= 0) {
+                stableZeroPolls += 1;
+            } else {
+                stableZeroPolls = 0;
+            }
+
+            if (stableZeroPolls >= stableZeroPollsRequired) {
+                log(
+                    `TTS本地音频已排空，额外等待 ${postDrainHoldMs}ms 后再切回聆听中: session=${sessionId || ''}`,
+                    'info'
+                );
+                this.pendingStopPollTimer = setTimeout(() => {
+                    if (token !== this.pendingStopToken) {
+                        return;
+                    }
+                    log(`TTS尾音保护等待结束，结束会话说话状态: session=${sessionId || ''}`, 'info');
+                    this.finalizeTtsStopPlayback();
+                }, postDrainHoldMs);
+                return;
+            }
+
+            if (Date.now() - drainStartedAt >= maxDrainWaitMs) {
+                log(`等待TTS本地音频排空超时，强制收口: session=${sessionId || ''}`, 'warning');
+                audioPlayer.clearAllAudio();
+                this.finalizeTtsStopPlayback();
+                return;
+            }
+
+            this.pendingStopPollTimer = setTimeout(poll, pollIntervalMs);
+        };
+
+        this.pendingStopPollTimer = setTimeout(poll, pollIntervalMs);
     }
 
     // 启动Live2D说话动画
@@ -342,6 +461,7 @@ export class WebSocketHandler {
         this.websocket.onopen = async () => {
             const url = document.getElementById('serverUrl').value;
             log(`已连接到服务器: ${url}`, 'success');
+            this.cancelPendingTtsStopFinalize();
 
             if (this.onConnectionStateChange) {
                 this.onConnectionStateChange(true);
@@ -361,6 +481,7 @@ export class WebSocketHandler {
 
         this.websocket.onclose = () => {
             log('已断开连接', 'info');
+            this.resetRemoteSpeakingUiOnDisconnect();
 
             if (this.onConnectionStateChange) {
                 this.onConnectionStateChange(false);

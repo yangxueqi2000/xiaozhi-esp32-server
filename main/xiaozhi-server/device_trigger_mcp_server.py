@@ -32,6 +32,8 @@ from trigger_preview_local_file import (
     trigger_preview_local_file as do_preview_local_file,
 )
 from trigger_take_photo import (
+    DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT,
+    DEFAULT_TAKE_PHOTO_TOOL_TIMEOUT,
     build_photo_name,
     build_question_with_photo_name,
     list_sessions as list_device_sessions,
@@ -616,10 +618,23 @@ class PhotoPathTracker:
         items: List[Dict[str, Any]] = []
         if not os.path.isdir(directory):
             return items
+        allowed_exts = {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".webp",
+        }
         try:
             with os.scandir(directory) as entries:
                 for entry in entries:
                     if not entry.is_file():
+                        continue
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext not in allowed_exts:
                         continue
                     try:
                         stat = entry.stat()
@@ -888,7 +903,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--name", default=os.getenv("MCP_SERVER_NAME", "xiaozhi-device-trigger"))
     parser.add_argument("--list-timeout", type=int, default=10)
-    parser.add_argument("--request-timeout", type=int, default=120)
+    parser.add_argument(
+        "--request-timeout",
+        type=int,
+        default=DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT,
+    )
     parser.add_argument("--default-take-photo-tool-name", default="self.camera.take_photo")
     parser.add_argument("--default-preview-tool-name", default="self.screen.preview_image")
     parser.add_argument(
@@ -999,8 +1018,8 @@ def build_server(args: argparse.Namespace) -> FastMCP:
         time_format: str = "",
         device_id: Optional[str] = None,
         tool_name: str = "",
-        timeout: int = 90,
-        request_timeout: int = 120,
+        timeout: int = DEFAULT_TAKE_PHOTO_TOOL_TIMEOUT,
+        request_timeout: int = DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT,
         ctx: Optional[Context] = None,
     ) -> Dict[str, Any]:
         try:

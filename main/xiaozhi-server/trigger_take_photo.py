@@ -18,6 +18,9 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional
 
+DEFAULT_TAKE_PHOTO_TOOL_TIMEOUT = 20
+DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT = 35
+
 
 def _request_json(
     method: str,
@@ -80,15 +83,27 @@ def trigger_take_photo(
     question: str = "Please take a photo.",
     photo_name: str = "",
     tool_name: str = "self.camera.take_photo",
-    tool_timeout: int = 90,
-    request_timeout: int = 120,
+    tool_timeout: int = DEFAULT_TAKE_PHOTO_TOOL_TIMEOUT,
+    request_timeout: int = DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT,
 ) -> Dict[str, Any]:
     if not session_id and not device_id:
         raise ValueError("session_id or device_id is required")
 
+    safe_tool_timeout = int(tool_timeout)
+    if safe_tool_timeout <= 0:
+        safe_tool_timeout = DEFAULT_TAKE_PHOTO_TOOL_TIMEOUT
+
+    safe_request_timeout = int(request_timeout)
+    if safe_request_timeout <= 0:
+        safe_request_timeout = DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT
+    safe_request_timeout = max(
+        safe_request_timeout,
+        safe_tool_timeout + 5,
+    )
+
     payload: Dict[str, Any] = {
         "question": question,
-        "timeout": int(tool_timeout),
+        "timeout": safe_tool_timeout,
         "tool_name": tool_name,
     }
     if session_id:
@@ -99,7 +114,7 @@ def trigger_take_photo(
         payload["photo_name"] = photo_name
 
     url = f"{base_url.rstrip('/')}/mcp/device/take_photo"
-    return _request_json("POST", url, payload=payload, timeout=request_timeout)
+    return _request_json("POST", url, payload=payload, timeout=safe_request_timeout)
 
 
 def parse_args() -> argparse.Namespace:
@@ -139,13 +154,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tool-timeout",
         type=int,
-        default=90,
+        default=DEFAULT_TAKE_PHOTO_TOOL_TIMEOUT,
         help="Tool call timeout seconds (sent to server)",
     )
     parser.add_argument(
         "--request-timeout",
         type=int,
-        default=120,
+        default=DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT,
         help="HTTP request timeout seconds",
     )
     parser.add_argument(

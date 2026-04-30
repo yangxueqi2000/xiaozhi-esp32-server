@@ -73,6 +73,7 @@ sys.modules.setdefault("config.logger", fake_logger_module)
 
 from core.handle.sendAudioHandle import (
     _resolve_tts_stop_buffer_ms,
+    _resolve_tts_stop_drain_guard_ms,
     send_tts_message,
     sendAudioMessage,
 )
@@ -127,6 +128,13 @@ class SendAudioTimingTest(unittest.TestCase):
         self.assertEqual(240, minimum)
         self.assertEqual(420, protocol_floor)
         self.assertEqual(480, effective)
+
+    def test_stop_drain_guard_defaults_to_six_hundred_ms(self):
+        conn = SimpleNamespace(config={})
+
+        guard_ms = _resolve_tts_stop_drain_guard_ms(conn)
+
+        self.assertEqual(600, guard_ms)
 
     def test_stream_split_holds_terminal_sentence_until_more_context_arrives(self):
         provider = _DummyTTSProvider(

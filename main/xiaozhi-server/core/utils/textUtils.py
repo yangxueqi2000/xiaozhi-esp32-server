@@ -1475,9 +1475,73 @@ def _conn_is_waiting_for_experiment_ready(conn) -> bool:
     return any(token in normalized for token in tokens)
 
 
-def _consume_experiment_ready_guard_bypass(conn) -> bool:
+def stage_experiment_ready_guard_bypass_for_next_turn(conn, count: int = 1) -> None:
+    if conn is None:
+        return
+    try:
+        delta = int(count or 0)
+    except (TypeError, ValueError):
+        delta = 0
+    if delta <= 0:
+        delta = 1
+    try:
+        current = int(
+            getattr(conn, "_experiment_ready_guard_bypass_pending_turns", 0) or 0
+        )
+    except (TypeError, ValueError):
+        current = 0
+    setattr(
+        conn,
+        "_experiment_ready_guard_bypass_pending_turns",
+        max(0, current) + delta,
+    )
+
+
+def activate_experiment_ready_guard_bypass_for_current_sentence(
+    conn,
+    sentence_id: str = "",
+    *,
+    force: bool = False,
+) -> bool:
     if conn is None:
         return False
+
+    resolved_sentence_id = str(
+        sentence_id or getattr(conn, "sentence_id", "") or ""
+    ).strip()
+    if not resolved_sentence_id:
+        return False
+
+    try:
+        pending = int(
+            getattr(conn, "_experiment_ready_guard_bypass_pending_turns", 0) or 0
+        )
+    except (TypeError, ValueError):
+        pending = 0
+    if not force and pending <= 0:
+        return False
+
+    setattr(
+        conn,
+        "_experiment_ready_guard_bypass_sentence_id",
+        resolved_sentence_id,
+    )
+    if pending > 0:
+        setattr(conn, "_experiment_ready_guard_bypass_pending_turns", pending - 1)
+    return True
+
+
+def _conn_has_experiment_ready_guard_bypass(conn) -> bool:
+    if conn is None:
+        return False
+
+    current_sentence_id = str(getattr(conn, "sentence_id", "") or "").strip()
+    bypass_sentence_id = str(
+        getattr(conn, "_experiment_ready_guard_bypass_sentence_id", "") or ""
+    ).strip()
+    if current_sentence_id and bypass_sentence_id == current_sentence_id:
+        return True
+
     raw_count = getattr(conn, "_experiment_ready_guard_bypass_count", 0)
     try:
         count = int(raw_count or 0)
@@ -1502,10 +1566,304 @@ def _looks_like_step_guidance_text(text: str) -> bool:
     return any(token in normalized for token in guidance_tokens)
 
 
+def _spoken_text_has_measurement_detail(text: str) -> bool:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return False
+
+    primary_units = (
+        "毫升",
+        "微升",
+        "升",
+        "毫克",
+        "克",
+        "滴",
+        "分钟",
+        "秒",
+    )
+    if not any(unit in normalized for unit in primary_units):
+        return False
+    return bool(re.search(r"[零一二三四五六七八九十百千万两\d]", normalized))
+
+
+def _compact_spoken_measurement_detail(detail: str) -> str:
+    normalized = normalize_spoken_text(detail).strip(" ，,、；;")
+    if not normalized:
+        return ""
+
+    if _spoken_text_has_measurement_detail(normalized):
+        normalized = re.sub(
+            r"(?:^|[\s，,、])(?:浓度)?[零一二三四五六七八九十百千万两\d\.点]+"
+            r"(?:\s*[xX×]\s*10\s*[-−]?\s*\d+)?\s*"
+            r"(?:摩尔每升|毫摩尔每升|微摩尔每升|纳摩尔每升|mol\s*/\s*L|mol/L|mM|μM|uM|"
+            r"毫克每毫升|mg\s*/\s*mL|mg/mL|克每升|g\s*/\s*L|g/L|百分之[零一二三四五六七八九十百千万两\d\.]+|%)",
+            " ",
+            normalized,
+        )
+
+    parts = [part.strip() for part in re.split(r"[，,；;]\s*", normalized) if part.strip()]
+    if not parts:
+        parts = [normalized]
+
+    cleaned_parts = []
+    for part in parts:
+        compact = re.sub(r"\s+", "", part).strip(" ，,、；;")
+        if compact:
+            cleaned_parts.append(compact)
+
+    if not cleaned_parts:
+        return ""
+    if len(cleaned_parts) == 2:
+        return "和".join(cleaned_parts)
+    return "、".join(cleaned_parts)
+
+
+def _compact_spoken_step_amount_parentheticals(text: str) -> str:
+    if not text:
+        return ""
+
+    compacted = str(text)
+
+    def _multi_addition_repl(match: re.Match) -> str:
+        detail = _compact_spoken_measurement_detail(match.group("detail"))
+        if not _spoken_text_has_measurement_detail(detail):
+            return match.group(0)
+        return f"加入{detail}"
+
+    compacted = re.sub(
+        r"(?P<head>(?:[一二三四五六七八九十0-9]+\s*号样品\s*)?"
+        r"(?:[\u4e00-\u9fffA-Za-z0-9·/\-]+\s*(?:、|和|及|与)\s*)+"
+        r"[\u4e00-\u9fffA-Za-z0-9·/\-]+)\s*加入\s*[（(](?P<detail>[^()（）]{1,120})[）)]",
+        _multi_addition_repl,
+        compacted,
+    )
+
+    def _single_addition_repl(match: re.Match) -> str:
+        detail = _compact_spoken_measurement_detail(match.group("detail"))
+        if not _spoken_text_has_measurement_detail(detail):
+            return match.group(0)
+        prefix = re.sub(r"\s+", "", match.group("prefix"))
+        name = re.sub(r"\s+", "", match.group("name"))
+        if detail.startswith(name):
+            return f"{prefix}{detail}"
+        return f"{prefix}{name}{detail}"
+
+    compacted = re.sub(
+        r"(?P<prefix>(?:先|再|快速|随后|继续|依次|分别)?\s*(?:加入|滴加))\s*"
+        r"(?P<name>[\u4e00-\u9fffA-Za-z0-9·/\-]+)\s*[（(](?P<detail>[^()（）]{1,120})[）)]",
+        _single_addition_repl,
+        compacted,
+    )
+
+    def _generic_amount_repl(match: re.Match) -> str:
+        name = re.sub(r"\s+", "", match.group("name"))
+        detail = _compact_spoken_measurement_detail(match.group("detail"))
+        if not _spoken_text_has_measurement_detail(detail):
+            return match.group(0)
+        if detail.startswith(name):
+            return detail
+        return f"{name}{detail}"
+
+    compacted = re.sub(
+        r"(?P<name>[\u4e00-\u9fffA-Za-z0-9·/\-]+)\s*[（(](?P<detail>[^()（）]{1,120})[）)]",
+        _generic_amount_repl,
+        compacted,
+    )
+    return compacted
+
+
+def _is_spoken_step_reporting_clause(text: str) -> bool:
+    clause = normalize_spoken_text(text).strip(" ，,、；;。！？!?")
+    if not clause:
+        return False
+
+    reporting_prefixes = (
+        "记录",
+        "记下",
+        "记得记录",
+        "填写",
+        "填好",
+        "补记",
+        "汇报",
+        "报告",
+        "反馈",
+        "同步记录",
+        "再记录",
+        "并记录",
+        "然后记录",
+    )
+    if clause.startswith(reporting_prefixes):
+        return True
+
+    explicit_reporting_topics = (
+        "收尾情况",
+        "收尾状态",
+        "记录字段",
+        "记录结果",
+        "结果填写",
+    )
+    if any(token in clause for token in explicit_reporting_topics):
+        return True
+
+    if "记录" in clause and any(token in clause for token in ("时间", "现象", "结果", "状态")):
+        action_tokens = ("观察", "拍照", "测量", "加入", "滴加", "混匀", "搅拌", "静置")
+        if not any(token in clause for token in action_tokens):
+            return True
+    return False
+
+
+def _strip_spoken_step_reporting_clauses(text: str) -> str:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return ""
+
+    clauses = [part.strip() for part in re.split(r"[，,；;]\s*", stripped) if part.strip()]
+    kept_clauses = [
+        clause for clause in clauses if not _is_spoken_step_reporting_clause(clause)
+    ]
+    if not kept_clauses:
+        return ""
+    if len(kept_clauses) == 1:
+        return kept_clauses[0]
+    return "，".join(kept_clauses)
+
+
+def _rewrite_spoken_step_sequence(text: str) -> str:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return ""
+
+    match = re.match(
+        r"^(?:完成|做完)\s*(?P<first>.+?)后(?:，|,)?\s*(?P<rest>.+)$",
+        stripped,
+    )
+    if not match:
+        return stripped
+
+    first = match.group("first").strip(" ，,、；;")
+    rest = match.group("rest").strip(" ，,、；;")
+    if not first or not rest:
+        return stripped
+    return f"先{first}，再{rest}"
+
+
+def _compact_spoken_step_guidance_sentence(sentence: str) -> str:
+    stripped = str(sentence or "").strip()
+    if not stripped:
+        return ""
+
+    terminal = stripped[-1] if stripped[-1] in "。！？!?；;" else ""
+    body = stripped[:-1] if terminal else stripped
+    body = _strip_spoken_step_reporting_clauses(body)
+    body = _compact_spoken_step_amount_parentheticals(body)
+    body = _rewrite_spoken_step_sequence(body)
+    body = re.sub(r"注意继续保持搅拌", "注意持续搅拌", body)
+    body = re.sub(r"继续保持搅拌", "持续搅拌", body)
+    body = re.sub(r"并保持搅拌", "，持续搅拌", body)
+    body = re.sub(r"保持搅拌", "持续搅拌", body)
+    body = re.sub(r"\s+", " ", body).strip(" ，,、；;")
+    body = re.sub(r"[，,、]{2,}", "，", body)
+    body = re.sub(r"([：:])\s*([，,、])", r"\1", body)
+    body = re.sub(r"[，,、]+\s*([。！？!?；;])", r"\1", body)
+    if not body:
+        return ""
+    if terminal:
+        body += terminal
+    return body
+
+
+def _merge_spoken_step_guidance_sentences(sentences: list[str]) -> list[str]:
+    if len(sentences) < 2:
+        return sentences
+
+    first = sentences[0].strip()
+    second = sentences[1].strip()
+    first_match = re.match(
+        r"^(?P<intro>(?:现在做这一步|接下来做这一步|当前这一步)[:：])(?P<body>.+?)[。！？!?；;]?$",
+        first,
+    )
+    if not first_match or not _spoken_text_has_measurement_detail(second):
+        return sentences
+
+    first_body = first_match.group("body").strip()
+    intro = first_match.group("intro")
+    subject = ""
+    if "：" in first_body:
+        subject = first_body.split("：", 1)[0].strip()
+    elif ":" in first_body:
+        subject = first_body.split(":", 1)[0].strip()
+
+    second_body = second.rstrip("。！？!?；;").strip()
+    if subject:
+        subject_pattern = re.sub(r"\s+", r"\\s*", re.escape(subject))
+        second_body = re.sub(
+            rf"^(?:先|再)?\s*{subject_pattern}\s*[:：]?\s*",
+            lambda match: "先" if match.group(0).strip().startswith("先") else "",
+            second_body,
+        )
+    second_body = re.sub(r"^完成\s*", "", second_body)
+    second_body = re.sub(
+        r"^(?P<first>.+?)后(?:，|,)?\s*(?P<rest>.+)$",
+        lambda match: f"先{match.group('first').strip(' ，,、；;')}，再{match.group('rest').strip(' ，,、；;')}",
+        second_body,
+    )
+    if subject and second_body and not second_body.startswith(subject):
+        merged_body = f"{subject}：{second_body}"
+    else:
+        merged_body = second_body or first_body
+
+    if not merged_body:
+        return sentences
+
+    merged_first = f"{intro}{merged_body}"
+    if merged_first[-1] not in "。！？!?；;":
+        merged_first += "。"
+
+    if len(sentences) >= 3:
+        safety = sentences[2].strip()
+        safety_terminal = safety[-1] if safety and safety[-1] in "。！？!?；;" else ""
+        safety_body = safety[:-1] if safety_terminal else safety
+        if "持续搅拌" in merged_first:
+            safety_body = _strip_spoken_step_reporting_clauses(safety_body)
+            safety_clauses = [
+                clause.strip()
+                for clause in re.split(r"[，,；;]\s*", safety_body)
+                if clause.strip()
+            ]
+            safety_clauses = [
+                clause
+                for clause in safety_clauses
+                if not ("搅拌" in clause and ("持续" in clause or "保持" in clause))
+            ]
+            if safety_clauses:
+                rewritten_safety = "，".join(safety_clauses)
+                if safety_terminal:
+                    rewritten_safety += safety_terminal
+                sentences[2] = rewritten_safety
+
+    return [merged_first] + sentences[2:]
+
+
+def _compact_spoken_step_guidance_text(text: str) -> str:
+    normalized = normalize_spoken_text(text)
+    if not normalized or not _looks_like_step_guidance_text(normalized):
+        return normalized
+
+    sentences = _split_spoken_sentence_chunks(normalized)
+    compacted_sentences = []
+    for sentence in sentences:
+        compacted = _compact_spoken_step_guidance_sentence(sentence)
+        if compacted:
+            compacted_sentences.append(compacted)
+
+    compacted_sentences = _merge_spoken_step_guidance_sentences(compacted_sentences)
+    return "".join(compacted_sentences).strip()
+
+
 def _apply_experiment_ready_guard(conn, text: str) -> str:
     if not text or conn is None:
         return text
-    if _consume_experiment_ready_guard_bypass(conn):
+    if _conn_has_experiment_ready_guard_bypass(conn):
         return text
     if not _conn_is_waiting_for_experiment_ready(conn):
         return text
@@ -1716,6 +2074,7 @@ def prepare_runtime_spoken_text(text):
     filtered = _strip_spoken_meta_guidance_clauses(filtered)
     filtered = _strip_spoken_future_step_clauses(filtered)
     filtered = _strip_spoken_technical_details(filtered)
+    filtered = _compact_spoken_step_guidance_text(filtered)
     filtered = _limit_spoken_sentence_count(filtered, max_sentences=2)
     return normalize_spoken_text(filtered)
 

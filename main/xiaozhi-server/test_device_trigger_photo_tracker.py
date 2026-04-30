@@ -32,6 +32,30 @@ from device_trigger_mcp_server import PhotoPathTracker
 
 
 class PhotoPathTrackerTest(unittest.TestCase):
+    def test_find_latest_ignores_non_image_files(self):
+        with TemporaryDirectory() as vision_dir, TemporaryDirectory() as by_device_dir:
+            tracker = PhotoPathTracker(
+                vision_dir=vision_dir,
+                by_device_dir=by_device_dir,
+                detect_interval_ms=1,
+                enable_mirror=True,
+            )
+            device_id = "94:a9:90:27:3c:84"
+            safe_device = "94_a9_90_27_3c_84"
+            device_dir = Path(by_device_dir) / safe_device
+            device_dir.mkdir(parents=True, exist_ok=True)
+
+            ignored_log = device_dir / "94_a9_90_27_3c_84.log"
+            ignored_log.write_text("not a photo", encoding="utf-8")
+            valid_photo = device_dir / "sample_20260430_100100.png"
+            valid_photo.write_bytes(b"fakepng")
+
+            latest = tracker.find_latest(device_id)
+
+            self.assertIsNotNone(latest)
+            self.assertEqual(str(valid_photo.resolve()), latest["local_path"])
+            self.assertEqual("sample_20260430_100100.png", latest["file_name"])
+
     def test_resolve_photo_after_take_photo_detects_new_shared_photo_and_mirrors_it(self):
         with TemporaryDirectory() as vision_dir, TemporaryDirectory() as by_device_dir:
             tracker = PhotoPathTracker(

@@ -96,6 +96,7 @@ class _FakeConn:
         self.config = {}
         self.tts = None
         self.enriched = False
+        self.cmd_exit = []
 
     def enrich_latest_clean_user_utterance_snapshot(self):
         self.enriched = True
@@ -198,25 +199,53 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("实验报告还没有完整生成成功，请稍后再试。", result)
 
-    def test_conn_runtime_spoken_text_bypasses_ready_guard_once(self):
+    def test_conn_runtime_spoken_text_bypasses_ready_guard_for_same_sentence(self):
         conn = _FakeConn()
         conn.dialogue.put(
-            Message(role="assistant", content="今天我们做这个实验。你准备好开始了吗？")
+            Message(
+                role="assistant",
+                content="今天我们做这个实验。你准备好开始了吗？",
+            )
         )
-        conn._experiment_ready_guard_bypass_count = 1
+        conn.sentence_id = "turn-1"
+        conn._experiment_ready_guard_bypass_sentence_id = "turn-1"
 
-        first = textUtils.prepare_runtime_spoken_text_for_conn(
-            conn,
-            "现在做这一步：完成 1 到 5 号烧杯编号。做好后告诉我。",
-        )
-        second = textUtils.prepare_runtime_spoken_text_for_conn(
-            conn,
-            "现在做这一步：完成 1 到 5 号烧杯编号。做好后告诉我。",
-        )
+        guidance = "现在做这一步：完成 1 到 5 号烧杯编号。做好后告诉我。"
+        first = textUtils.prepare_runtime_spoken_text_for_conn(conn, guidance)
+        second = textUtils.prepare_runtime_spoken_text_for_conn(conn, guidance)
 
         self.assertIn("现在做这一步", first)
-        self.assertEqual(0, getattr(conn, "_experiment_ready_guard_bypass_count", 0))
-        self.assertEqual("你准备好后告诉我准备好了，我再带你开始第一步。", second)
+        self.assertIn("现在做这一步", second)
+        self.assertEqual(
+            "turn-1",
+            getattr(conn, "_experiment_ready_guard_bypass_sentence_id", ""),
+        )
+
+        conn.sentence_id = "turn-2"
+        third = textUtils.prepare_runtime_spoken_text_for_conn(conn, guidance)
+        self.assertEqual(
+            "你准备好后告诉我准备好了，我再带你开始第一步。",
+            third,
+        )
+
+    def test_activate_ready_guard_bypass_binds_pending_turn_to_current_sentence(self):
+        conn = _FakeConn()
+        conn._experiment_ready_guard_bypass_pending_turns = 1
+        conn.sentence_id = "turn-ready-1"
+
+        activated = textUtils.activate_experiment_ready_guard_bypass_for_current_sentence(
+            conn
+        )
+
+        self.assertTrue(activated)
+        self.assertEqual(
+            "turn-ready-1",
+            getattr(conn, "_experiment_ready_guard_bypass_sentence_id", ""),
+        )
+        self.assertEqual(
+            0,
+            getattr(conn, "_experiment_ready_guard_bypass_pending_turns", 0),
+        )
 
     def test_normalize_tts_text_reads_decimals_digit_by_digit(self):
         result = textUtils.normalize_tts_text("加入1.849mL AgNO3。")
@@ -272,6 +301,36 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             "接下来做这一步：按1到5号顺序统一完成H2O2加入。注意加液后轻轻混匀。",
+            result,
+        )
+
+    def test_prepare_runtime_spoken_text_compacts_long_measured_step(self):
+        text = (
+            "接下来做这一步：1号样品：加入溴化钾、纯水并加入硼氢化钠。"
+            "完成1号样品溴化钾和纯水加入（溴化钾零点零零毫升，纯水二点九零毫升）并混匀后，"
+            "快速加入硼氢化钠（二点五零毫升 零点零零五摩尔每升）并保持搅拌，"
+            "记录颜色稳定时间和收尾情况。"
+            "注意继续保持搅拌，避免液体飞溅，硼氢化钠有腐蚀性，注意防护并避免溅出，做好后告诉我。"
+        )
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual(
+            "接下来做这一步：1号样品：先加入溴化钾零点零零毫升和纯水二点九零毫升并混匀，再快速加入硼氢化钠二点五零毫升，持续搅拌。"
+            "避免液体飞溅，硼氢化钠有腐蚀性，注意防护并避免溅出，做好后告诉我。",
+            result,
+        )
+
+    def test_prepare_runtime_spoken_text_keeps_observation_action_while_dropping_reporting_tail(self):
+        text = (
+            "接下来做这一步：2号样品：观察颜色变化。"
+            "静置1到2分钟后观察并拍照，记录颜色变化时间和结果，做好后告诉我。"
+        )
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual(
+            "接下来做这一步：2号样品：先静置1到2分钟，再观察并拍照，做好后告诉我。",
             result,
         )
 
@@ -497,6 +556,185 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(handled)
 
+    async def test_handle_user_intent_stages_ready_guard_bypass_when_fast_path_disabled(self):
+        conn = _FakeConn()
+        conn.intent_type = "function_call"
+        conn.config = {"experiment_fast_path_enabled": False}
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="今天我们做《银纳米粒子实验》。你准备好开始了吗？",
+            )
+        )
+
+        handled = await intentHandler.handle_user_intent(conn, "准备好了")
+
+        self.assertFalse(handled)
+        self.assertEqual(
+            1,
+            getattr(conn, "_experiment_ready_guard_bypass_pending_turns", 0),
+        )
+
+    async def test_handle_user_intent_routes_photo_command_to_direct_handler(self):
+        conn = _FakeConn()
+        conn.intent_type = "function_call"
+
+        async def return_false(*args, **kwargs):
+            return False
+
+        async def handle_direct_photo(*args, **kwargs):
+            return True
+
+        with patch.object(
+            intentHandler,
+            "handle_pending_direct_photo_confirmation",
+            return_false,
+        ):
+            with patch.object(
+                intentHandler,
+                "handle_pending_server_photo_confirmation",
+                return_false,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "handle_direct_photo_navigation_intent",
+                    return_false,
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "handle_direct_photo_intent",
+                        handle_direct_photo,
+                    ):
+                        with patch.object(
+                            intentHandler,
+                            "handle_experiment_control_fast_intent",
+                            return_false,
+                        ):
+                            handled = await intentHandler.handle_user_intent(
+                                conn,
+                                "拍照",
+                            )
+
+        self.assertTrue(handled)
+
+    async def test_handle_user_intent_routes_photo_confirmation_reply_directly(self):
+        conn = _FakeConn()
+        conn.intent_type = "function_call"
+        conn.dialogue.put(Message(role="assistant", content="可以拍照吗？"))
+        conn._server_photo_capture_granted = False
+
+        async def return_false(*args, **kwargs):
+            return False
+
+        async def handle_pending_server(*args, **kwargs):
+            return True
+
+        with patch.object(
+            intentHandler,
+            "handle_pending_direct_photo_confirmation",
+            return_false,
+        ):
+            with patch.object(
+                intentHandler,
+                "handle_pending_server_photo_confirmation",
+                handle_pending_server,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "handle_direct_photo_navigation_intent",
+                    return_false,
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "handle_direct_photo_intent",
+                        return_false,
+                    ):
+                        handled = await intentHandler.handle_user_intent(conn, "可以拍照")
+
+        self.assertTrue(handled)
+        self.assertTrue(getattr(conn, "_server_photo_capture_granted", False))
+
+    async def test_server_photo_confirmation_direct_still_works_when_experiment_fast_path_is_disabled(self):
+        conn = _FakeConn()
+        conn.device_id = "94:a9:90:27:3c:84"
+        conn.config = {
+            "experiment_fast_path_enabled": False,
+            "device_mcp_shortcuts": {
+                "enable_server_photo_confirmation_direct": True,
+                "photo_confirm_delay_seconds": 0,
+            },
+        }
+
+        sent = []
+        executed = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        async def fake_wait_before_capture(_conn, source):
+            executed.append(("delay", source))
+
+        async def fake_execute(_conn, arguments):
+            executed.append(("execute", dict(arguments)))
+            return True
+
+        with patch.object(
+            intentHandler,
+            "_assistant_is_waiting_for_photo_permission_fixed",
+            return_value=True,
+        ):
+            with patch.object(
+                intentHandler,
+                "_is_affirmative_short_reply_fixed",
+                return_value=True,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "send_stt_message",
+                    fake_send_stt_message,
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "_maybe_wait_before_photo_capture",
+                        fake_wait_before_capture,
+                    ):
+                        with patch.object(
+                            intentHandler,
+                            "_build_pending_server_photo_request_fixed",
+                            return_value={
+                                "device_id": conn.device_id,
+                                "question": "请拍摄一号样品当前状态的照片。",
+                                "photo_name": "一号样品",
+                            },
+                        ):
+                            with patch.object(
+                                intentHandler,
+                                "_execute_server_photo_intent",
+                                fake_execute,
+                            ):
+                                handled = await intentHandler.handle_pending_server_photo_confirmation(
+                                    conn,
+                                    "可以拍照",
+                                    "可以拍照",
+                                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["可以拍照"], sent)
+        self.assertEqual(
+            [
+                ("delay", "server_photo_confirmation"),
+                (
+                    "execute",
+                    {
+                        "device_id": conn.device_id,
+                        "question": "请拍摄一号样品当前状态的照片。",
+                        "photo_name": "一号样品",
+                    },
+                ),
+            ],
+            executed,
+        )
+
     async def test_repeat_fast_path_uses_cached_step_context(self):
         conn = _FakeConn()
         conn.experiment_current_step = {
@@ -671,7 +909,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["准备好了"], sent)
         self.assertEqual(1, len(spoken))
         self.assertIn("现在做这一步", spoken[0])
-        self.assertEqual(1, getattr(conn, "_experiment_ready_guard_bypass_count", 0))
+        self.assertEqual(
+            conn.sentence_id,
+            getattr(conn, "_experiment_ready_guard_bypass_sentence_id", ""),
+        )
 
     async def test_start_first_step_after_start_prompt_returns_current_step(self):
         conn = _FakeConn()
@@ -721,7 +962,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(spoken))
         self.assertIn("现在做这一步", spoken[0])
         self.assertIn("烧杯编号和磁转子放置", spoken[0])
-        self.assertEqual(1, getattr(conn, "_experiment_ready_guard_bypass_count", 0))
+        self.assertEqual(
+            conn.sentence_id,
+            getattr(conn, "_experiment_ready_guard_bypass_sentence_id", ""),
+        )
 
     async def test_continue_before_ready_does_not_broadcast_step(self):
         conn = _FakeConn()

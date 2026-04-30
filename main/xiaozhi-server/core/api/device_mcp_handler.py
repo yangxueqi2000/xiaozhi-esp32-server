@@ -4,6 +4,7 @@ import os
 import subprocess
 import uuid
 import asyncio
+import time
 from aiohttp import web
 
 from core.api.base_handler import BaseHandler
@@ -22,6 +23,225 @@ class DeviceMCPHandler(BaseHandler):
         os.makedirs(self.preview_dir, exist_ok=True)
         self._mcp_refresh_lock = asyncio.Lock()
 
+    def _sanitize_device_for_path(self, device_id: str) -> str:
+        value = str(device_id or "").strip()
+        if not value:
+            return "unknown"
+        chars = []
+        for ch in value:
+            if ch.isalnum() or ch in ("-", "_", "."):
+                chars.append(ch)
+                continue
+            if ch == ":":
+                chars.append("_")
+                continue
+            chars.append("_")
+        safe = "".join(chars).strip("._-")
+        return safe or "unknown"
+
+    def _derive_experiment_data_root(self) -> str:
+        cfg = self.config or {}
+        llm_map = cfg.get("LLM") or {}
+        selected = str((cfg.get("selected_module") or {}).get("LLM", "")).strip()
+        candidates = []
+
+        if isinstance(llm_map, dict):
+            if selected:
+                selected_cfg = llm_map.get(selected) or {}
+                if isinstance(selected_cfg, dict):
+                    candidates.append(
+                        (
+                            str(selected_cfg.get("workspace", "")).strip(),
+                            str(selected_cfg.get("yaml_path", "")).strip(),
+                        )
+                    )
+            for llm_cfg in llm_map.values():
+                if not isinstance(llm_cfg, dict):
+                    continue
+                candidates.append(
+                    (
+                        str(llm_cfg.get("workspace", "")).strip(),
+                        str(llm_cfg.get("yaml_path", "")).strip(),
+                    )
+                )
+
+        prompt_template = str(cfg.get("prompt_template", "")).strip()
+        if prompt_template:
+            candidates.append(("", prompt_template))
+
+        server_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+
+        for workspace, path_text in candidates:
+            if not path_text:
+                continue
+            if os.path.isabs(path_text):
+                abs_path = os.path.abspath(path_text)
+            else:
+                base = workspace if workspace else server_root
+                abs_path = os.path.abspath(os.path.join(base, path_text))
+            cfg_dir = os.path.dirname(abs_path)
+            if os.path.basename(cfg_dir).lower() == "configs":
+                exp_root = os.path.dirname(cfg_dir)
+            else:
+                exp_root = cfg_dir
+            if exp_root:
+                return os.path.abspath(os.path.join(exp_root, "data"))
+        return ""
+
+    def _resolve_take_photo_recovery_timeout_seconds(self) -> float:
+        shortcut_cfg = self.config.get("device_mcp_shortcuts", {}) or {}
+        raw_value = shortcut_cfg.get("server_photo_recovery_window_seconds", 8.0)
+        try:
+            return max(0.0, float(raw_value))
+        except (TypeError, ValueError):
+            return 8.0
+
+    def _resolve_take_photo_timeout_seconds(self, provided_timeout=None) -> int:
+        shortcut_cfg = self.config.get("device_mcp_shortcuts", {}) or {}
+
+        def _coerce_positive_int(value, fallback: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                parsed = int(fallback)
+            return parsed if parsed > 0 else int(fallback)
+
+        configured_default = _coerce_positive_int(
+            shortcut_cfg.get("server_photo_timeout", shortcut_cfg.get("photo_timeout", 20)),
+            20,
+        )
+        return _coerce_positive_int(provided_timeout, configured_default)
+
+    def _list_saved_device_photo_items(self, device_id: str) -> list[dict]:
+        data_root = self._derive_experiment_data_root()
+        if not data_root:
+            return []
+
+        safe_device = self._sanitize_device_for_path(device_id)
+        device_dir = os.path.join(data_root, safe_device)
+        if not os.path.isdir(device_dir):
+            return []
+
+        allowed_exts = {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".webp",
+        }
+        items = []
+        try:
+            with os.scandir(device_dir) as entries:
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext not in allowed_exts:
+                        continue
+                    try:
+                        stat = entry.stat()
+                    except FileNotFoundError:
+                        continue
+                    items.append(
+                        {
+                            "device_id": str(device_id or "").strip(),
+                            "local_path": os.path.abspath(entry.path),
+                            "file_name": entry.name,
+                            "mtime": float(stat.st_mtime),
+                            "size": int(stat.st_size),
+                        }
+                    )
+        except FileNotFoundError:
+            return []
+        return items
+
+    def _find_latest_saved_photo(self, device_id: str) -> dict:
+        items = self._list_saved_device_photo_items(device_id)
+        if not items:
+            return {}
+        latest = max(items, key=lambda item: float(item.get("mtime", 0.0)))
+        latest["found"] = True
+        return latest
+
+    def _saved_photo_matches_request(
+        self,
+        file_name: str,
+        requested_photo_name: str,
+    ) -> bool:
+        target = str(requested_photo_name or "").strip()
+        candidate = str(file_name or "").strip()
+        if not target or not candidate:
+            return False
+        return os.path.splitext(candidate)[0] == target
+
+    def _is_new_saved_photo(
+        self,
+        latest_photo: dict,
+        baseline_photo: dict,
+        capture_started_at: float,
+        requested_photo_name: str = "",
+    ) -> bool:
+        if not isinstance(latest_photo, dict) or not latest_photo.get("found"):
+            return False
+
+        latest_path = str(latest_photo.get("local_path", "") or "").strip()
+        latest_file_name = str(latest_photo.get("file_name", "") or "").strip()
+        baseline_path = str((baseline_photo or {}).get("local_path", "") or "").strip()
+
+        try:
+            latest_mtime = float(latest_photo.get("mtime", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            latest_mtime = 0.0
+        try:
+            baseline_mtime = float((baseline_photo or {}).get("mtime", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            baseline_mtime = 0.0
+
+        if self._saved_photo_matches_request(latest_file_name, requested_photo_name):
+            if not baseline_path:
+                return latest_mtime >= capture_started_at - 2.0 if latest_mtime > 0 else True
+            if latest_path != baseline_path:
+                return True
+            return latest_mtime > baseline_mtime + 1e-6
+
+        if latest_path and baseline_path:
+            if latest_path != baseline_path:
+                return True
+            return latest_mtime > baseline_mtime + 1e-6
+        if latest_path and not baseline_path:
+            return latest_mtime >= capture_started_at - 2.0 if latest_mtime > 0 else False
+        return latest_mtime > baseline_mtime + 1e-6
+
+    async def _recover_saved_photo_after_timeout(
+        self,
+        *,
+        device_id: str,
+        baseline_photo: dict,
+        requested_photo_name: str,
+        capture_started_at: float,
+        max_wait_seconds: float,
+    ) -> dict | None:
+        safe_wait = max(0.0, float(max_wait_seconds or 0.0))
+        deadline = time.time() + safe_wait
+        while True:
+            latest_photo = self._find_latest_saved_photo(device_id)
+            if self._is_new_saved_photo(
+                latest_photo,
+                baseline_photo,
+                capture_started_at,
+                requested_photo_name=requested_photo_name,
+            ):
+                return latest_photo
+            if time.time() >= deadline:
+                break
+            await asyncio.sleep(min(0.5, max(0.0, deadline - time.time())))
+        return None
+
     def _json_response(self, body: dict, status: int = 200):
         return web.Response(
             text=json.dumps(body, ensure_ascii=False, separators=(",", ":")),
@@ -33,6 +253,23 @@ class DeviceMCPHandler(BaseHandler):
         session_id = str(body.get("session_id", "")).strip()
         device_id = str(body.get("device_id", "")).strip()
         return session_id, device_id
+
+    @staticmethod
+    def _is_websocket_alive(conn) -> bool:
+        ws = getattr(conn, "websocket", None)
+        if ws is None:
+            return False
+        if hasattr(ws, "state"):
+            try:
+                return ws.state.name != "CLOSED"
+            except Exception:
+                return False
+        if hasattr(ws, "closed"):
+            try:
+                return not ws.closed
+            except Exception:
+                return False
+        return True
 
     async def _resolve_target_conn(self, session_id: str, device_id: str):
         if not session_id and not device_id:
@@ -49,6 +286,15 @@ class DeviceMCPHandler(BaseHandler):
             return None, None, self._json_response(
                 {"success": False, "message": "connection not found"},
                 status=404,
+            )
+
+        if not self._is_websocket_alive(conn):
+            return None, None, self._json_response(
+                {
+                    "success": False,
+                    "message": "device websocket is offline and waiting for reconnect",
+                },
+                status=409,
             )
 
         mcp_client = getattr(conn, "mcp_client", None)
@@ -217,6 +463,10 @@ class DeviceMCPHandler(BaseHandler):
 
     async def handle_post(self, request):
         response = None
+        capture_device_id = ""
+        photo_name = ""
+        baseline_photo = {}
+        capture_started_at = 0.0
         try:
             if not self.ws_server:
                 response = self._json_response(
@@ -242,9 +492,7 @@ class DeviceMCPHandler(BaseHandler):
                 body.get("tool_name", "self.camera.take_photo")
             ).strip()
             tool_name = sanitize_tool_name(tool_name_raw)
-            timeout = int(body.get("timeout", 90))
-            if timeout <= 0:
-                timeout = 90
+            timeout = self._resolve_take_photo_timeout_seconds(body.get("timeout"))
 
             conn, mcp_client, error_resp = await self._resolve_target_conn(
                 session_id, device_id
@@ -253,9 +501,14 @@ class DeviceMCPHandler(BaseHandler):
                 response = error_resp
                 return response
 
+            capture_device_id = str(conn.device_id or device_id or "").strip()
+            baseline_photo = self._find_latest_saved_photo(capture_device_id)
+            capture_started_at = time.time()
+
+            # The device-side camera tool only declares `question`. Keep any
+            # save/mirroring metadata on the server side instead of passing
+            # undeclared arguments through the MCP tool call.
             tool_args = {"question": question}
-            if photo_name:
-                tool_args["photo_name"] = photo_name
 
             try:
                 result = await call_mcp_tool(
@@ -284,6 +537,7 @@ class DeviceMCPHandler(BaseHandler):
                 else:
                     raise
 
+            saved_photo = self._find_latest_saved_photo(capture_device_id)
             response = self._json_response(
                 {
                     "success": True,
@@ -293,6 +547,10 @@ class DeviceMCPHandler(BaseHandler):
                     "device_id": conn.device_id,
                     "requested_photo_name": photo_name,
                     "result": result,
+                    "saved_photo_path": str(
+                        saved_photo.get("local_path", "") or ""
+                    ).strip(),
+                    "photo_meta": saved_photo,
                 }
             )
         except ValueError as e:
@@ -301,16 +559,68 @@ class DeviceMCPHandler(BaseHandler):
                 status=400,
             )
         except TimeoutError:
-            response = self._json_response(
-                {"success": False, "message": "tool call timeout"},
-                status=504,
+            recovered_photo = await self._recover_saved_photo_after_timeout(
+                device_id=capture_device_id,
+                baseline_photo=baseline_photo,
+                requested_photo_name=photo_name,
+                capture_started_at=capture_started_at,
+                max_wait_seconds=self._resolve_take_photo_recovery_timeout_seconds(),
             )
+            if recovered_photo:
+                self.logger.bind(tag=TAG).info(
+                    "take_photo recovered from saved artifact after timeout: "
+                    f"device_id={capture_device_id}, file_name={recovered_photo.get('file_name', '')}"
+                )
+                response = self._json_response(
+                    {
+                        "success": True,
+                        "message": "photo recovered after timeout",
+                        "device_id": capture_device_id,
+                        "requested_photo_name": photo_name,
+                        "saved_photo_path": str(
+                            recovered_photo.get("local_path", "") or ""
+                        ).strip(),
+                        "photo_meta": recovered_photo,
+                        "recovered_after_timeout": True,
+                    }
+                )
+            else:
+                response = self._json_response(
+                    {"success": False, "message": "tool call timeout"},
+                    status=504,
+                )
         except Exception as e:
-            self.logger.bind(tag=TAG).error(f"take_photo failed: {e}")
-            response = self._json_response(
-                {"success": False, "message": str(e)},
-                status=500,
+            recovered_photo = await self._recover_saved_photo_after_timeout(
+                device_id=capture_device_id,
+                baseline_photo=baseline_photo,
+                requested_photo_name=photo_name,
+                capture_started_at=capture_started_at,
+                max_wait_seconds=self._resolve_take_photo_recovery_timeout_seconds(),
             )
+            if recovered_photo:
+                self.logger.bind(tag=TAG).warning(
+                    "take_photo recovered from saved artifact after error: "
+                    f"device_id={capture_device_id}, file_name={recovered_photo.get('file_name', '')}, error={e}"
+                )
+                response = self._json_response(
+                    {
+                        "success": True,
+                        "message": "photo recovered after tool error",
+                        "device_id": capture_device_id,
+                        "requested_photo_name": photo_name,
+                        "saved_photo_path": str(
+                            recovered_photo.get("local_path", "") or ""
+                        ).strip(),
+                        "photo_meta": recovered_photo,
+                        "recovered_after_error": True,
+                    }
+                )
+            else:
+                self.logger.bind(tag=TAG).error(f"take_photo failed: {e}")
+                response = self._json_response(
+                    {"success": False, "message": str(e)},
+                    status=500,
+                )
         finally:
             if response:
                 self._add_cors_headers(response)

@@ -5,10 +5,12 @@ import json
 import copy
 import wave
 import socket
+import ipaddress
 import asyncio
 import requests
 import subprocess
 import numpy as np
+import psutil
 # Ensure Opus DLL can be found on Windows (conda env Library\\bin).
 if sys.platform == "win32":
     # Prefer the active interpreter prefix; CONDA_PREFIX can point to base.
@@ -33,16 +35,107 @@ from typing import Callable, Any
 TAG = __name__
 
 
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+_BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+_VIRTUAL_IFACE_TOKENS = (
+    "tailscale",
+    "vethernet",
+    "hyper-v",
+    "docker",
+    "wsl",
+    "vmware",
+    "virtualbox",
+    "loopback",
+    "npcap",
+    "hamachi",
+    "zerotier",
+    "meta",
+)
+_PREFERRED_IFACE_TOKENS = (
+    "wlan",
+    "wi-fi",
+    "wifi",
+    "ethernet",
+    "lan",
+)
+
+
+def _parse_ipv4_address(value):
+    try:
+        ip = ipaddress.ip_address(str(value or "").strip())
+    except ValueError:
+        return None
+    return ip if ip.version == 4 else None
+
+
+def _score_ipv4_candidate(interface_name: str, address: str, is_up: bool) -> int:
+    ip = _parse_ipv4_address(address)
+    if ip is None:
+        return -10_000
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        return -10_000
+    if ip in _BENCHMARK_NETWORK:
+        return -10_000
+
+    score = 0
+    if is_up:
+        score += 1_000
+
+    if any(ip in network for network in _RFC1918_NETWORKS):
+        score += 500
+    elif ip.is_private:
+        score += 250
+    else:
+        score += 100
+
+    lowered = str(interface_name or "").strip().lower()
+    if any(token in lowered for token in _PREFERRED_IFACE_TOKENS):
+        score += 100
+    if any(token in lowered for token in _VIRTUAL_IFACE_TOKENS):
+        score -= 400
+
+    return score
+
+
 def get_local_ip():
+    best_candidate = None
+    best_score = -10_000
+
+    try:
+        iface_addrs = psutil.net_if_addrs()
+        iface_stats = psutil.net_if_stats()
+        for iface_name, entries in iface_addrs.items():
+            is_up = bool(getattr(iface_stats.get(iface_name), "isup", False))
+            for entry in entries:
+                if getattr(entry, "family", None) != socket.AF_INET:
+                    continue
+                address = str(getattr(entry, "address", "") or "").strip()
+                score = _score_ipv4_candidate(iface_name, address, is_up)
+                if score > best_score:
+                    best_candidate = address
+                    best_score = score
+    except Exception:
+        best_candidate = None
+        best_score = -10_000
+
+    if best_candidate:
+        return best_candidate
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # Connect to Google's DNS servers
         s.connect(("8.8.8.8", 80))
         local_ip = s.getsockname()[0]
         s.close()
-        return local_ip
+        if _score_ipv4_candidate("socket_fallback", local_ip, True) > -10_000:
+            return local_ip
     except Exception as e:
-        return "127.0.0.1"
+        pass
+    return "127.0.0.1"
 
 
 def is_private_ip(ip_addr):
