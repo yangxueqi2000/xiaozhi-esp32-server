@@ -658,6 +658,22 @@ _CHEMICAL_FORMULA_TOKEN_RE = re.compile(
 )
 
 
+_ELEMENT_PARENTHESES_ALIAS_RE = re.compile(
+    r"\b([A-Z][a-z]?)\s*[（(]\s*([\u4e00-\u9fff]{1,4})\s*[)）]"
+)
+_ELEMENT_PREFIXED_NANOSTRUCTURE_RE = re.compile(
+    r"\b([A-Z][a-z]?)\s*(纳米(?:粒子|颗粒|棒|线|片|花|球|立方体)|量子点)\b"
+)
+_AROMATIC_POSITION_PREFIX_MAP = {"2": "邻", "3": "间", "4": "对"}
+_AROMATIC_POSITION_RE = re.compile(
+    r"(?<![\dA-Za-z])([234])\s*[-－—–]\s*"
+    r"([\u4e00-\u9fff]{1,24}"
+    r"(?:苯酚|苯胺|苯甲酸|甲苯|甲酚|苯乙烯|苯腈|吡啶|联苯|萘|苯|酚|胺|酸|醛|酮|酯|腈|醚)"
+    r"(?:[\u4e00-\u9fff]{0,4})?)"
+    r"(?=(?:的|在|与|及|和|,|，|。|；|;|\s|$))"
+)
+
+
 def _count_to_chinese(count: int) -> str:
     mapping = {
         0: "零",
@@ -788,6 +804,32 @@ def _replace_units_for_tts(text: str) -> str:
     return result
 
 
+def _replace_parenthesized_element_aliases_for_tts(text: str) -> str:
+    def _repl(match: re.Match) -> str:
+        symbol = match.group(1)
+        alias = match.group(2).strip()
+        element_name = _CHEMICAL_ELEMENT_NAMES.get(symbol)
+        if not element_name:
+            return match.group(0)
+        if alias == element_name or alias in element_name or element_name in alias:
+            return element_name
+        return match.group(0)
+
+    return _ELEMENT_PARENTHESES_ALIAS_RE.sub(_repl, text)
+
+
+def _replace_element_prefixed_nanostructure_terms_for_tts(text: str) -> str:
+    def _repl(match: re.Match) -> str:
+        symbol = match.group(1)
+        structure = match.group(2)
+        element_name = _CHEMICAL_ELEMENT_NAMES.get(symbol)
+        if not element_name:
+            return match.group(0)
+        return f"{element_name}{structure}"
+
+    return _ELEMENT_PREFIXED_NANOSTRUCTURE_RE.sub(_repl, text)
+
+
 def _replace_generic_nanostructure_aliases_for_tts(text: str) -> str:
     patterns = (
         (re.compile(r"\b([A-Z][a-z]?)NPs?\b"), "纳米粒子"),
@@ -808,6 +850,16 @@ def _replace_generic_nanostructure_aliases_for_tts(text: str) -> str:
 
         result = pattern.sub(_repl, result)
     return result
+
+
+def _replace_aromatic_position_for_tts(text: str) -> str:
+    def _repl(match: re.Match) -> str:
+        prefix = _AROMATIC_POSITION_PREFIX_MAP.get(match.group(1))
+        if not prefix:
+            return match.group(0)
+        return f"{prefix}{match.group(2)}"
+
+    return _AROMATIC_POSITION_RE.sub(_repl, text)
 
 
 def _replace_formula_aliases_for_tts(text: str, custom_aliases=None) -> str:
@@ -1010,11 +1062,14 @@ def normalize_tts_text(text, custom_aliases=None):
 
     normalized = _replace_range_for_tts(normalized)
     normalized = _replace_units_for_tts(normalized)
+    normalized = _replace_parenthesized_element_aliases_for_tts(normalized)
+    normalized = _replace_element_prefixed_nanostructure_terms_for_tts(normalized)
     normalized = _replace_generic_nanostructure_aliases_for_tts(normalized)
     normalized = _replace_formula_aliases_for_tts(
         normalized, custom_aliases=custom_aliases
     )
     normalized = _replace_generic_formulae_for_tts(normalized)
+    normalized = _replace_aromatic_position_for_tts(normalized)
     normalized = _replace_decimal_numbers_for_tts(normalized)
     normalized = normalized.replace("×", "乘")
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -1162,6 +1217,77 @@ def _replace_decimal_numbers_for_tts(text: str) -> str:
 def _split_spoken_sentence_chunks(text: str):
     chunks = re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?", str(text or ""))
     return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+
+def _is_spoken_meta_guidance_clause(text: str) -> bool:
+    clause = normalize_spoken_text(text).strip(" ，,、；;。！？!?")
+    if not clause:
+        return False
+
+    scope_prefixes = (
+        "只完成",
+        "只讲",
+        "只说",
+        "只推进",
+        "只按",
+        "只需要完成",
+        "只需要做",
+    )
+    scope_topics = ("确认", "共同试剂", "后续", "下一步", "这一步", "当前步骤", "本步")
+    if clause.startswith(scope_prefixes) and any(token in clause for token in scope_topics):
+        return True
+
+    negative_prefixes = ("不要", "也不要", "别", "不用", "不需要")
+    meta_verbs = ("重复", "讲", "说", "提", "展开", "预告", "复述", "补充", "介绍")
+    meta_topics = (
+        "共同试剂",
+        "后续",
+        "后续加液",
+        "下一步",
+        "后面的步骤",
+        "背景",
+        "原理",
+        "记录字段",
+        "字段",
+        "流程总览",
+    )
+    if clause.startswith(negative_prefixes):
+        if any(token in clause for token in meta_verbs) and any(
+            token in clause for token in meta_topics
+        ):
+            return True
+
+    explicit_meta_clauses = (
+        "不要重复共同试剂",
+        "不需要重复共同试剂",
+        "也不要讲后续",
+        "不要讲后续",
+        "不要说后续",
+        "不需要讲后续",
+        "不要预告下一步",
+    )
+    return any(token in clause for token in explicit_meta_clauses)
+
+
+def _strip_spoken_meta_guidance_clauses(text: str) -> str:
+    cleaned_sentences = []
+    for sentence in _split_spoken_sentence_chunks(text):
+        stripped = sentence.strip()
+        terminal = stripped[-1] if stripped and stripped[-1] in "。！？!?；;" else ""
+        body = stripped[:-1] if terminal else stripped
+        clauses = [part.strip() for part in re.split(r"[，,；;]\s*", body) if part.strip()]
+        kept_clauses = [
+            clause for clause in clauses if not _is_spoken_meta_guidance_clause(clause)
+        ]
+        if not kept_clauses:
+            continue
+        rebuilt = "，".join(kept_clauses).strip(" ，,、；;")
+        if not rebuilt:
+            continue
+        if terminal:
+            rebuilt += terminal
+        cleaned_sentences.append(rebuilt)
+    return "".join(cleaned_sentences).strip()
 
 
 def _strip_spoken_technical_details(text: str) -> str:
@@ -1469,6 +1595,7 @@ def prepare_runtime_spoken_text(text):
         return ""
 
     filtered = filter_spoken_backstage_text(normalized)
+    filtered = _strip_spoken_meta_guidance_clauses(filtered)
     filtered = _strip_spoken_technical_details(filtered)
     filtered = _limit_spoken_sentence_count(filtered, max_sentences=2)
     return normalize_spoken_text(filtered)

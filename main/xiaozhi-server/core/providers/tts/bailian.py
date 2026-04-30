@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import audioop
 import io
 import os
 import queue
@@ -56,6 +57,7 @@ class TTSProvider(TTSProviderBase):
         self.language_type = str(
             config.get("language_type", DEFAULT_LANGUAGE_TYPE) or DEFAULT_LANGUAGE_TYPE
         ).strip()
+        self.speech_rate = self._parse_speech_rate(config.get("speech_rate", 1.0))
         self.timeout = float(config.get("timeout", 60) or 60)
         self.max_retries = max(1, int(config.get("max_retries", 3) or 3))
         self.retry_backoff_seconds = float(
@@ -79,6 +81,39 @@ class TTSProvider(TTSProviderBase):
 
         dashscope.api_key = self.api_key
         dashscope.base_http_api_url = self.base_url
+
+    @staticmethod
+    def _parse_speech_rate(value):
+        try:
+            parsed = float(value or 1.0)
+        except (TypeError, ValueError):
+            parsed = 1.0
+        return min(max(parsed, 0.85), 1.35)
+
+    def _prepare_spoken_text(self, text: str) -> str:
+        clean_text = MarkdownCleaner.clean_markdown(text)
+        if getattr(self, "conn", None) is not None:
+            clean_text = textUtils.prepare_runtime_spoken_text_for_conn(
+                self.conn, clean_text
+            )
+        else:
+            clean_text = textUtils.prepare_runtime_spoken_text(clean_text)
+        return self._normalize_text_for_tts(clean_text)
+
+    def _apply_speech_rate_to_pcm(self, pcm_bytes: bytes, state=None):
+        if not pcm_bytes or abs(self.speech_rate - 1.0) < 1e-3:
+            return pcm_bytes, state
+
+        source_rate = max(1, int(round(self.stream_sample_rate * self.speech_rate)))
+        converted, next_state = audioop.ratecv(
+            pcm_bytes,
+            2,
+            1,
+            source_rate,
+            self.stream_sample_rate,
+            state,
+        )
+        return converted, next_state
 
     def _read_env_value(self, env_name):
         value = os.getenv(env_name)
@@ -149,6 +184,10 @@ class TTSProvider(TTSProviderBase):
                     self.processed_chars = 0
                     self.tts_text_buff = []
                     self.is_first_sentence = True
+                    # Each new TTS turn must re-enter the frontend/device speaking
+                    # state, otherwise later replies may keep the client in
+                    # listening mode and the synthesized audio will not play.
+                    self.tts_audio_first_sentence = True
                     self.before_stop_play_files.clear()
                     self._current_audio_sentence_id = message.sentence_id
                 elif ContentType.TEXT == message.content_type:
@@ -188,9 +227,7 @@ class TTSProvider(TTSProviderBase):
         self._process_before_stop_play_files()
 
     def to_tts_single_stream(self, text, is_last=False):
-        clean_text = MarkdownCleaner.clean_markdown(text)
-        clean_text = textUtils.filter_spoken_backstage_text(clean_text)
-        clean_text = self._normalize_text_for_tts(clean_text)
+        clean_text = self._prepare_spoken_text(text)
         if not clean_text:
             if is_last:
                 self._process_before_stop_play_files()
@@ -237,6 +274,7 @@ class TTSProvider(TTSProviderBase):
         self.opus_encoder.reset_state()
         sent_first_packet = False
         saw_audio = False
+        rate_state = None
 
         for pcm_chunk in self._iter_pcm_chunks(clean_text):
             if self.conn.client_abort:
@@ -244,6 +282,11 @@ class TTSProvider(TTSProviderBase):
             if not sent_first_packet:
                 self._put_audio_queue(SentenceType.FIRST, [], clean_text)
                 sent_first_packet = True
+            if not pcm_chunk:
+                continue
+            pcm_chunk, rate_state = self._apply_speech_rate_to_pcm(
+                pcm_chunk, rate_state
+            )
             if not pcm_chunk:
                 continue
             saw_audio = True
@@ -275,6 +318,7 @@ class TTSProvider(TTSProviderBase):
             raise RuntimeError("Bailian TTS returned no audio data")
 
         pcm_bytes = b"".join(pcm_chunks)
+        pcm_bytes, _ = self._apply_speech_rate_to_pcm(pcm_bytes, None)
         if output_file:
             output_path = Path(output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -337,9 +381,7 @@ class TTSProvider(TTSProviderBase):
         return buffer.getvalue()
 
     def to_tts(self, text):
-        clean_text = MarkdownCleaner.clean_markdown(text)
-        clean_text = textUtils.filter_spoken_backstage_text(clean_text)
-        clean_text = self._normalize_text_for_tts(clean_text)
+        clean_text = self._prepare_spoken_text(text)
         if not clean_text:
             return []
 

@@ -172,6 +172,32 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("一点八四九毫升", result)
         self.assertIn("硝酸银", result)
 
+    def test_normalize_tts_text_supports_generic_chemistry_pronunciation(self):
+        result = textUtils.normalize_tts_text(
+            "Ag（银）纳米粒子的制备及其催化还原4-硝基苯酚的反应动力学探究"
+        )
+
+        self.assertEqual(
+            "银纳米粒子的制备及其催化还原对硝基苯酚的反应动力学探究",
+            result,
+        )
+
+    def test_prepare_runtime_spoken_text_strips_meta_scope_clauses(self):
+        text = (
+            "接下来做这一步：1到5：同时启动搅拌并混匀。"
+            "只完成1到5的搅拌统一启动和混匀确认，不要重复共同试剂，也不要讲后续加液，"
+            "注意启动搅拌前确认所有烧杯放置平稳。"
+            "注意转速不要过高，避免液体飞溅，做好后告诉我。"
+        )
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual(
+            "接下来做这一步：1到5：同时启动搅拌并混匀。"
+            "注意启动搅拌前确认所有烧杯放置平稳，注意转速不要过高，避免液体飞溅，做好后告诉我。",
+            result,
+        )
+
     def test_repeat_reply_is_direct_and_requests_completion(self):
         reply = intentHandler._compose_experiment_step_reply(
             {
