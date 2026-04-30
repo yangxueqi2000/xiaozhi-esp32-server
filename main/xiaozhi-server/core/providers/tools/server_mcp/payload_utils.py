@@ -13,6 +13,10 @@ _ARTIFACT_VALIDATION_SPECS = {
         "bool_fields": ("pdf_generated",),
         "directory_argument_fields": ("output_path",),
     },
+    "xiaozhi_take_photo": {
+        "file_fields": ("mirrored_path",),
+        "directory_argument_fields": (),
+    },
     "uvvis_scan_result": {
         "file_fields": ("output_csv", "absorbance_output_csv"),
         "directory_argument_fields": (),

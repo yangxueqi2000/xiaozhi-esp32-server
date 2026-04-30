@@ -13,14 +13,18 @@ AUDIO_FRAME_DURATION = 60
 PRE_BUFFER_COUNT = 5
 
 
-def _resolve_tts_stop_buffer_ms(conn, frame_duration_ms):
-    default_extra_ms = max((PRE_BUFFER_COUNT + 2) * frame_duration_ms, 360)
+def _resolve_tts_stop_protocol_floor_ms(frame_duration_ms):
+    return max((PRE_BUFFER_COUNT + 2) * frame_duration_ms, 360)
 
-    raw_extra_ms = conn.config.get("tts_stop_extra_buffer_ms", default_extra_ms)
+
+def _resolve_tts_stop_buffer_ms(conn, frame_duration_ms):
+    protocol_floor_ms = _resolve_tts_stop_protocol_floor_ms(frame_duration_ms)
+
+    raw_extra_ms = conn.config.get("tts_stop_extra_buffer_ms", protocol_floor_ms)
     try:
         requested_extra_ms = max(0, int(raw_extra_ms))
     except (TypeError, ValueError):
-        requested_extra_ms = default_extra_ms
+        requested_extra_ms = protocol_floor_ms
 
     raw_min_buffer_ms = conn.config.get("tts_stop_min_buffer_ms", 240)
     try:
@@ -28,8 +32,8 @@ def _resolve_tts_stop_buffer_ms(conn, frame_duration_ms):
     except (TypeError, ValueError):
         min_buffer_ms = 240
 
-    effective_extra_ms = max(requested_extra_ms, min_buffer_ms)
-    return requested_extra_ms, min_buffer_ms, effective_extra_ms
+    effective_extra_ms = max(requested_extra_ms, min_buffer_ms, protocol_floor_ms)
+    return requested_extra_ms, min_buffer_ms, protocol_floor_ms, effective_extra_ms
 
 
 def _get_open_websocket(conn):
@@ -73,16 +77,12 @@ def _queue_has_pending_followup_tts(conn, sentence_id=None):
     if not tts:
         return False
 
-    current_id = str(sentence_id or "").strip()
-
     try:
         text_queue = getattr(tts, "tts_text_queue", None)
         if text_queue is not None:
             with text_queue.mutex:
-                for item in list(text_queue.queue):
-                    queued_id = str(getattr(item, "sentence_id", "") or "").strip()
-                    if not queued_id or not current_id or queued_id != current_id:
-                        return True
+                if len(text_queue.queue) > 0:
+                    return True
     except Exception:
         return False
 
@@ -90,14 +90,8 @@ def _queue_has_pending_followup_tts(conn, sentence_id=None):
         audio_queue = getattr(tts, "tts_audio_queue", None)
         if audio_queue is not None:
             with audio_queue.mutex:
-                for item in list(audio_queue.queue):
-                    if not isinstance(item, tuple):
-                        return True
-                    queued_id = ""
-                    if len(item) >= 4:
-                        queued_id = str(item[3] or "").strip()
-                    if not queued_id or not current_id or queued_id != current_id:
-                        return True
+                if len(audio_queue.queue) > 0:
+                    return True
     except Exception:
         return False
 
@@ -119,7 +113,11 @@ async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
             )
             conn.clearSpeakStatus()
         if force_independent_cycle or not conn.client_is_speaking:
-            await send_tts_message(conn, "start", None)
+            # Some clients only refresh their on-screen subtitle region on the
+            # initial speaking transition, so include the first sentence text
+            # there as a compatibility fallback in addition to sentence_start.
+            start_text = text if sentenceType == SentenceType.FIRST else None
+            await send_tts_message(conn, "start", start_text)
             conn.client_is_speaking = True
             conn.logger.bind(tag=TAG).info(
                 "tts speaking state entered: "
@@ -196,7 +194,7 @@ async def _wait_for_audio_completion(conn):
         scheduled_audio_ms = packet_count * frame_duration_ms
         remaining_ms = max(scheduled_audio_ms - elapsed_ms, 0)
 
-    requested_extra_ms, min_buffer_ms, effective_extra_ms = (
+    requested_extra_ms, min_buffer_ms, protocol_floor_ms, effective_extra_ms = (
         _resolve_tts_stop_buffer_ms(conn, frame_duration_ms)
     )
     total_wait_ms = remaining_ms + effective_extra_ms
@@ -207,6 +205,7 @@ async def _wait_for_audio_completion(conn):
         f"remaining_ms={remaining_ms:.0f}, "
         f"requested_extra_ms={requested_extra_ms}, "
         f"min_buffer_ms={min_buffer_ms}, "
+        f"protocol_floor_ms={protocol_floor_ms}, "
         f"effective_extra_ms={effective_extra_ms}, "
         f"total_wait_ms={total_wait_ms:.0f}"
     )
@@ -421,6 +420,13 @@ async def send_tts_message(conn, state, text=None):
     """发送 TTS 状态消息"""
     if text is None and state == "sentence_start":
         return
+    if state == "start" and hasattr(conn, "_finish_deferred_thinking_on_tts_start"):
+        try:
+            conn._finish_deferred_thinking_on_tts_start()
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).debug(
+                f"finish deferred thinking on tts start failed: {exc}"
+            )
     ws = _get_open_websocket(conn)
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
     if text is not None:
@@ -428,6 +434,13 @@ async def send_tts_message(conn, state, text=None):
 
     # TTS播放结束
     if state == "stop":
+        if hasattr(conn, "_finish_deferred_thinking_on_tts_start"):
+            try:
+                conn._finish_deferred_thinking_on_tts_start()
+            except Exception as exc:
+                conn.logger.bind(tag=TAG).debug(
+                    f"finish deferred thinking on tts stop failed: {exc}"
+                )
         # 播放提示音
         tts_notify = conn.config.get("enable_stop_tts_notify", False)
         if tts_notify:

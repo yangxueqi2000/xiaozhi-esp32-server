@@ -487,12 +487,39 @@ class TTSProviderBase(ABC):
             # Do not pre-split on commas, but allow TTS to start once a full
             # sentence has completed instead of waiting for the whole turn.
             strong_sentence_endings = ("。", "！", "？", "!", "?", "；", ";", "\n")
+            raw_hold_chars = 10
+            conn_config = getattr(getattr(self, "conn", None), "config", {}) or {}
+            try:
+                raw_hold_chars = max(
+                    0,
+                    int(conn_config.get("tts_stream_followup_hold_chars", 10) or 0),
+                )
+            except (TypeError, ValueError):
+                raw_hold_chars = 10
+
+            trailing_text = current_text.rstrip()
+            if (
+                trailing_text
+                and trailing_text[-1] in strong_sentence_endings
+                and not self.tts_stop_request
+            ):
+                return None
+
             for punct in strong_sentence_endings:
                 pos = current_text.rfind(punct)
                 if pos > last_punct_pos:
                     last_punct_pos = pos
 
             if last_punct_pos != -1:
+                followup_text = textUtils.get_string_no_punctuation_or_emoji(
+                    current_text[last_punct_pos + 1 :]
+                ).strip()
+                if (
+                    not self.tts_stop_request
+                    and raw_hold_chars > 0
+                    and len(followup_text) < raw_hold_chars
+                ):
+                    return None
                 segment_text_raw = current_text[: last_punct_pos + 1]
                 segment_text = textUtils.get_string_no_punctuation_or_emoji(
                     segment_text_raw

@@ -650,6 +650,33 @@ class PhotoPathTracker:
             items.append(item)
         return items
 
+    def _collect_visible_candidates(self, device_id: str) -> List[Dict[str, Any]]:
+        mirrored = self._collect_mirrored_candidates(device_id)
+        if mirrored:
+            return mirrored
+        return self._collect_shared_candidates(device_id)
+
+    def _find_latest_candidate(
+        self,
+        device_id: str,
+        *,
+        include_shared: bool,
+    ) -> Optional[Dict[str, Any]]:
+        target_device = _norm(device_id)
+        if not target_device:
+            return None
+
+        candidates = list(self._collect_mirrored_candidates(target_device))
+        if include_shared:
+            candidates.extend(self._collect_shared_candidates(target_device))
+        elif not candidates:
+            candidates.extend(self._collect_shared_candidates(target_device))
+
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda item: float(item.get("mtime", 0.0)))
+        return self._format_photo_meta(target_device, best)
+
     def _collect_mirrored_candidates(self, device_id: str) -> List[Dict[str, Any]]:
         safe_device = _sanitize_device_for_path(device_id)
         device_dir = os.path.join(self.by_device_dir, safe_device)
@@ -676,20 +703,13 @@ class PhotoPathTracker:
         }
 
     def find_latest(self, device_id: str) -> Optional[Dict[str, Any]]:
-        target_device = _norm(device_id)
-        if not target_device:
-            return None
-        candidates = self._collect_mirrored_candidates(target_device)
-        if not candidates:
-            return None
-        best = max(candidates, key=lambda item: float(item.get("mtime", 0.0)))
-        return self._format_photo_meta(target_device, best)
+        return self._find_latest_candidate(device_id, include_shared=False)
 
     def list_recent(self, device_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         target_device = _norm(device_id)
         if not target_device:
             return []
-        raw_items = self._collect_mirrored_candidates(target_device)
+        raw_items = self._collect_visible_candidates(target_device)
         if not raw_items:
             return []
 
@@ -745,7 +765,7 @@ class PhotoPathTracker:
 
         deadline = time.time() + wait_seconds
         while True:
-            latest = self.find_latest(device_id)
+            latest = self._find_latest_candidate(device_id, include_shared=True)
             if latest:
                 latest_path = _norm(latest.get("local_path", ""))
                 latest_mtime = float(latest.get("mtime", 0.0))
@@ -758,7 +778,7 @@ class PhotoPathTracker:
                 break
             time.sleep(self.detect_interval_s)
 
-        latest = self.find_latest(device_id)
+        latest = self._find_latest_candidate(device_id, include_shared=True)
         if latest:
             return latest, "timeout_latest_snapshot"
         return None, "not_found_after_timeout"
@@ -838,6 +858,10 @@ class PhotoPathTracker:
         latest["found"] = True
         latest["requested_photo_name"] = _norm(requested_photo_name)
         latest["detected_by"] = detected_by
+        latest["is_new_photo"] = detected_by in {
+            "first_detected_for_device",
+            "new_file_after_take_photo",
+        }
         latest["mirrored_path"] = mirrored_path
         latest["mirror_state"] = mirror_state
         return latest
@@ -1012,8 +1036,11 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 baseline=baseline_photo,
                 detect_timeout=float(args.photo_detect_timeout),
             )
+            raw_success = bool(result.get("success", False))
+            recovered_success = bool(photo_meta.get("is_new_photo", False))
             return {
-                "success": bool(result.get("success", False)),
+                "success": raw_success or recovered_success,
+                "recovered_after_error": (not raw_success) and recovered_success,
                 "route": resolved,
                 "requested_photo_name": final_photo_name,
                 "photo_meta": photo_meta,

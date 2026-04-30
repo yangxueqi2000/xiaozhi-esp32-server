@@ -26,6 +26,7 @@ DEFAULT_MODEL = "qwen-tts"
 DEFAULT_VOICE = "Cherry"
 DEFAULT_SAMPLE_RATE = 24000
 DEFAULT_LANGUAGE_TYPE = "Chinese"
+SUPPORTED_TTS_MODEL_PREFIXES = ("qwen-tts",)
 
 
 class TTSProvider(TTSProviderBase):
@@ -158,13 +159,17 @@ class TTSProvider(TTSProviderBase):
 
     def _resolve_model(self, configured_model):
         model = configured_model or DEFAULT_MODEL
-        if model != DEFAULT_MODEL:
-            logger.bind(tag=TAG).warning(
-                f"Configured Bailian model {model} is not the dedicated verbatim "
-                f"TTS model; using {DEFAULT_MODEL}."
-            )
+        if not model:
             return DEFAULT_MODEL
-        return model
+        normalized_model = str(model).strip()
+        if normalized_model.lower().startswith(SUPPORTED_TTS_MODEL_PREFIXES):
+            return normalized_model
+        logger.bind(tag=TAG).warning(
+            "Configured Bailian model is incompatible with "
+            "dashscope.audio.qwen_tts.SpeechSynthesizer: "
+            f"{normalized_model}. Falling back to {DEFAULT_MODEL}."
+        )
+        return DEFAULT_MODEL
 
     def tts_text_priority_thread(self):
         while not self.conn.stop_event.is_set():
@@ -257,7 +262,10 @@ class TTSProvider(TTSProviderBase):
         if is_last:
             self._process_before_stop_play_files()
         else:
-            self._put_audio_queue(SentenceType.LAST, [], None)
+            logger.bind(tag=TAG).warning(
+                "Skip premature TTS stop after non-final Bailian segment failure; "
+                "waiting for follow-up text or final flush."
+            )
         return None
 
     async def _stream_tts(self, text, is_last):

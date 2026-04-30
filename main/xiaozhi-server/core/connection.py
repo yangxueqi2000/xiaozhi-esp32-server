@@ -46,6 +46,7 @@ from core.utils.audio_frontend import AudioFrontend
 from core.utils import textUtils
 from core.utils.experiment_resume import (
     append_user_utterance_log,
+    append_experiment_interaction_log,
     build_resume_context,
     build_resume_tool_message,
     enrich_latest_user_utterance_log,
@@ -121,6 +122,9 @@ class ConnectionHandler:
         self.thinking_pulse_stop = threading.Event()
         self.action_pulse_thread = None
         self.action_pulse_stop = threading.Event()
+        self._thinking_event_active = False
+        self._thinking_finish_on_tts_start_pending = False
+        self._thinking_event_lock = threading.RLock()
 
         # 添加上报线程池
         self.report_queue = queue.Queue()
@@ -943,7 +947,34 @@ class ConnectionHandler:
             f"log_path={log_path}, "
             f"text={preview}"
         )
+        self.append_experiment_interaction_log(
+            "USER",
+            normalized_text,
+            source=source or "unknown",
+        )
         return log_path
+
+    def append_experiment_interaction_log(
+        self,
+        role: str,
+        text: Any,
+        *,
+        source: str = "",
+    ) -> str:
+        if not self.device_id:
+            return ""
+        snapshot = self._experiment_user_utterance_snapshot()
+        log_path = append_experiment_interaction_log(
+            self.config,
+            self.device_id,
+            text,
+            role=role,
+            source=source,
+            experiment_session_id=snapshot.get("experiment_session_id", ""),
+            current_step_id=snapshot.get("current_step_id", ""),
+            experiment_yaml_path=snapshot.get("experiment_yaml_path", ""),
+        )
+        return str(log_path or "")
 
     def enrich_latest_clean_user_utterance_snapshot(self) -> str:
         if not self.device_id:
@@ -3149,6 +3180,38 @@ class ConnectionHandler:
         if self.thinking_pulse_stop:
             self.thinking_pulse_stop.set()
 
+    def _mark_thinking_event_started(self):
+        with self._thinking_event_lock:
+            self._thinking_event_active = True
+            self._thinking_finish_on_tts_start_pending = False
+
+    def _defer_thinking_finish_until_tts_start(self):
+        with self._thinking_event_lock:
+            if self._thinking_event_active:
+                self._thinking_finish_on_tts_start_pending = True
+
+    def _finish_thinking_event_if_active(self):
+        should_send = False
+        with self._thinking_event_lock:
+            if self._thinking_event_active:
+                self._thinking_event_active = False
+                self._thinking_finish_on_tts_start_pending = False
+                should_send = True
+            else:
+                self._thinking_finish_on_tts_start_pending = False
+        if not should_send:
+            return False
+        self._stop_thinking_pulse()
+        self._send_llm_event_message("[Thinking Finished]", event="thinking", phase="done")
+        return True
+
+    def _finish_deferred_thinking_on_tts_start(self):
+        with self._thinking_event_lock:
+            pending = self._thinking_finish_on_tts_start_pending
+        if pending:
+            return self._finish_thinking_event_if_active()
+        return False
+
     def _start_action_pulse(self):
         if self.action_pulse_thread and self.action_pulse_thread.is_alive():
             return
@@ -3187,6 +3250,7 @@ class ConnectionHandler:
                 )
         if should_start:
             self._send_llm_event_message("[Thinking]", event="thinking", phase="start")
+            self._mark_thinking_event_started()
             self._start_thinking_pulse()
 
     def release_external_busy(self, token: str):
@@ -3198,8 +3262,7 @@ class ConnectionHandler:
             self._external_busy_tokens.discard(token)
             should_stop = not self._external_busy_tokens
         if should_stop:
-            self._stop_thinking_pulse()
-            self._send_llm_event_message("[Thinking Finished]", event="thinking", phase="done")
+            self._finish_thinking_event_if_active()
 
     def has_external_busy(self) -> bool:
         with self._external_busy_lock:
@@ -3213,6 +3276,9 @@ class ConnectionHandler:
         if depth == 0:
             self._llm_turn_started = True
             self.llm_finish_task = False
+            with self._thinking_event_lock:
+                self._thinking_event_active = False
+                self._thinking_finish_on_tts_start_pending = False
             self.sentence_id = str(uuid.uuid4().hex)
             self.dialogue.put(Message(role="user", content=query))
             self.tts.tts_text_queue.put(
@@ -3440,14 +3506,20 @@ class ConnectionHandler:
             if not thinking_event_sent:
                 self._send_llm_event_message("[Thinking]", event="thinking", phase="start")
                 thinking_event_sent = True
+                self._mark_thinking_event_started()
             self._start_thinking_pulse()
 
         def finish_thinking_once():
             """第一次拿到真实 content 时，结束 thinking"""
             nonlocal thinking_event_done
             if thinking_event_sent and not thinking_event_done:
-                self._stop_thinking_pulse()
-                self._send_llm_event_message("[Thinking Finished]", event="thinking", phase="done")
+                if stream_tts_from_llm and bool(
+                    self.config.get("thinking_finish_on_tts_start", True)
+                ):
+                    pause_thinking_pulse_only()
+                    self._defer_thinking_finish_until_tts_start()
+                else:
+                    self._finish_thinking_event_if_active()
                 thinking_event_done = True
 
         def pause_thinking_pulse_only():
@@ -3592,8 +3664,7 @@ class ConnectionHandler:
 
         # 流结束：如果曾经进入 thinking 但没结束，收尾
         if thinking_event_sent and not thinking_event_done:
-            self._stop_thinking_pulse()
-            self._send_llm_event_message("[Thinking Finished]", event="thinking", phase="done")
+            self._finish_thinking_event_if_active()
             thinking_event_done = True
 
 

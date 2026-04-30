@@ -2,6 +2,7 @@ import json
 import re
 import uuid
 import asyncio
+import time
 from pathlib import Path
 
 import yaml
@@ -688,11 +689,35 @@ def _is_explicit_ready_to_start_reply(filtered_text: str) -> bool:
         "开始做吧",
         "ready",
     )
-    return _contains_any(norm, ready_tokens)
+    if _contains_any(norm, ready_tokens):
+        return True
+
+    return bool(
+        re.fullmatch(
+            r"(?:那就|现在|可以|那我们|我们|我)?开始(?:(?:第?[一二三四五六七八九十0-9]+步)|(?:(?:这个|今天的|本次)?实验))?(?:吧|啦|了)?",
+            norm,
+        )
+    )
 
 
 def _compose_waiting_ready_reply() -> str:
     return "你准备好后告诉我准备好了，我再带你开始第一步。"
+
+
+def _grant_experiment_ready_guard_bypass(conn, count: int = 1) -> None:
+    if conn is None:
+        return
+    try:
+        delta = int(count or 0)
+    except (TypeError, ValueError):
+        delta = 0
+    if delta <= 0:
+        delta = 1
+    try:
+        current = int(getattr(conn, "_experiment_ready_guard_bypass_count", 0) or 0)
+    except (TypeError, ValueError):
+        current = 0
+    conn._experiment_ready_guard_bypass_count = max(0, current) + delta
 
 
 PURE_SHORT_COMPLETION_PATTERNS = (
@@ -740,6 +765,10 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
     if _contains_any(norm, clarify_tokens):
         return "repeat"
 
+    waiting_for_step_start = _assistant_waiting_for_step_start(conn)
+    if waiting_for_step_start and _is_explicit_ready_to_start_reply(filtered_text):
+        return "guide"
+
     advance_tokens = (
         "继续下一步",
         "下一步",
@@ -784,11 +813,11 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
     if norm in neutral_ack_tokens or _ends_with_any(norm, neutral_ack_tokens):
         if _assistant_waiting_for_step_completion(conn):
             return "advance"
-        if _assistant_waiting_for_step_start(conn):
+        if waiting_for_step_start:
             return "guide"
 
     if norm in {"继续", "继续吧"}:
-        return "guide" if _assistant_waiting_for_step_start(conn) else "advance"
+        return "guide" if waiting_for_step_start else "advance"
 
     return ""
 
@@ -806,6 +835,52 @@ def _is_experiment_fast_path_available(conn) -> bool:
         return True
     step_meta = _get_cached_experiment_step_meta(conn)
     return bool(step_meta.get("instruction") or step_meta.get("title"))
+
+
+def _resolve_experiment_fast_path_allowed_actions(conn) -> set[str] | None:
+    raw_value = conn.config.get("experiment_fast_path_allowed_actions")
+    if raw_value in (None, "", []):
+        return None
+
+    if isinstance(raw_value, str):
+        tokens = [
+            token.strip().lower()
+            for token in re.split(r"[\s,;|]+", raw_value)
+            if token.strip()
+        ]
+    elif isinstance(raw_value, (list, tuple, set)):
+        tokens = [str(item or "").strip().lower() for item in raw_value if str(item or "").strip()]
+    else:
+        token = str(raw_value or "").strip().lower()
+        tokens = [token] if token else []
+
+    if not tokens or "all" in tokens or "*" in tokens:
+        return None
+
+    alias_map = {
+        "next": "advance",
+        "continue": "advance",
+        "ready": "guide",
+        "start_ready": "guide",
+        "confirmation": "confirm",
+        "semantic_confirmation": "confirm",
+    }
+    normalized = {
+        alias_map.get(token, token)
+        for token in tokens
+        if alias_map.get(token, token)
+    }
+    return normalized or None
+
+
+def _is_experiment_fast_path_action_enabled(conn, action: str) -> bool:
+    normalized_action = str(action or "").strip().lower()
+    if not normalized_action:
+        return True
+    allowed_actions = _resolve_experiment_fast_path_allowed_actions(conn)
+    if allowed_actions is None:
+        return True
+    return normalized_action in allowed_actions
 
 
 async def _call_experiment_graph_tool_fast(
@@ -1486,6 +1561,8 @@ async def handle_experiment_control_fast_intent(
         return False
 
     if _is_explicit_experiment_start_request(filtered_text):
+        if not _is_experiment_fast_path_action_enabled(conn, "start"):
+            return False
         experiment_title = await _load_experiment_overview_title(conn)
         reply = _compose_experiment_start_reply(experiment_title, "")
         reply = _prepare_fastpath_spoken_reply(reply)
@@ -1497,11 +1574,16 @@ async def handle_experiment_control_fast_intent(
 
     action = _classify_short_experiment_control(conn, filtered_text)
     if not action:
+        if not _is_experiment_fast_path_action_enabled(conn, "confirm"):
+            return False
         return await _handle_confirmation_step_semantic_fast_intent(
             conn,
             original_text,
             filtered_text,
         )
+
+    if not _is_experiment_fast_path_action_enabled(conn, action):
+        return False
 
     conn.logger.bind(tag=TAG).info(
         f"experiment control fast path hit: action={action}, text={filtered_text}"
@@ -1509,6 +1591,11 @@ async def handle_experiment_control_fast_intent(
 
     waiting_for_step_start = _assistant_waiting_for_step_start(conn)
     explicitly_ready_to_start = _is_explicit_ready_to_start_reply(filtered_text)
+    ready_reply_unlocks_step = (
+        waiting_for_step_start
+        and explicitly_ready_to_start
+        and action in {"guide", "advance"}
+    )
 
     if waiting_for_step_start and action == "repeat":
         experiment_title = await _load_experiment_overview_title(conn)
@@ -1548,6 +1635,8 @@ async def handle_experiment_control_fast_intent(
         if not reply:
             return False
         await _start_direct_intent_turn(conn, original_text)
+        if ready_reply_unlocks_step and action == "guide":
+            _grant_experiment_ready_guard_bypass(conn)
         speak_txt(conn, reply)
         return True
 
@@ -1559,6 +1648,8 @@ async def handle_experiment_control_fast_intent(
             if not reply:
                 return False
             await _start_direct_intent_turn(conn, original_text)
+            if ready_reply_unlocks_step:
+                _grant_experiment_ready_guard_bypass(conn)
             speak_txt(conn, reply)
             return True
 
@@ -1580,6 +1671,8 @@ async def handle_experiment_control_fast_intent(
             return False
 
         await _start_direct_intent_turn(conn, original_text)
+        if ready_reply_unlocks_step:
+            _grant_experiment_ready_guard_bypass(conn)
         if hasattr(conn, "enrich_latest_clean_user_utterance_snapshot"):
             try:
                 conn.enrich_latest_clean_user_utterance_snapshot()
@@ -1821,12 +1914,17 @@ def _extract_photo_result_meta(payload) -> dict:
     requested_photo_name = str(
         photo_meta.get("requested_photo_name") or data.get("requested_photo_name") or ""
     ).strip()
+    try:
+        mtime = float(photo_meta.get("mtime", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        mtime = 0.0
 
     return {
-        "found": bool(photo_meta.get("found", False)),
+        "found": bool(photo_meta.get("found", False) or file_name or photo_path),
         "file_name": file_name,
         "photo_path": photo_path,
         "requested_photo_name": requested_photo_name,
+        "mtime": mtime,
     }
 
 
@@ -2334,6 +2432,168 @@ async def _maybe_wait_before_photo_capture(conn, source: str) -> None:
     await asyncio.sleep(delay_seconds)
 
 
+def _coerce_positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    if parsed <= 0:
+        return int(default)
+    return parsed
+
+
+def _resolve_server_photo_timeout_settings(conn) -> tuple[int, int, float]:
+    shortcut_cfg = conn.config.get("device_mcp_shortcuts", {}) or {}
+    tool_timeout = _coerce_positive_int(
+        shortcut_cfg.get("server_photo_timeout", shortcut_cfg.get("photo_timeout", 45)),
+        45,
+    )
+    default_request_timeout = max(tool_timeout + 15, 60)
+    request_timeout = _coerce_positive_int(
+        shortcut_cfg.get(
+            "server_photo_request_timeout",
+            shortcut_cfg.get("photo_request_timeout", default_request_timeout),
+        ),
+        default_request_timeout,
+    )
+    request_timeout = max(request_timeout, tool_timeout + 5)
+    raw_recovery_window = shortcut_cfg.get(
+        "server_photo_recovery_window_seconds",
+        6.0,
+    )
+    try:
+        recovery_window_seconds = max(0.0, float(raw_recovery_window))
+    except (TypeError, ValueError):
+        recovery_window_seconds = 6.0
+    return tool_timeout, request_timeout, recovery_window_seconds
+
+
+def _prepare_server_photo_request_arguments(conn, arguments: dict) -> tuple[dict, float]:
+    merged = dict(arguments or {})
+    default_timeout, default_request_timeout, recovery_window_seconds = (
+        _resolve_server_photo_timeout_settings(conn)
+    )
+    merged["timeout"] = _coerce_positive_int(merged.get("timeout"), default_timeout)
+    merged["request_timeout"] = _coerce_positive_int(
+        merged.get("request_timeout"),
+        max(default_request_timeout, merged["timeout"] + 5),
+    )
+    merged["request_timeout"] = max(merged["request_timeout"], merged["timeout"] + 5)
+    return merged, recovery_window_seconds
+
+
+async def _fetch_latest_server_photo_meta(conn, device_id: str) -> dict:
+    safe_device_id = str(device_id or "").strip()
+    if not safe_device_id or _get_server_mcp_manager(conn) is None:
+        return {}
+    arguments = {"device_id": safe_device_id}
+    try:
+        result = await _execute_server_mcp_tool_direct(
+            conn,
+            "xiaozhi_get_latest_photo",
+            arguments,
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).debug(
+            f"latest server photo lookup failed: {exc}"
+        )
+        return {}
+
+    payload = finalize_server_mcp_payload(
+        result,
+        tool_name="xiaozhi_get_latest_photo",
+        arguments=arguments,
+    )
+    if isinstance(payload, dict) and payload.get("success") is False:
+        return {}
+    photo_meta = _extract_photo_result_meta(payload)
+    if not photo_meta.get("found"):
+        return {}
+    return photo_meta
+
+
+def _is_timeout_like_message(message: str) -> bool:
+    normalized = str(message or "").strip().lower()
+    if not normalized:
+        return False
+    return "timeout" in normalized or "超时" in normalized
+
+
+def _photo_meta_is_new_since_baseline(
+    latest_photo: dict,
+    baseline_photo: dict,
+    capture_started_at: float,
+    requested_photo_name: str = "",
+) -> bool:
+    if not isinstance(latest_photo, dict) or not latest_photo.get("found"):
+        return False
+
+    latest_path = str(latest_photo.get("photo_path", "") or "").strip()
+    latest_file_name = str(latest_photo.get("file_name", "") or "").strip()
+    baseline_path = str((baseline_photo or {}).get("photo_path", "") or "").strip()
+    requested_name = str(requested_photo_name or "").strip()
+
+    try:
+        latest_mtime = float(latest_photo.get("mtime", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        latest_mtime = 0.0
+    try:
+        baseline_mtime = float((baseline_photo or {}).get("mtime", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        baseline_mtime = 0.0
+
+    if requested_name and latest_file_name and requested_name in latest_file_name:
+        return True
+    if latest_path and baseline_path:
+        if latest_path != baseline_path:
+            return True
+        return latest_mtime > baseline_mtime + 1e-6
+    if latest_path and not baseline_path:
+        return latest_mtime >= capture_started_at - 2.0 if latest_mtime > 0 else False
+    return latest_mtime > baseline_mtime + 1e-6 and latest_mtime >= capture_started_at - 2.0
+
+
+async def _recover_server_photo_after_timeout(
+    conn,
+    baseline_photo: dict,
+    arguments: dict,
+    capture_started_at: float,
+    recovery_window_seconds: float,
+):
+    safe_device_id = str((arguments or {}).get("device_id", "") or "").strip()
+    if not safe_device_id:
+        return None
+
+    requested_photo_name = str((arguments or {}).get("photo_name", "") or "").strip()
+    deadline = time.time() + max(0.0, float(recovery_window_seconds or 0.0))
+    while True:
+        latest_photo = await _fetch_latest_server_photo_meta(conn, safe_device_id)
+        if _photo_meta_is_new_since_baseline(
+            latest_photo,
+            baseline_photo,
+            capture_started_at,
+            requested_photo_name=requested_photo_name,
+        ):
+            conn.logger.bind(tag=TAG).info(
+                "recovered server photo after timeout: "
+                f"device_id={safe_device_id}, file_name={latest_photo.get('file_name', '')}"
+            )
+            return {
+                "success": True,
+                "requested_photo_name": requested_photo_name,
+                "photo_meta": latest_photo,
+                "recovered_after_timeout": True,
+            }
+        if time.time() >= deadline:
+            break
+        await asyncio.sleep(min(0.5, max(0.0, deadline - time.time())))
+    return None
+
+
+def _compose_server_photo_timeout_reply() -> str:
+    return "拍照这边超时了，我还没拿到结果。你可以稍后再说一次拍照，或者让我打开最近一张照片。"
+
+
 def _update_server_photo_confirmation_state(conn, filtered_text: str) -> None:
     if not _assistant_is_waiting_for_photo_permission_fixed(conn):
         return
@@ -2398,23 +2658,30 @@ async def _execute_server_photo_intent(conn, arguments: dict) -> bool:
         speak_txt(conn, "\u62cd\u7167\u529f\u80fd\u8fd8\u6ca1\u51c6\u5907\u597d\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002")
         return True
 
+    call_arguments, recovery_window_seconds = _prepare_server_photo_request_arguments(
+        conn,
+        arguments,
+    )
+    baseline_photo = await _fetch_latest_server_photo_meta(conn, safe_device_id)
+    capture_started_at = time.time()
     conn._server_photo_capture_granted = True
     try:
         result = await _execute_server_mcp_tool_direct(
             conn,
             "xiaozhi_take_photo",
-            arguments,
+            call_arguments,
         )
     except Exception as e:
-        conn._server_photo_capture_granted = False
         conn.logger.bind(tag=TAG).warning(f"direct server photo mcp failed: {e}")
         speak_txt(conn, f"\u62cd\u7167\u5931\u8d25\uff1a{e}")
         return True
+    finally:
+        conn._server_photo_capture_granted = False
 
     payload = finalize_server_mcp_payload(
         result,
         tool_name="xiaozhi_take_photo",
-        arguments=arguments,
+        arguments=call_arguments,
     )
     sync_server_mcp_payload_state(
         conn,
@@ -2427,8 +2694,31 @@ async def _execute_server_photo_intent(conn, arguments: dict) -> bool:
             or _extract_text_from_result_payload(payload)
             or "\u62cd\u7167\u5931\u8d25\u4e86\u3002"
         )
-        speak_txt(conn, msg)
-        return True
+        if _is_timeout_like_message(msg):
+            recovered_payload = await _recover_server_photo_after_timeout(
+                conn,
+                baseline_photo,
+                call_arguments,
+                capture_started_at,
+                recovery_window_seconds,
+            )
+            if recovered_payload is not None:
+                payload = finalize_server_mcp_payload(
+                    recovered_payload,
+                    tool_name="xiaozhi_take_photo",
+                    arguments=call_arguments,
+                )
+                sync_server_mcp_payload_state(
+                    conn,
+                    tool_name="xiaozhi_take_photo",
+                    payload=payload,
+                )
+            else:
+                speak_txt(conn, _compose_server_photo_timeout_reply())
+                return True
+        else:
+            speak_txt(conn, msg)
+            return True
 
     reply = build_server_mcp_spoken_response(
         "xiaozhi_take_photo",
@@ -2495,6 +2785,10 @@ async def handle_pending_server_photo_confirmation(
     conn, original_text: str, filtered_text: str
 ) -> bool:
     if getattr(conn, "_pending_direct_photo", None):
+        return False
+
+    shortcut_cfg = conn.config.get("device_mcp_shortcuts", {}) or {}
+    if shortcut_cfg.get("enable_server_photo_confirmation_direct", True) is False:
         return False
 
     if not _assistant_is_waiting_for_photo_permission_fixed(conn):
@@ -2784,3 +3078,12 @@ def speak_txt(conn, text):
         )
     )
     conn.dialogue.put(Message(role="assistant", content=text))
+    if hasattr(conn, "append_experiment_interaction_log"):
+        try:
+            conn.append_experiment_interaction_log(
+                "ASSISTANT",
+                text,
+                source="speak_txt",
+            )
+        except Exception:
+            pass

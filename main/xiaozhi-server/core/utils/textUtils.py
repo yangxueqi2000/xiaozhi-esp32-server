@@ -750,6 +750,63 @@ def _replace_range_for_tts(text: str) -> str:
     return result
 
 
+def _replace_measurement_ranges_for_tts(text: str) -> str:
+    suffixes = (
+        "转每分钟",
+        "千赫兹",
+        "摄氏度",
+        "分钟",
+        "小时",
+        "毫升",
+        "微升",
+        "毫克",
+        "微克",
+        "微米",
+        "毫米",
+        "厘米",
+        "赫兹",
+        "毫伏",
+        "毫安",
+        "纳米",
+        "秒",
+        "天",
+        "周",
+        "月",
+        "年",
+        "升",
+        "克",
+        "伏",
+        "安",
+        "瓦",
+        "度",
+        "滴",
+        "次",
+        "倍",
+        "圈",
+        "轮",
+        "档",
+        "级",
+        "份",
+        "组",
+        "步",
+        "%",
+        "％",
+    )
+    suffix_pattern = "|".join(re.escape(suffix) for suffix in suffixes)
+    range_re = re.compile(
+        rf"(第?)(\d+(?:\.\d+)?)\s*(?:-|~|～|—|–|至|到)\s*(\d+(?:\.\d+)?)\s*({suffix_pattern})"
+    )
+
+    def _repl(match: re.Match) -> str:
+        prefix = match.group(1) or ""
+        start = match.group(2)
+        end = match.group(3)
+        suffix = match.group(4)
+        return f"{prefix}{start}到{end}{suffix}"
+
+    return range_re.sub(_repl, text)
+
+
 def _replace_units_for_tts(text: str) -> str:
     replacements = (
         (r"(?i)\bmmol\s*/\s*L\b", "毫摩尔每升"),
@@ -1062,6 +1119,7 @@ def normalize_tts_text(text, custom_aliases=None):
 
     normalized = _replace_range_for_tts(normalized)
     normalized = _replace_units_for_tts(normalized)
+    normalized = _replace_measurement_ranges_for_tts(normalized)
     normalized = _replace_parenthesized_element_aliases_for_tts(normalized)
     normalized = _replace_element_prefixed_nanostructure_terms_for_tts(normalized)
     normalized = _replace_generic_nanostructure_aliases_for_tts(normalized)
@@ -1290,6 +1348,50 @@ def _strip_spoken_meta_guidance_clauses(text: str) -> str:
     return "".join(cleaned_sentences).strip()
 
 
+def _is_spoken_future_step_clause(text: str) -> bool:
+    clause = normalize_spoken_text(text).strip(" ，,、；;。！？!?")
+    if not clause:
+        return False
+
+    normalized = re.sub(r"\s+", "", clause)
+    transition_patterns = (
+        re.compile(
+            r"(?:完成|做完|结束)(?:这一轮|本轮|当前步骤|当前这一步|这一步|这步|本步)?"
+            r"(?:后|之后|以后).{0,24}(?:再|然后)?.{0,12}(?:回到|进入|开始|继续)"
+        ),
+        re.compile(
+            r"(?:当前步骤|当前这一步|这一步|这步|本步|这一轮|本轮)结束后"
+            r".{0,24}(?:回到|进入|开始|继续)"
+        ),
+        re.compile(
+            r"(?:回到|进入)[^。！？；]{0,24}(?:号样品|样品|步骤|阶段)"
+            r"[^。！？；]{0,24}(?:后续|下一步|继续|搅拌|加液|操作)"
+        ),
+    )
+    return any(pattern.search(normalized) for pattern in transition_patterns)
+
+
+def _strip_spoken_future_step_clauses(text: str) -> str:
+    cleaned_sentences = []
+    for sentence in _split_spoken_sentence_chunks(text):
+        stripped = sentence.strip()
+        terminal = stripped[-1] if stripped and stripped[-1] in "。！？!?；;" else ""
+        body = stripped[:-1] if terminal else stripped
+        clauses = [part.strip() for part in re.split(r"[，,；;]\s*", body) if part.strip()]
+        kept_clauses = [
+            clause for clause in clauses if not _is_spoken_future_step_clause(clause)
+        ]
+        if not kept_clauses:
+            continue
+        rebuilt = "，".join(kept_clauses).strip(" ，,、；;")
+        if not rebuilt:
+            continue
+        if terminal:
+            rebuilt += terminal
+        cleaned_sentences.append(rebuilt)
+    return "".join(cleaned_sentences).strip()
+
+
 def _strip_spoken_technical_details(text: str) -> str:
     cleaned_sentences = []
     for sentence in _split_spoken_sentence_chunks(text):
@@ -1373,6 +1475,20 @@ def _conn_is_waiting_for_experiment_ready(conn) -> bool:
     return any(token in normalized for token in tokens)
 
 
+def _consume_experiment_ready_guard_bypass(conn) -> bool:
+    if conn is None:
+        return False
+    raw_count = getattr(conn, "_experiment_ready_guard_bypass_count", 0)
+    try:
+        count = int(raw_count or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        return False
+    setattr(conn, "_experiment_ready_guard_bypass_count", count - 1)
+    return True
+
+
 def _looks_like_step_guidance_text(text: str) -> bool:
     normalized = normalize_spoken_text(text)
     if not normalized:
@@ -1388,6 +1504,8 @@ def _looks_like_step_guidance_text(text: str) -> bool:
 
 def _apply_experiment_ready_guard(conn, text: str) -> str:
     if not text or conn is None:
+        return text
+    if _consume_experiment_ready_guard_bypass(conn):
         return text
     if not _conn_is_waiting_for_experiment_ready(conn):
         return text
@@ -1596,6 +1714,7 @@ def prepare_runtime_spoken_text(text):
 
     filtered = filter_spoken_backstage_text(normalized)
     filtered = _strip_spoken_meta_guidance_clauses(filtered)
+    filtered = _strip_spoken_future_step_clauses(filtered)
     filtered = _strip_spoken_technical_details(filtered)
     filtered = _limit_spoken_sentence_count(filtered, max_sentences=2)
     return normalize_spoken_text(filtered)

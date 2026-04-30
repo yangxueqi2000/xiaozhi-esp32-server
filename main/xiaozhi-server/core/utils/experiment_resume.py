@@ -349,6 +349,52 @@ def resolve_experiment_log_paths(config: Dict[str, Any], device_id: str) -> List
     return paths
 
 
+def append_experiment_interaction_log(
+    config: Dict[str, Any],
+    device_id: str,
+    text: Any,
+    *,
+    role: str,
+    source: str = "",
+    experiment_session_id: str = "",
+    current_step_id: str = "",
+    experiment_yaml_path: str = "",
+) -> Optional[str]:
+    normalized_device_id = str(device_id or "").strip()
+    normalized_text = _normalize_utterance_text(text)
+    normalized_role = str(role or "").strip().upper()
+    if not normalized_device_id or not normalized_text or not normalized_role:
+        return None
+
+    paths = resolve_experiment_log_paths(config, normalized_device_id)
+    if not paths:
+        return None
+    target_path = paths[0]
+
+    source_text = str(source or "").strip()
+    parts = [f"[{_iso_timestamp()}]", "[TRANSCRIPT]", f"[{normalized_role}]"]
+    if source_text:
+        parts.append(f"[source={source_text}]")
+    if experiment_session_id:
+        parts.append(f"[experiment_session_id={str(experiment_session_id).strip()}]")
+    if current_step_id:
+        parts.append(f"[current_step_id={str(current_step_id).strip()}]")
+    if experiment_yaml_path:
+        parts.append(f"[yaml={str(experiment_yaml_path).strip()}]")
+    line = " ".join(parts) + f" {normalized_text}\n"
+
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(target_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"experiment interaction log write failed: {target_path} ({exc})"
+        )
+        return None
+    return str(target_path)
+
+
 def _select_existing_log_path(paths: List[Path]) -> Optional[Path]:
     existing = [path for path in paths if path.exists() and path.is_file()]
     if not existing:

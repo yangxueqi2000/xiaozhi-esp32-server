@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 
@@ -78,7 +79,7 @@ sys.modules.setdefault("pydub", fake_pydub_module)
 
 from core.handle import intentHandler
 from core.utils.dialogue import Message
-from core.utils import textUtils
+from core.utils import experiment_resume, textUtils
 
 
 class _FakeConn:
@@ -135,6 +136,37 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             result,
         )
 
+    def test_append_experiment_interaction_log_writes_transcript_line(self):
+        with TemporaryDirectory() as temp_dir:
+            config = {
+                "LLM": {
+                    "codex_app_server": {
+                        "type": "codex",
+                        "stream_log_path": str(Path(temp_dir) / "{device_id}.log"),
+                    }
+                }
+            }
+
+            log_path = experiment_resume.append_experiment_interaction_log(
+                config,
+                "94:a9:90:27:3c:84",
+                "可以拍照。",
+                role="USER",
+                source="asr",
+                current_step_id="step_photo_confirm_sample_1",
+            )
+
+            self.assertTrue(log_path)
+            self.assertEqual(
+                Path(temp_dir) / "94_a9_90_27_3c_84.log",
+                Path(log_path),
+            )
+            content = Path(log_path).read_text(encoding="utf-8")
+            self.assertIn("[TRANSCRIPT] [USER]", content)
+            self.assertIn("[source=asr]", content)
+            self.assertIn("[current_step_id=step_photo_confirm_sample_1]", content)
+            self.assertIn("可以拍照。", content)
+
     def test_runtime_spoken_text_strips_technical_details(self):
         text = (
             "实验报告已经生成，pdf_path=C:\\demo\\report.pdf，"
@@ -166,10 +198,41 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("实验报告还没有完整生成成功，请稍后再试。", result)
 
+    def test_conn_runtime_spoken_text_bypasses_ready_guard_once(self):
+        conn = _FakeConn()
+        conn.dialogue.put(
+            Message(role="assistant", content="今天我们做这个实验。你准备好开始了吗？")
+        )
+        conn._experiment_ready_guard_bypass_count = 1
+
+        first = textUtils.prepare_runtime_spoken_text_for_conn(
+            conn,
+            "现在做这一步：完成 1 到 5 号烧杯编号。做好后告诉我。",
+        )
+        second = textUtils.prepare_runtime_spoken_text_for_conn(
+            conn,
+            "现在做这一步：完成 1 到 5 号烧杯编号。做好后告诉我。",
+        )
+
+        self.assertIn("现在做这一步", first)
+        self.assertEqual(0, getattr(conn, "_experiment_ready_guard_bypass_count", 0))
+        self.assertEqual("你准备好后告诉我准备好了，我再带你开始第一步。", second)
+
     def test_normalize_tts_text_reads_decimals_digit_by_digit(self):
         result = textUtils.normalize_tts_text("加入1.849mL AgNO3。")
 
         self.assertIn("一点八四九毫升", result)
+        self.assertIn("硝酸银", result)
+
+    def test_normalize_tts_text_reads_numeric_time_ranges_as_to(self):
+        result = textUtils.normalize_tts_text("静置1-15分钟后观察。")
+
+        self.assertEqual("静置1到15分钟后观察。", result)
+
+    def test_normalize_tts_text_reads_decimal_volume_ranges_as_to(self):
+        result = textUtils.normalize_tts_text("加入0.5-1.0mL AgNO3。")
+
+        self.assertIn("零点五到一点零毫升", result)
         self.assertIn("硝酸银", result)
 
     def test_normalize_tts_text_supports_generic_chemistry_pronunciation(self):
@@ -198,6 +261,20 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             result,
         )
 
+    def test_prepare_runtime_spoken_text_strips_future_step_transition_clauses(self):
+        text = (
+            "接下来做这一步：按1到5号顺序统一完成H2O2加入。"
+            "完成这一轮后再回到1号样品开始后续步骤。"
+            "注意加液后轻轻混匀。"
+        )
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual(
+            "接下来做这一步：按1到5号顺序统一完成H2O2加入。注意加液后轻轻混匀。",
+            result,
+        )
+
     def test_repeat_reply_is_direct_and_requests_completion(self):
         reply = intentHandler._compose_experiment_step_reply(
             {
@@ -211,6 +288,23 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("我再简短说一遍", reply)
         self.assertIn("当前这一步", reply)
         self.assertIn("做好后告诉我", reply)
+
+    def test_experiment_fast_path_actions_can_be_limited_by_config(self):
+        conn = _FakeConn()
+        conn.config = {
+            "experiment_fast_path_allowed_actions": ["advance", "repeat", "confirm"],
+        }
+
+        self.assertTrue(
+            intentHandler._is_experiment_fast_path_action_enabled(conn, "advance")
+        )
+        self.assertTrue(
+            intentHandler._is_experiment_fast_path_action_enabled(conn, "confirm")
+        )
+        self.assertFalse(
+            intentHandler._is_experiment_fast_path_action_enabled(conn, "guide")
+        )
+
     def test_neutral_ack_follows_completion_context(self):
         conn = _FakeConn()
         conn.dialogue.put(
@@ -230,6 +324,18 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
 
         action = intentHandler._classify_short_experiment_control(conn, "继续")
+        self.assertEqual("guide", action)
+
+    def test_ready_reply_wins_while_waiting_for_start(self):
+        conn = _FakeConn()
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="你准备好后告诉我准备好了，我再带你开始第一步。",
+            )
+        )
+
+        action = intentHandler._classify_short_experiment_control(conn, "准备好了")
         self.assertEqual("guide", action)
 
     def test_completion_variant_uses_waiting_context(self):
@@ -370,6 +476,27 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(3.0, delay_seconds)
 
+    async def test_server_photo_confirmation_direct_can_be_disabled(self):
+        conn = _FakeConn()
+        conn.config = {
+            "device_mcp_shortcuts": {
+                "enable_server_photo_confirmation_direct": False,
+            }
+        }
+
+        with patch.object(
+            intentHandler,
+            "_assistant_is_waiting_for_photo_permission_fixed",
+            side_effect=AssertionError("should not check confirmation state"),
+        ):
+            handled = await intentHandler.handle_pending_server_photo_confirmation(
+                conn,
+                "可以拍照",
+                "可以拍照",
+            )
+
+        self.assertFalse(handled)
+
     async def test_repeat_fast_path_uses_cached_step_context(self):
         conn = _FakeConn()
         conn.experiment_current_step = {
@@ -496,6 +623,105 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(spoken))
         self.assertIn("现在做这一步", spoken[0])
         self.assertIn("烧杯编号和磁转子放置", spoken[0])
+
+    async def test_ready_reply_after_start_prompt_does_not_advance_with_session_id(self):
+        conn = _FakeConn()
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+            )
+        )
+        conn.experiment_session_id = "exp-ready-1"
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_prepare_setup_all",
+                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "prompts": {
+                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                    },
+                }
+            }
+        }
+        spoken = []
+        sent = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(
+            intentHandler,
+            "_advance_experiment_step_fast",
+            side_effect=AssertionError("ready reply should not advance step"),
+        ):
+            with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_experiment_control_fast_intent(
+                        conn,
+                        "准备好了",
+                        "准备好了",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(["准备好了"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("现在做这一步", spoken[0])
+        self.assertEqual(1, getattr(conn, "_experiment_ready_guard_bypass_count", 0))
+
+    async def test_start_first_step_after_start_prompt_returns_current_step(self):
+        conn = _FakeConn()
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+            )
+        )
+        conn.experiment_session_id = "exp-ready-2"
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_prepare_setup_all",
+                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "prompts": {
+                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                    },
+                }
+            }
+        }
+        spoken = []
+        sent = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(
+            intentHandler,
+            "_advance_experiment_step_fast",
+            side_effect=AssertionError("start-first-step reply should not advance step"),
+        ):
+            with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_experiment_control_fast_intent(
+                        conn,
+                        "开始第一步",
+                        "开始第一步",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(["开始第一步"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("现在做这一步", spoken[0])
+        self.assertIn("烧杯编号和磁转子放置", spoken[0])
+        self.assertEqual(1, getattr(conn, "_experiment_ready_guard_bypass_count", 0))
 
     async def test_continue_before_ready_does_not_broadcast_step(self):
         conn = _FakeConn()
@@ -1046,6 +1272,92 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             [name for name, _args, _priority in tool_calls],
         )
         self.assertEqual("step_tyndall_observation", conn.experiment_current_step_id)
+
+    async def test_server_photo_timeout_recovery_uses_latest_photo_and_continues(self):
+        conn = _FakeConn()
+        conn.device_id = "94:a9:90:27:3c:84"
+        conn.config = {
+            "device_mcp_shortcuts": {
+                "photo_timeout": 12,
+                "server_photo_recovery_window_seconds": 0,
+            }
+        }
+        spoken = []
+        tool_calls = []
+        latest_photo_calls = {"count": 0}
+
+        async def fake_execute(_conn, tool_name, arguments):
+            tool_calls.append((tool_name, dict(arguments)))
+            if tool_name == "xiaozhi_get_latest_photo":
+                latest_photo_calls["count"] += 1
+                if latest_photo_calls["count"] == 1:
+                    return {
+                        "success": True,
+                        "photo_meta": {
+                            "file_name": "旧照片.png",
+                            "local_path": "C:/demo/old.png",
+                            "mtime": 100.0,
+                        },
+                    }
+                return {
+                    "success": True,
+                    "photo_meta": {
+                        "file_name": "一号样品_20260430_105937.png",
+                        "local_path": "C:/demo/new.png",
+                        "mtime": 101.0,
+                    },
+                }
+            if tool_name == "xiaozhi_take_photo":
+                self.assertEqual(12, arguments["timeout"])
+                self.assertEqual(60, arguments["request_timeout"])
+                return {"success": False, "message": "tool call timeout"}
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        async def fake_advance(_conn, payload, fallback_reply=""):
+            photo_meta = intentHandler._extract_photo_result_meta(payload)
+            self.assertTrue(photo_meta["found"])
+            self.assertIn("一号样品", photo_meta["file_name"])
+            self.assertEqual("一号样品", photo_meta["requested_photo_name"])
+            return "接下来做这一步：观察颜色。做好后告诉我。"
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_get_server_mcp_manager", return_value=object()):
+            with patch.object(
+                intentHandler,
+                "_execute_server_mcp_tool_direct",
+                fake_execute,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "_advance_photo_confirmation_step_locally",
+                    fake_advance,
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "sync_server_mcp_payload_state",
+                        lambda *args, **kwargs: None,
+                    ):
+                        with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                            handled = await intentHandler._execute_server_photo_intent(
+                                conn,
+                                {
+                                    "device_id": conn.device_id,
+                                    "question": "请拍摄一号样品当前状态的照片。",
+                                    "photo_name": "一号样品",
+                                },
+                            )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            ["接下来做这一步：观察颜色。做好后告诉我。"],
+            spoken,
+        )
+        self.assertEqual(
+            ["xiaozhi_get_latest_photo", "xiaozhi_take_photo", "xiaozhi_get_latest_photo"],
+            [name for name, _arguments in tool_calls],
+        )
 
     def test_backstage_filter_drops_new_transition_phrases(self):
         self.assertEqual(
