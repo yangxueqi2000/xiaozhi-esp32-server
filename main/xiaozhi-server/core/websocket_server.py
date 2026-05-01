@@ -39,6 +39,14 @@ _setup_websockets_logger()
 TAG = __name__
 
 
+def _coerce_positive_float(value, default: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return numeric if numeric > 0 else float(default)
+
+
 class WebSocketServer:
     def __init__(self, config: dict):
         self.config = config
@@ -147,14 +155,26 @@ class WebSocketServer:
         server_config = self.config["server"]
         host = server_config.get("ip", "0.0.0.0")
         port = int(server_config.get("port", 8000))
+        ping_interval = _coerce_positive_float(
+            server_config.get("websocket_ping_interval_seconds", 20),
+            20.0,
+        )
+        ping_timeout = _coerce_positive_float(
+            server_config.get("websocket_ping_timeout_seconds", 90),
+            90.0,
+        )
+        self.logger.bind(tag=TAG).info(
+            f"starting websocket server with ping_interval={ping_interval}s, "
+            f"ping_timeout={ping_timeout}s"
+        )
 
         async with websockets.serve(
             self._handle_connection,
             host,
             port,
             process_request=self._http_response,
-            ping_interval=20,
-            ping_timeout=90,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
         ):
             await asyncio.Future()
 

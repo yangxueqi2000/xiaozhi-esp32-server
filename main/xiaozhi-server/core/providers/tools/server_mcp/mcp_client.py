@@ -23,6 +23,47 @@ from core.utils.util import sanitize_tool_name
 TAG = __name__
 
 
+def _coerce_timeout_value(
+    raw_value: Any,
+    *,
+    default: float | None,
+    allow_unbounded: bool = False,
+) -> float | None:
+    """Normalize timeout config values for MCP transports.
+
+    When allow_unbounded=True, explicit null / empty / non-positive values disable
+    the read timeout so long-running tools can stream until completion.
+    """
+    if isinstance(raw_value, timedelta):
+        numeric_value = raw_value.total_seconds()
+        if allow_unbounded and numeric_value <= 0:
+            return None
+        return numeric_value
+
+    if raw_value is None:
+        return None if allow_unbounded else default
+
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if not normalized:
+            return None if allow_unbounded else default
+        if normalized in {"none", "null", "inf", "infinite", "unlimited", "disable", "disabled"}:
+            return None if allow_unbounded else default
+        try:
+            numeric_value = float(normalized)
+        except ValueError:
+            return default
+    else:
+        try:
+            numeric_value = float(raw_value)
+        except (TypeError, ValueError):
+            return default
+
+    if allow_unbounded and numeric_value <= 0:
+        return None
+    return numeric_value
+
+
 class ServerMCPClient:
     """服务端MCP客户端，用于连接和管理MCP服务"""
 
@@ -230,6 +271,21 @@ class ServerMCPClient:
                    
                     # 根据transport类型选择不同的客户端，默认为SSE
                     transport_type = self.config.get("transport", "sse")
+                    timeout_value = _coerce_timeout_value(
+                        self.config.get("timeout", 30 if transport_type in {"streamable-http", "http"} else 5),
+                        default=30 if transport_type in {"streamable-http", "http"} else 5,
+                        allow_unbounded=False,
+                    )
+                    sse_read_timeout_value = _coerce_timeout_value(
+                        self.config.get("sse_read_timeout", 60 * 5),
+                        default=60 * 5,
+                        allow_unbounded=True,
+                    )
+                    if sse_read_timeout_value is None:
+                        self.logger.bind(tag=TAG).info(
+                            f"server MCP read timeout is disabled for {self.config.get('url', '')}; "
+                            "long-running tools may wait until completion"
+                        )
 
                     if transport_type == "streamable-http" or transport_type == "http":
                         # 使用 Streamable HTTP 传输
@@ -237,8 +293,8 @@ class ServerMCPClient:
                             streamablehttp_client(
                                 url=self.config["url"],
                                 headers=headers,
-                                timeout=self.config.get("timeout", 30),
-                                sse_read_timeout=self.config.get("sse_read_timeout", 60 * 5),
+                                timeout=timeout_value,
+                                sse_read_timeout=sse_read_timeout_value,
                                 terminate_on_close=self.config.get("terminate_on_close", True)
                             )
                         )
@@ -249,8 +305,8 @@ class ServerMCPClient:
                             sse_client(
                                 url=self.config["url"],
                                 headers=headers,
-                                timeout=self.config.get("timeout", 5),
-                                sse_read_timeout=self.config.get("sse_read_timeout", 60 * 5)
+                                timeout=timeout_value,
+                                sse_read_timeout=sse_read_timeout_value
                             )
                         )
                         read_stream, write_stream = sse_r, sse_w

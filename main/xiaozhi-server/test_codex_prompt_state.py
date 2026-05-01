@@ -185,6 +185,50 @@ class CodexPromptStateTest(unittest.TestCase):
             prompt_text,
         )
 
+    def test_recent_photo_confirmation_context_is_included_on_later_turn(self):
+        session = self._make_session()
+
+        first_dialogue = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "hello"},
+        ]
+        list(session.stream_response(first_dialogue))
+
+        second_dialogue = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "\u53ef\u4ee5\u62cd\u7167"},
+            {"role": "assistant", "content": "\u62cd\u597d\u4e86\uff0c\u5df2\u7ecf\u4fdd\u5b58\u3002"},
+            {"role": "user", "content": "\u7ee7\u7eed\u4e0b\u4e00\u6b65"},
+        ]
+        list(
+            session.stream_response(
+                second_dialogue,
+                experiment_prewarm_wait_result="ready",
+                experiment_prewarm_status="completed",
+                experiment_prewarm_ready_level="completed",
+                experiment_session_id="exp-1",
+                experiment_current_step_id="step_photo_confirm_sample_1",
+                experiment_recent_photo_confirmation_summary=(
+                    "Recent server photo confirmation succeeded about 3 seconds ago "
+                    "for sample 1. The saved file name was sample1.png. Unless the "
+                    "user explicitly wants a retake, do not ask to retake the same "
+                    "sample photo again."
+                ),
+                experiment_recent_photo_graph_advanced="true",
+                experiment_recent_photo_sample_name="\u4e00\u53f7\u6837\u54c1",
+                experiment_recent_photo_next_step_id="step_sample_2_prepare",
+                experiment_recent_photo_next_step_title="\u4e8c\u53f7\u6837\u54c1\uff1a\u540e\u7eed\u64cd\u4f5c",
+            )
+        )
+
+        prompt_text = session._captured_prompts[1]["prompt_text"]
+        self.assertIn("Recent trusted photo confirmation context from server:", prompt_text)
+        self.assertIn("experiment_recent_photo_graph_advanced: true", prompt_text)
+        self.assertIn(
+            "Do not ask to retake the same sample photo unless the user explicitly asks for a retake",
+            prompt_text,
+        )
+
     def test_stale_vscode_extension_codex_bin_auto_discovers_newer_binary(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

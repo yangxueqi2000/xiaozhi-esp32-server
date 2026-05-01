@@ -137,7 +137,7 @@ async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
                 f"reuse active speaking state for sentence_id={active_sentence_id or 'unknown'}"
             )
 
-    if sentenceType == SentenceType.FIRST:
+    if text is not None and sentenceType == SentenceType.FIRST:
         # 同一句子的后续消息加入流控队列，其他情况立即发送
         if (
             hasattr(conn, "audio_rate_controller")
@@ -151,6 +151,12 @@ async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
         else:
             # 新句子或流控器未初始化，立即发送
             await send_tts_message(conn, "sentence_start", text)
+    elif text is not None and sentenceType in (SentenceType.MIDDLE, SentenceType.LAST):
+        # File-based or legacy TTS paths sometimes attach subtitle text to a
+        # later audio packet instead of the FIRST packet. Emit the subtitle
+        # event here as a compatibility fallback so the device still renders
+        # the spoken text on screen.
+        await send_tts_message(conn, "sentence_start", text)
 
     await sendAudio(conn, audios)
     # 发送句子开始消息

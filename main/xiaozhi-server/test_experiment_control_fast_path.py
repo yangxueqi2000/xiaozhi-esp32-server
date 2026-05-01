@@ -1,4 +1,5 @@
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -97,6 +98,8 @@ class _FakeConn:
         self.tts = None
         self.enriched = False
         self.cmd_exit = []
+        self.experiment_resume_recovery_required = False
+        self.experiment_resume_latest_current_step_id = ""
 
     def enrich_latest_clean_user_utterance_snapshot(self):
         self.enriched = True
@@ -1398,6 +1401,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_local_photo_followup_writes_back_and_moves_to_next_step(self):
         conn = _FakeConn()
+        conn.experiment_resume_recovery_required = True
+        conn.experiment_resume_latest_current_step_id = "step_prepare_setup_all"
         tool_calls = []
         state = {"get_step_calls": 0}
 
@@ -1516,6 +1521,187 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             [name for name, _args, _priority in tool_calls],
         )
         self.assertEqual("step_tyndall_observation", conn.experiment_current_step_id)
+        self.assertEqual(
+            "step_tyndall_observation",
+            conn.experiment_resume_latest_current_step_id,
+        )
+
+    async def test_local_photo_followup_redirects_stale_graph_to_inferred_photo_step(self):
+        conn = _FakeConn()
+        conn.experiment_resume_recovery_required = True
+        conn.experiment_resume_latest_current_step_id = "step_prepare_setup_all"
+        tool_calls = []
+        state = {"redirected": False, "redirect_step_id": "", "redirect_step_reads": 0}
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                if not state["redirected"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_prepare_setup_all",
+                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "prompts": {
+                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                },
+                            },
+                        }
+                    }
+                state["redirect_step_reads"] += 1
+                if state["redirect_step_reads"] == 1:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_sample1_5_photo_confirm",
+                                "title": "1号样品：颜色稳定后拍照记录",
+                                "interaction": {
+                                    "fast_path_mode": "photo_confirmation_step",
+                                },
+                                "prompts": {
+                                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                                },
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_sample2_add_kbr_water_nabh4",
+                            "title": "2号样品：加入溴化钾、纯水并加入硼氢化钠",
+                            "prompts": {
+                                "instruction": "现在做 2 号样品，先加溴化钾和纯水，再加入硼氢化钠。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                if not state["redirected"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "current_progress": {
+                                "missing_fields": ["beakers_labeled"]
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": [
+                                "photo_taken",
+                                "color_confirmed_by_photo",
+                                "photo_file_name",
+                                "photo_path",
+                            ]
+                        },
+                    }
+                }
+            if tool_name == "get_schema":
+                if not state["redirected"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "schema_view": [
+                                {"name": "beakers_labeled", "type": "bool"},
+                            ],
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {"name": "photo_taken", "type": "bool"},
+                            {"name": "color_confirmed_by_photo", "type": "bool"},
+                            {"name": "photo_file_name", "type": "string"},
+                            {"name": "photo_path", "type": "string"},
+                        ],
+                    }
+                }
+            if tool_name == "redirect_to_step":
+                state["redirected"] = True
+                state["redirect_step_id"] = arguments["step_id"]
+                return {"result": {"ok": True}}
+            if tool_name == "add_fields":
+                self.assertEqual(
+                    {
+                        "photo_taken": True,
+                        "color_confirmed_by_photo": True,
+                        "photo_file_name": "1号样品_20260430_195415.png",
+                        "photo_path": "C:/demo/1号样品_20260430_195415.png",
+                    },
+                    arguments["data"],
+                )
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                return {"result": {"ok": True}}
+            if tool_name == "can_proceed":
+                return {"result": {"ok": True}}
+            if tool_name == "proceed_to_next_step":
+                return {"result": {"ok": True}}
+            if tool_name == "get_progress_summary":
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_sample2_add_kbr_water_nabh4",
+                                "title": "2号样品：加入溴化钾、纯水并加入硼氢化钠",
+                            },
+                            "current_step_details": {
+                                "instruction": "现在做 2 号样品，先加溴化钾和纯水，再加入硼氢化钠。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(
+            intentHandler,
+            "_infer_photo_confirmation_step_id_from_context",
+            return_value="step_sample1_5_photo_confirm",
+        ):
+            reply = await intentHandler._advance_photo_confirmation_step_locally(
+                conn,
+                {
+                    "photo_meta": {
+                        "found": True,
+                        "file_name": "1号样品_20260430_195415.png",
+                        "mirrored_path": "C:/demo/1号样品_20260430_195415.png",
+                    }
+                },
+                fallback_reply="拍好了，已经保存。",
+                requested_arguments={"photo_name": "1号样品"},
+            )
+
+        self.assertEqual("step_sample1_5_photo_confirm", state["redirect_step_id"])
+        self.assertIn("2号样品", reply)
+        self.assertIn(
+            "redirect_to_step",
+            [name for name, _args, _priority in tool_calls],
+        )
+        self.assertEqual(
+            "step_sample2_add_kbr_water_nabh4",
+            conn.experiment_current_step_id,
+        )
+        self.assertEqual(
+            "step_sample2_add_kbr_water_nabh4",
+            conn.experiment_resume_latest_current_step_id,
+        )
+        recent_state = getattr(conn, "_recent_server_photo_confirmation", {})
+        self.assertTrue(recent_state.get("graph_advanced"))
+        self.assertEqual(1, recent_state.get("sample_index"))
 
     async def test_server_photo_timeout_recovery_uses_latest_photo_and_continues(self):
         conn = _FakeConn()
@@ -1557,11 +1743,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 return {"success": False, "message": "tool call timeout"}
             raise AssertionError(f"unexpected tool call: {tool_name}")
 
-        async def fake_advance(_conn, payload, fallback_reply=""):
+        async def fake_advance(
+            _conn,
+            payload,
+            fallback_reply="",
+            requested_arguments=None,
+        ):
             photo_meta = intentHandler._extract_photo_result_meta(payload)
             self.assertTrue(photo_meta["found"])
             self.assertIn("一号样品", photo_meta["file_name"])
             self.assertEqual("一号样品", photo_meta["requested_photo_name"])
+            self.assertEqual("一号样品", requested_arguments["photo_name"])
             return "接下来做这一步：观察颜色。做好后告诉我。"
 
         def fake_speak_txt(_conn, text):
@@ -1601,6 +1793,75 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ["xiaozhi_get_latest_photo", "xiaozhi_take_photo", "xiaozhi_get_latest_photo"],
             [name for name, _arguments in tool_calls],
+        )
+
+    async def test_pending_server_photo_confirmation_reuses_recent_success(self):
+        conn = _FakeConn()
+        conn.device_id = "94:a9:90:27:3c:84"
+        conn.dialogue.put(
+            Message(role="assistant", content="现在给1号样品拍照确认。现在可以拍照吗？")
+        )
+        conn._recent_server_photo_confirmation = {
+            "captured_at": time.time(),
+            "sample_index": 1,
+            "sample_name": "1号样品",
+            "next_step_reply": "接下来做这一步：2号样品先加入溴化钾和纯水。",
+        }
+        sent = []
+        spoken = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(
+            intentHandler,
+            "_assistant_is_waiting_for_photo_permission_fixed",
+            return_value=True,
+        ):
+            with patch.object(
+                intentHandler,
+                "_is_affirmative_short_reply_fixed",
+                return_value=True,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "_build_pending_server_photo_request_fixed",
+                    return_value={
+                        "device_id": conn.device_id,
+                        "question": "请拍摄1号样品当前状态的照片。",
+                        "photo_name": "1号样品",
+                    },
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "send_stt_message",
+                        fake_send_stt_message,
+                    ):
+                        with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                            with patch.object(
+                                intentHandler,
+                                "_maybe_wait_before_photo_capture",
+                                side_effect=AssertionError("should not retake photo"),
+                            ):
+                                with patch.object(
+                                    intentHandler,
+                                    "_execute_server_photo_intent",
+                                    side_effect=AssertionError("should not retake photo"),
+                                ):
+                                    handled = await intentHandler.handle_pending_server_photo_confirmation(
+                                        conn,
+                                        "可以拍照",
+                                        "可以拍照",
+                                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(["可以拍照"], sent)
+        self.assertEqual(
+            ["接下来做这一步：2号样品先加入溴化钾和纯水。"],
+            spoken,
         )
 
     def test_backstage_filter_drops_new_transition_phrases(self):

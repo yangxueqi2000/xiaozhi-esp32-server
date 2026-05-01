@@ -351,6 +351,63 @@ class ConnectionHandler:
             text = str(value or "").strip()
             if text:
                 context[key] = text
+        context.update(self._recent_server_photo_confirmation_route_context())
+        return context
+
+    def _recent_server_photo_confirmation_route_context(self) -> Dict[str, str]:
+        state = getattr(self, "_recent_server_photo_confirmation", None)
+        if not isinstance(state, dict):
+            return {}
+
+        try:
+            captured_at = float(state.get("captured_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return {}
+        if captured_at <= 0:
+            return {}
+
+        age_seconds = max(0, int(time.time() - captured_at))
+        if age_seconds > 900:
+            return {}
+
+        sample_name = str(state.get("sample_name", "") or "").strip()
+        graph_advanced = bool(state.get("graph_advanced"))
+        next_step_id = str(state.get("next_step_id", "") or "").strip()
+        next_step_title = str(state.get("next_step_title", "") or "").strip()
+        photo_meta = (
+            state.get("photo_meta") if isinstance(state.get("photo_meta"), dict) else {}
+        )
+        photo_file_name = str(photo_meta.get("file_name", "") or "").strip()
+
+        sample_label = sample_name or "the current sample"
+        summary_parts = [
+            f"Recent server photo confirmation succeeded about {age_seconds} seconds ago for {sample_label}.",
+        ]
+        if photo_file_name:
+            summary_parts.append(f"The saved file name was {photo_file_name}.")
+        if graph_advanced:
+            if next_step_title:
+                summary_parts.append(
+                    f"The experiment was already advanced to the next step: {next_step_title}."
+                )
+            elif next_step_id:
+                summary_parts.append(
+                    f"The experiment was already advanced to next_step_id={next_step_id}."
+                )
+        summary_parts.append(
+            "Unless the user explicitly wants a retake, do not ask to retake the same sample photo again."
+        )
+
+        context = {
+            "experiment_recent_photo_confirmation_summary": " ".join(summary_parts),
+            "experiment_recent_photo_graph_advanced": "true" if graph_advanced else "false",
+        }
+        if sample_name:
+            context["experiment_recent_photo_sample_name"] = sample_name
+        if next_step_id:
+            context["experiment_recent_photo_next_step_id"] = next_step_id
+        if next_step_title:
+            context["experiment_recent_photo_next_step_title"] = next_step_title
         return context
 
     def _experiment_prewarm_enabled(self) -> bool:
@@ -1767,6 +1824,7 @@ class ConnectionHandler:
             self,
             tool_name=tool_name,
             payload=payload,
+            arguments=arguments,
         )
         return payload
 

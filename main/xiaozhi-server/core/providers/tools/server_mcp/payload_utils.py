@@ -215,7 +215,7 @@ def annotate_artifact_validation(
     return annotated
 
 
-def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None):
+def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None, arguments: dict | None = None):
     if conn is None:
         return
 
@@ -227,6 +227,15 @@ def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None):
         blank_baseline_state = extract_blank_baseline_state(payload)
         if blank_baseline_state is not None:
             setattr(conn, "_last_uvvis_blank_baseline_state", blank_baseline_state)
+        if actual_tool_name == "uvvis_session":
+            action = str((arguments or {}).get("action", "") or "").strip().lower()
+            payload_session_key = ""
+            if isinstance(payload, dict):
+                payload_session_key = str(payload.get("session_key") or "").strip()
+            if payload_session_key:
+                setattr(conn, "_uvvis_session_key", payload_session_key)
+            elif action == "release":
+                setattr(conn, "_uvvis_session_key", "")
 
     if actual_tool_name != "export_records_to_yaml":
         return

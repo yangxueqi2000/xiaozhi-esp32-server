@@ -453,6 +453,11 @@ def _experiment_context_from_kwargs(kwargs: Dict[str, Any]) -> Dict[str, str]:
         "experiment_reference_summary",
         "experiment_deep_prefetch_error",
         "experiment_prewarm_error",
+        "experiment_recent_photo_confirmation_summary",
+        "experiment_recent_photo_graph_advanced",
+        "experiment_recent_photo_sample_name",
+        "experiment_recent_photo_next_step_id",
+        "experiment_recent_photo_next_step_title",
     ):
         value = _norm_str(kwargs.get(key, ""))
         if value:
@@ -514,7 +519,19 @@ def _experiment_prompt_block(
         if value:
             lines.append(f"{key}: {value}")
 
-    if not lines:
+    recent_photo_lines: List[str] = []
+    for key in (
+        "experiment_recent_photo_confirmation_summary",
+        "experiment_recent_photo_graph_advanced",
+        "experiment_recent_photo_sample_name",
+        "experiment_recent_photo_next_step_id",
+        "experiment_recent_photo_next_step_title",
+    ):
+        value = _norm_str(experiment_context.get(key, ""))
+        if value:
+            recent_photo_lines.append(f"{key}: {value}")
+
+    if not lines and not recent_photo_lines:
         return ""
 
     wait_result = _norm_str(experiment_context.get("experiment_prewarm_wait_result", ""))
@@ -584,10 +601,12 @@ def _experiment_prompt_block(
         if value:
             deep_prefetch_lines.append(f"{key}: {value}")
 
-    parts = [
-        "Experiment session context from server prewarm (trusted):\n"
-        + "\n".join(lines)
-    ]
+    parts: List[str] = []
+    if lines:
+        parts.append(
+            "Experiment session context from server prewarm (trusted):\n"
+            + "\n".join(lines)
+        )
     if wait_result:
         if wait_result == "timeout":
             timeout_lines = [
@@ -673,6 +692,16 @@ def _experiment_prompt_block(
                 "If some detail is still missing, answer from the trusted current-step context first, "
                 "then fetch only the narrow missing detail."
             )
+    if recent_photo_lines:
+        parts.append(
+            "Recent trusted photo confirmation context from server:\n"
+            + "\n".join(recent_photo_lines)
+        )
+        parts.append(
+            "Treat this recent photo confirmation as trusted short-term state. "
+            "Do not ask to retake the same sample photo unless the user explicitly asks for a retake "
+            "or a fresh experiment_graph read clearly proves the confirmation is still missing."
+        )
     parts.append(reuse_rule)
     return "\n\n".join(parts)
 

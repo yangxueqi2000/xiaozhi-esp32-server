@@ -920,6 +920,7 @@ async def _call_experiment_graph_tool_fast(
         conn,
         tool_name=tool_name,
         payload=payload,
+        arguments=arguments,
     )
     return payload
 
@@ -1025,6 +1026,8 @@ async def _refresh_experiment_step_cache(conn, session_id: str):
         )
         if current_step_id:
             conn.experiment_current_step_id = current_step_id
+            if getattr(conn, "experiment_resume_recovery_required", False):
+                conn.experiment_resume_latest_current_step_id = current_step_id
     return _merge_experiment_step_meta(
         _extract_experiment_step_meta(step_payload),
         _extract_experiment_step_meta(progress_payload),
@@ -1304,10 +1307,294 @@ def _step_meta_looks_like_photo_confirmation(step_meta: dict) -> bool:
     return _contains_any(haystack, ("拍照", "照片", "拍一下", "拍一张", "拍摄"))
 
 
+def _parse_small_chinese_integer(token: str) -> int | None:
+    text = str(token or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        try:
+            value = int(text)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    digit_map = {
+        "\u96f6": 0,
+        "\u4e00": 1,
+        "\u4e8c": 2,
+        "\u4e09": 3,
+        "\u56db": 4,
+        "\u4e94": 5,
+        "\u516d": 6,
+        "\u4e03": 7,
+        "\u516b": 8,
+        "\u4e5d": 9,
+        "\u5341": 10,
+        "\u4e24": 2,
+    }
+    normalized = text.replace("\u4e24", "\u4e8c")
+    if normalized in digit_map and digit_map[normalized] > 0:
+        return digit_map[normalized]
+
+    if "\u5341" in normalized:
+        left, right = normalized.split("\u5341", 1)
+        tens = digit_map.get(left) if left else 1
+        if tens is None:
+            return None
+        ones = digit_map.get(right) if right else 0
+        if ones is None:
+            return None
+        value = tens * 10 + ones
+        return value if value > 0 else None
+
+    return None
+
+
+def _extract_sample_index_from_text(text: str) -> int | None:
+    src = textUtils.normalize_spoken_text(text or "")
+    if not src:
+        return None
+
+    patterns = (
+        r"([0-9]+)\s*\u53f7\u6837\u54c1",
+        r"\u6837\u54c1\s*([0-9]+)",
+        r"sample[_\\-\\s]*([0-9]+)",
+        r"([\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u4e24]+)\s*\u53f7\u6837\u54c1",
+        r"\u6837\u54c1\s*([\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u4e24]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, src, flags=re.IGNORECASE)
+        if not match:
+            continue
+        parsed = _parse_small_chinese_integer(match.group(1))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _format_sample_name(sample_index: int | None, fallback: str = "") -> str:
+    if sample_index is not None and sample_index > 0:
+        return f"{sample_index}\u53f7\u6837\u54c1"
+    return str(fallback or "").strip()
+
+
+def _resolve_experiment_yaml_steps(conn) -> list[dict]:
+    cache = getattr(conn, "_experiment_yaml_steps_cache", None)
+    if isinstance(cache, list):
+        return cache
+
+    yaml_path = str(getattr(conn, "experiment_yaml_path", "") or "").strip()
+    if not yaml_path and hasattr(conn, "_resolve_experiment_yaml_path"):
+        try:
+            yaml_path = str(conn._resolve_experiment_yaml_path() or "").strip()
+        except Exception:
+            yaml_path = ""
+    if not yaml_path:
+        return []
+
+    try:
+        payload = yaml.safe_load(Path(yaml_path).read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+
+    candidate_lists = []
+    if isinstance(payload, dict):
+        top_steps = payload.get("steps")
+        if isinstance(top_steps, list):
+            candidate_lists.append(top_steps)
+        experiment = payload.get("experiment")
+        if isinstance(experiment, dict):
+            nested_steps = experiment.get("steps")
+            if isinstance(nested_steps, list):
+                candidate_lists.append(nested_steps)
+
+    for steps in candidate_lists:
+        normalized_steps = [item for item in steps if isinstance(item, dict)]
+        if normalized_steps:
+            setattr(conn, "_experiment_yaml_steps_cache", normalized_steps)
+            return normalized_steps
+    return []
+
+
+def _infer_photo_confirmation_step_id_from_context(
+    conn,
+    payload,
+    *,
+    requested_arguments: dict | None = None,
+) -> str:
+    sample_index = None
+    photo_meta = _extract_photo_result_meta(payload)
+    candidate_texts = [
+        photo_meta.get("requested_photo_name", ""),
+        photo_meta.get("file_name", ""),
+        photo_meta.get("photo_path", ""),
+        str((requested_arguments or {}).get("photo_name", "") or ""),
+        str((requested_arguments or {}).get("question", "") or ""),
+        _get_last_assistant_text_raw(conn),
+    ]
+    for text in candidate_texts:
+        sample_index = _extract_sample_index_from_text(text)
+        if sample_index is not None:
+            break
+    if sample_index is None:
+        return ""
+
+    step_cache = getattr(conn, "_photo_confirmation_step_id_cache", None)
+    if not isinstance(step_cache, dict):
+        step_cache = {}
+    cached_step_id = str(step_cache.get(sample_index, "") or "").strip()
+    if cached_step_id:
+        return cached_step_id
+
+    for step in _resolve_experiment_yaml_steps(conn):
+        step_id = str(step.get("id", "") or "").strip()
+        if not step_id:
+            continue
+        prompts = step.get("prompts") if isinstance(step.get("prompts"), dict) else {}
+        step_meta = {
+            "title": str(step.get("title", "") or "").strip(),
+            "description": str(step.get("description", "") or "").strip(),
+            "instruction": str(prompts.get("instruction", "") or "").strip(),
+            "tip": str(prompts.get("tip", "") or "").strip(),
+        }
+        interaction = step.get("interaction") if isinstance(step.get("interaction"), dict) else {}
+        fast_path_mode = str(interaction.get("fast_path_mode", "") or "").strip().lower()
+        if fast_path_mode != "photo_confirmation_step" and not _step_meta_looks_like_photo_confirmation(
+            step_meta
+        ):
+            continue
+        step_sample_index = None
+        for step_text in (
+            step_id,
+            step_meta["title"],
+            step_meta["description"],
+            step_meta["instruction"],
+        ):
+            step_sample_index = _extract_sample_index_from_text(step_text)
+            if step_sample_index is not None:
+                break
+        if step_sample_index != sample_index:
+            continue
+        step_cache[sample_index] = step_id
+        setattr(conn, "_photo_confirmation_step_id_cache", step_cache)
+        return step_id
+    return ""
+
+
+def _append_hidden_assistant_context(conn, text: str, *, source: str = "") -> None:
+    normalized = " ".join(str(text or "").split()).strip()
+    if not normalized:
+        return
+    conn.dialogue.put(Message(role="assistant", content=normalized))
+    if hasattr(conn, "append_experiment_interaction_log"):
+        try:
+            conn.append_experiment_interaction_log(
+                "ASSISTANT",
+                normalized,
+                source=source or "assistant_context",
+            )
+        except Exception:
+            pass
+
+
+def _remember_recent_server_photo_confirmation(
+    conn,
+    *,
+    payload,
+    requested_arguments: dict | None = None,
+    graph_advanced: bool = False,
+    next_step_id: str = "",
+    next_step_title: str = "",
+    next_step_reply: str = "",
+) -> dict:
+    photo_meta = _extract_photo_result_meta(payload)
+    sample_index = None
+    for text in (
+        photo_meta.get("requested_photo_name", ""),
+        str((requested_arguments or {}).get("photo_name", "") or ""),
+        str((requested_arguments or {}).get("question", "") or ""),
+        photo_meta.get("file_name", ""),
+        _get_last_assistant_text_raw(conn),
+    ):
+        sample_index = _extract_sample_index_from_text(text)
+        if sample_index is not None:
+            break
+
+    sample_name = str(photo_meta.get("requested_photo_name", "") or "").strip()
+    if not sample_name:
+        sample_name = str((requested_arguments or {}).get("photo_name", "") or "").strip()
+    sample_name = _format_sample_name(sample_index, fallback=sample_name)
+
+    state = {
+        "captured_at": time.time(),
+        "sample_index": sample_index,
+        "sample_name": sample_name,
+        "photo_meta": photo_meta,
+        "graph_advanced": bool(graph_advanced),
+        "next_step_id": str(next_step_id or "").strip(),
+        "next_step_title": str(next_step_title or "").strip(),
+        "next_step_reply": str(next_step_reply or "").strip(),
+    }
+    setattr(conn, "_recent_server_photo_confirmation", state)
+    return state
+
+
+def _build_hidden_photo_confirmation_note(state: dict) -> str:
+    if not isinstance(state, dict):
+        return ""
+    sample_name = str(state.get("sample_name", "") or "").strip() or "\u5f53\u524d\u6837\u54c1"
+    if state.get("graph_advanced") and str(state.get("next_step_title", "") or "").strip():
+        return (
+            f"\u62cd\u7167\u5df2\u7ecf\u6210\u529f\uff0c\u6211\u628a{sample_name}\u7684\u62cd\u7167\u786e\u8ba4"
+            f"\u8bb0\u5f55\u5199\u56de\u5f53\u524d\u5b9e\u9a8c\u72b6\u6001\uff0c\u5f53\u524d\u5df2\u8fdb\u5165"
+            f"{str(state.get('next_step_title', '')).strip()}\u3002"
+        )
+    return (
+        f"\u62cd\u7167\u5df2\u7ecf\u6210\u529f\uff0c{sample_name}\u7167\u7247\u5df2\u4fdd\u5b58\u3002"
+        f"\u540e\u7eed\u4e0d\u8981\u518d\u8981\u6c42{sample_name}\u91cd\u590d\u62cd\u7167\uff0c"
+        f"\u9664\u975e\u7528\u6237\u660e\u786e\u8981\u6c42\u91cd\u62cd\u3002"
+    )
+
+
+def _recent_server_photo_confirmation_matches_request(conn, request: dict) -> bool:
+    state = getattr(conn, "_recent_server_photo_confirmation", None)
+    if not isinstance(state, dict):
+        return False
+
+    try:
+        captured_at = float(state.get("captured_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        captured_at = 0.0
+    if captured_at <= 0 or (time.time() - captured_at) > 900:
+        return False
+
+    recent_sample_index = state.get("sample_index")
+    request_sample_index = None
+    for text in (
+        str((request or {}).get("photo_name", "") or ""),
+        str((request or {}).get("question", "") or ""),
+        _get_last_assistant_text_raw(conn),
+    ):
+        request_sample_index = _extract_sample_index_from_text(text)
+        if request_sample_index is not None:
+            break
+
+    if recent_sample_index is not None and request_sample_index is not None:
+        return int(recent_sample_index) == int(request_sample_index)
+
+    recent_sample_name = str(state.get("sample_name", "") or "").strip()
+    request_sample_name = str((request or {}).get("photo_name", "") or "").strip()
+    if recent_sample_name and request_sample_name:
+        return recent_sample_name == request_sample_name
+    return False
+
+
 async def _advance_photo_confirmation_step_locally(
     conn,
     payload,
     fallback_reply: str = "",
+    *,
+    requested_arguments: dict | None = None,
 ) -> str:
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     if not session_id:
@@ -1369,6 +1656,91 @@ async def _advance_photo_confirmation_step_locally(
         and any(name in schema_by_name for name in photo_related_fields)
     ) or any(name in photo_related_fields for name in missing_fields)
     if not is_photo_confirmation_step:
+        inferred_step_id = _infer_photo_confirmation_step_id_from_context(
+            conn,
+            payload,
+            requested_arguments=requested_arguments,
+        )
+        if inferred_step_id:
+            conn.logger.bind(tag=TAG).info(
+                "local photo follow-up redirecting stale graph step: "
+                f"session_id={session_id}, inferred_step_id={inferred_step_id}, "
+                f"current_step_id={getattr(conn, 'experiment_current_step_id', '')}"
+            )
+            redirect_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "redirect_to_step",
+                {"session_id": session_id, "step_id": inferred_step_id},
+                priority="foreground",
+            )
+            if bool(_experiment_result_body(redirect_payload).get("ok")):
+                step_payload, progress_payload, schema_payload = await asyncio.gather(
+                    _call_experiment_graph_tool_fast(
+                        conn,
+                        "get_step",
+                        {"session_id": session_id},
+                        priority="foreground",
+                    ),
+                    _call_experiment_graph_tool_fast(
+                        conn,
+                        "get_current_progress",
+                        {"session_id": session_id},
+                        priority="foreground",
+                    ),
+                    _call_experiment_graph_tool_fast(
+                        conn,
+                        "get_schema",
+                        {"session_id": session_id},
+                        priority="foreground",
+                    ),
+                )
+
+                conn.experiment_current_step = step_payload
+                if hasattr(conn, "_extract_experiment_current_step_id"):
+                    current_step_id = conn._extract_experiment_current_step_id(
+                        step_payload
+                    )
+                    if current_step_id:
+                        conn.experiment_current_step_id = current_step_id
+
+                step_meta = _merge_experiment_step_meta(
+                    _extract_experiment_step_meta(step_payload),
+                    _extract_experiment_step_meta(
+                        getattr(conn, "experiment_progress_summary", None)
+                    ),
+                )
+                current_progress = _extract_experiment_current_progress(progress_payload)
+                if current_progress is None:
+                    start_payload = await _call_experiment_graph_tool_fast(
+                        conn,
+                        "start_trial",
+                        {"session_id": session_id},
+                        priority="foreground",
+                    )
+                    current_progress = _extract_experiment_current_progress(
+                        start_payload
+                    )
+
+                schema_by_name = _extract_experiment_schema_view(schema_payload)
+                photo_fields = _build_experiment_photo_writeback_fields(
+                    schema_by_name, photo_meta
+                )
+                missing_fields = list((current_progress or {}).get("missing_fields") or [])
+                is_photo_confirmation_step = _step_meta_looks_like_photo_confirmation(
+                    step_meta
+                ) or (
+                    bool(schema_by_name)
+                    and any(name in schema_by_name for name in photo_related_fields)
+                ) or any(name in photo_related_fields for name in missing_fields)
+
+    if not is_photo_confirmation_step:
+        _remember_recent_server_photo_confirmation(
+            conn,
+            payload=payload,
+            requested_arguments=requested_arguments,
+            graph_advanced=False,
+            next_step_reply=fallback_reply,
+        )
         return fallback_reply or "拍好了。"
 
     if photo_fields:
@@ -1427,6 +1799,27 @@ async def _advance_photo_confirmation_step_locally(
 
     next_meta = await _refresh_experiment_step_cache(conn, session_id)
     reply = _compose_experiment_step_reply(next_meta, mode="next")
+    recent_state = _remember_recent_server_photo_confirmation(
+        conn,
+        payload=payload,
+        requested_arguments=requested_arguments,
+        graph_advanced=True,
+        next_step_id=str(next_meta.get("step_id", "") or "").strip(),
+        next_step_title=str(next_meta.get("title", "") or "").strip(),
+        next_step_reply=reply or fallback_reply,
+    )
+    hidden_note = _build_hidden_photo_confirmation_note(recent_state)
+    if hidden_note:
+        _append_hidden_assistant_context(
+            conn,
+            hidden_note,
+            source="photo_confirmation_context",
+        )
+    conn.logger.bind(tag=TAG).info(
+        "local photo follow-up advanced experiment step: "
+        f"session_id={session_id}, next_step_id={str(next_meta.get('step_id', '') or '').strip()}, "
+        f"next_step_title={str(next_meta.get('title', '') or '').strip()}"
+    )
     if reply:
         return reply
     return fallback_reply or "拍照已经完成，继续做当前下一步。"
@@ -2744,11 +3137,26 @@ async def _execute_server_photo_intent(conn, arguments: dict) -> bool:
             conn,
             payload,
             fallback_reply=reply,
+            requested_arguments=call_arguments,
         )
     except Exception as exc:
         conn.logger.bind(tag=TAG).warning(
             f"local server photo follow-up failed: {exc}"
         )
+        recent_state = _remember_recent_server_photo_confirmation(
+            conn,
+            payload=payload,
+            requested_arguments=call_arguments,
+            graph_advanced=False,
+            next_step_reply=reply,
+        )
+        hidden_note = _build_hidden_photo_confirmation_note(recent_state)
+        if hidden_note:
+            _append_hidden_assistant_context(
+                conn,
+                hidden_note,
+                source="photo_confirmation_context",
+            )
         local_reply = reply
 
     if hasattr(conn, "enrich_latest_clean_user_utterance_snapshot"):
@@ -2824,11 +3232,23 @@ async def handle_pending_server_photo_confirmation(
     conn.client_abort = False
     conn.sentence_id = str(uuid.uuid4().hex)
     conn.dialogue.put(Message(role="user", content=original_text))
+    pending_request = _build_pending_server_photo_request_fixed(conn)
+    if _recent_server_photo_confirmation_matches_request(conn, pending_request):
+        recent_state = getattr(conn, "_recent_server_photo_confirmation", {}) or {}
+        reply = str(recent_state.get("next_step_reply", "") or "").strip()
+        if not reply:
+            sample_name = str(recent_state.get("sample_name", "") or "").strip() or "当前样品"
+            reply = f"{sample_name}刚才已经拍好了，我们继续下一步。"
+        conn.logger.bind(tag=TAG).info(
+            "reusing recent server photo confirmation instead of retaking photo"
+        )
+        speak_txt(conn, reply)
+        return True
     conn.logger.bind(tag=TAG).info("confirmed pending server photo capture, executing xiaozhi_take_photo directly")
     await _maybe_wait_before_photo_capture(conn, "server_photo_confirmation")
     return await _execute_server_photo_intent(
         conn,
-        _build_pending_server_photo_request_fixed(conn),
+        pending_request,
     )
 
 

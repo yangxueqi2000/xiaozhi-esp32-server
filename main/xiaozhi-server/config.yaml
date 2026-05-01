@@ -18,6 +18,11 @@ server:
   # 所以如果你使用docker部署时，将websocket设置成局域网地址
   # 如果你使用公网部署时，将vwebsocket设置成公网地址
   websocket: ws://你的ip或者域名:端口号/xiaozhi/v1/
+  # WebSocket底层心跳参数。用于降低长时间实验时的误判断线概率。
+  # ping_interval 表示每隔多久发一次心跳；ping_timeout 表示发出后最多等多久还收不到响应就判定掉线。
+  # 对持续 34 分钟左右的 UV-Vis 动力学实验，推荐先用 20 / 180 秒。
+  websocket_ping_interval_seconds: 20
+  websocket_ping_timeout_seconds: 180
   # 视觉分析接口地址
   # 向设备发送的视觉分析的接口地址
   # 如果按下面默认的写法，系统会自动生成视觉识别地址，并输出在启动日志里，这个地址你可以直接用浏览器访问确认一下

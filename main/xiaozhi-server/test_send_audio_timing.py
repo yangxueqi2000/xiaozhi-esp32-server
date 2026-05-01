@@ -259,5 +259,71 @@ class SendAudioTimingTest(unittest.TestCase):
         self.assertEqual("接下来做这一步", sentence_payload["text"])
 
 
+    def test_middle_audio_message_with_text_still_emits_sentence_start(self):
+        ws = _DummyWebSocket()
+        conn = SimpleNamespace(
+            session_id="sess-4",
+            sentence_id="turn-2",
+            websocket=ws,
+            config={},
+            logger=_DummyLogger(),
+            tts=SimpleNamespace(tts_audio_first_sentence=True),
+            client_is_speaking=False,
+            close_after_chat=False,
+        )
+
+        asyncio.run(
+            sendAudioMessage(
+                conn,
+                SentenceType.MIDDLE,
+                [],
+                "fallback subtitle for middle audio",
+                sentence_id="turn-2",
+            )
+        )
+
+        self.assertEqual(2, len(ws.messages))
+        start_payload = json.loads(ws.messages[0])
+        sentence_payload = json.loads(ws.messages[1])
+        self.assertEqual("start", start_payload["state"])
+        self.assertNotIn("text", start_payload)
+        self.assertEqual("sentence_start", sentence_payload["state"])
+        self.assertEqual(
+            "fallback subtitle for middle audio", sentence_payload["text"]
+        )
+
+    def test_last_audio_message_with_text_still_emits_sentence_start_before_stop(self):
+        ws = _DummyWebSocket()
+        conn = SimpleNamespace(
+            session_id="sess-5",
+            sentence_id="turn-3",
+            websocket=ws,
+            config={"enable_stop_tts_notify": False},
+            logger=_DummyLogger(),
+            tts=SimpleNamespace(tts_audio_first_sentence=False),
+            client_is_speaking=True,
+            close_after_chat=False,
+            clearSpeakStatus=lambda: None,
+            has_external_busy=lambda: False,
+        )
+
+        asyncio.run(
+            sendAudioMessage(
+                conn,
+                SentenceType.LAST,
+                [],
+                "fallback subtitle for last audio",
+                sentence_id="turn-3",
+            )
+        )
+
+        self.assertEqual(2, len(ws.messages))
+        sentence_payload = json.loads(ws.messages[0])
+        stop_payload = json.loads(ws.messages[1])
+        self.assertEqual("sentence_start", sentence_payload["state"])
+        self.assertEqual("fallback subtitle for last audio", sentence_payload["text"])
+        self.assertEqual("stop", stop_payload["state"])
+
+
 if __name__ == "__main__":
     unittest.main()

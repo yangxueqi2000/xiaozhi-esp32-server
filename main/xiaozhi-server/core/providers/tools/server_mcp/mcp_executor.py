@@ -65,6 +65,7 @@ class ServerMCPExecutor(ToolExecutor):
                 self.conn,
                 tool_name=actual_tool_name,
                 payload=payload,
+                arguments=call_args,
             )
             follow_up_response = await self.uvvis_scan_rule.after_execute(
                 actual_tool_name,
@@ -126,5 +127,23 @@ class ServerMCPExecutor(ToolExecutor):
 
     async def cleanup(self):
         await self.uvvis_scan_rule.cleanup()
+        if self.mcp_manager:
+            session_key = str(getattr(self.conn, "_uvvis_session_key", "") or "").strip()
+            if session_key and self.mcp_manager.is_mcp_tool("uvvis_session"):
+                try:
+                    await self.mcp_manager.execute_tool(
+                        "uvvis_session",
+                        {"action": "release", "session_key": session_key},
+                        priority="background_common",
+                    )
+                except Exception as cleanup_error:
+                    logger = getattr(self.conn, "logger", None)
+                    if logger is not None:
+                        logger.warning(
+                            "failed to auto-release uvvis_session during connection cleanup: %s",
+                            cleanup_error,
+                        )
+                finally:
+                    setattr(self.conn, "_uvvis_session_key", "")
         if self.mcp_manager:
             await self.mcp_manager.cleanup_all()

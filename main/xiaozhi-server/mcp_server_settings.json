@@ -58,6 +58,14 @@
                                                                       },
                                                           "des":  "使用Streamable HTTP传输模式，适用于生产环境的Web部署"
                                                       },
+                       "uvvis":  {
+                                      "url":  "http://127.0.0.1:8766/mcp",
+                                      "transport":  "streamable-http",
+                                      "timeout":  60,
+                                      "sse_read_timeout":  null,
+                                      "terminate_on_close":  false,
+                                      "des":  "UV-Vis MCP server with unbounded read timeout for long kinetics measurements."
+                                                      },
                        "xiaozhi-device-trigger":  {
                                                       "command":  "python",
                                                       "args":  [
