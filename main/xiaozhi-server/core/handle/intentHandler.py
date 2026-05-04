@@ -1318,18 +1318,47 @@ def _build_experiment_photo_writeback_fields(schema_by_name: dict, photo_meta: d
 
 
 def _step_meta_looks_like_photo_confirmation(step_meta: dict) -> bool:
+    title = _normalize_text_for_match(step_meta.get("title", ""))
+    if title and _contains_any(title, ("拍照", "照片", "拍摄")):
+        return True
+
     haystack = _normalize_text_for_match(
         " ".join(
-            str(
-                step_meta.get(key, "")
-                or ""
-            ).strip()
-            for key in ("title", "instruction", "description", "tip")
+            str(step_meta.get(key, "") or "").strip()
+            for key in ("instruction", "description", "tip")
         )
     )
     if not haystack:
         return False
-    return _contains_any(haystack, ("拍照", "照片", "拍一下", "拍一张", "拍摄"))
+
+    if _contains_any(
+        haystack,
+        (
+            "颜色稳定后拍照",
+            "拍照确认",
+            "调用mcp工具xiaozhi_take_photo",
+            "拍照后基于照片",
+            "基于照片确认",
+            "拍照成功后",
+            "照片颜色",
+        ),
+    ):
+        return True
+
+    # Some non-photo steps mention "完成后进入拍照记录步骤"; that should not make
+    # the current step itself look like a photo-confirmation step.
+    if _contains_any(
+        haystack,
+        (
+            "进入本样品拍照记录步骤",
+            "进入拍照记录步骤",
+            "进入下一步拍照",
+            "完成后进入拍照",
+        ),
+    ):
+        return False
+
+    return False
 
 
 def _parse_small_chinese_integer(token: str) -> int | None:
@@ -1441,6 +1470,52 @@ def _resolve_experiment_yaml_steps(conn) -> list[dict]:
     return []
 
 
+_PHOTO_CONFIRMATION_FIELD_NAMES = frozenset(
+    {
+        "photo_taken",
+        "color_confirmed_by_photo",
+        "color_mismatch_reason",
+        "photo_file_name",
+        "photo_path",
+    }
+)
+
+
+def _yaml_step_schema_names(step: dict) -> set[str]:
+    if not isinstance(step, dict):
+        return set()
+    record_schema = step.get("record_schema")
+    if not isinstance(record_schema, dict):
+        return set()
+    return {
+        str(field_name or "").strip()
+        for field_name in record_schema
+        if str(field_name or "").strip()
+    }
+
+
+def _yaml_step_looks_like_photo_confirmation(step: dict) -> bool:
+    if not isinstance(step, dict):
+        return False
+
+    interaction = step.get("interaction") if isinstance(step.get("interaction"), dict) else {}
+    fast_path_mode = str(interaction.get("fast_path_mode", "") or "").strip().lower()
+    if fast_path_mode == "photo_confirmation_step":
+        return True
+
+    if _yaml_step_schema_names(step) & _PHOTO_CONFIRMATION_FIELD_NAMES:
+        return True
+
+    prompts = step.get("prompts") if isinstance(step.get("prompts"), dict) else {}
+    step_meta = {
+        "title": str(step.get("title", "") or "").strip(),
+        "description": str(step.get("description", "") or "").strip(),
+        "instruction": str(prompts.get("instruction", "") or "").strip(),
+        "tip": str(prompts.get("tip", "") or "").strip(),
+    }
+    return _step_meta_looks_like_photo_confirmation(step_meta)
+
+
 def _infer_photo_confirmation_step_id_from_context(
     conn,
     payload,
@@ -1475,6 +1550,8 @@ def _infer_photo_confirmation_step_id_from_context(
         step_id = str(step.get("id", "") or "").strip()
         if not step_id:
             continue
+        if not _yaml_step_looks_like_photo_confirmation(step):
+            continue
         prompts = step.get("prompts") if isinstance(step.get("prompts"), dict) else {}
         step_meta = {
             "title": str(step.get("title", "") or "").strip(),
@@ -1482,12 +1559,6 @@ def _infer_photo_confirmation_step_id_from_context(
             "instruction": str(prompts.get("instruction", "") or "").strip(),
             "tip": str(prompts.get("tip", "") or "").strip(),
         }
-        interaction = step.get("interaction") if isinstance(step.get("interaction"), dict) else {}
-        fast_path_mode = str(interaction.get("fast_path_mode", "") or "").strip().lower()
-        if fast_path_mode != "photo_confirmation_step" and not _step_meta_looks_like_photo_confirmation(
-            step_meta
-        ):
-            continue
         step_sample_index = None
         for step_text in (
             step_id,
@@ -1875,6 +1946,56 @@ _UVVIS_NOT_READY_REPLY = "UV-Vis 这边还没准备好，请稍后再试。"
 _UVVIS_SAMPLE_POSITIONS = (1, 2, 3, 4, 5)
 
 
+async def _try_redirect_experiment_step_fast(
+    conn,
+    step_id: str,
+    *,
+    log_reason: str,
+) -> bool:
+    target_step_id = str(step_id or "").strip()
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not target_step_id or not session_id:
+        return False
+
+    current_step_id = _get_current_experiment_step_id(conn)
+    if current_step_id == target_step_id:
+        return True
+
+    conn.logger.bind(tag=TAG).info(
+        f"{log_reason}: session_id={session_id}, "
+        f"inferred_step_id={target_step_id}, current_step_id={current_step_id}"
+    )
+    try:
+        redirect_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "redirect_to_step",
+            {"session_id": session_id, "step_id": target_step_id},
+            priority="foreground",
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"{log_reason} failed: {exc}"
+        )
+        return False
+
+    if not bool(_experiment_result_body(redirect_payload).get("ok")):
+        message = _extract_experiment_result_message(redirect_payload)
+        if message:
+            conn.logger.bind(tag=TAG).warning(
+                f"{log_reason} rejected: {message}"
+            )
+        return False
+
+    conn.experiment_current_step_id = target_step_id
+    conn.experiment_current_step = {"result": {"step": {"id": target_step_id}}}
+    conn.experiment_progress_summary = {
+        "result": {"summary": {"current_step": {"step_id": target_step_id}}}
+    }
+    if getattr(conn, "experiment_resume_recovery_required", False):
+        conn.experiment_resume_latest_current_step_id = target_step_id
+    return True
+
+
 def _get_current_experiment_step_id(conn) -> str:
     step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
     if step_id:
@@ -1916,6 +2037,120 @@ def _is_uvvis_spectra_step(step_id: str) -> bool:
         _UVVIS_SHARED_BLANK_STEP_ID,
         _UVVIS_SAMPLE_RECORD_STEP_ID,
     }
+
+
+def _infer_uvvis_step_id_from_context(
+    conn,
+    original_text: str = "",
+    filtered_text: str = "",
+) -> str:
+    state = getattr(conn, "_uvvis_direct_state", None)
+    if isinstance(state, dict):
+        state_step_id = str(state.get("step_id", "") or "").strip()
+        if _is_uvvis_step(state_step_id):
+            return state_step_id
+
+    context_text = _normalize_text_for_match(
+        " ".join(
+            text
+            for text in (
+                _get_last_assistant_text_raw(conn),
+                _get_recent_assistant_text(conn, limit=4),
+                original_text,
+                filtered_text,
+            )
+            if str(text or "").strip()
+        )
+    )
+    if not context_text:
+        return ""
+
+    if _contains_any(
+        context_text,
+        (
+            "2号样品动力学",
+            "sample2",
+            "2号样品反应液",
+            "2号样品参比液",
+            "2号样品位",
+        ),
+    ):
+        return _UVVIS_KINETICS_SAMPLE2_STEP_ID
+
+    if _contains_any(
+        context_text,
+        (
+            "4号样品动力学",
+            "sample4",
+            "4号样品反应液",
+            "4号样品参比液",
+            "4号样品位",
+        ),
+    ):
+        return _UVVIS_KINETICS_SAMPLE4_STEP_ID
+
+    if _contains_any(
+        context_text,
+        (
+            "暗电流",
+            "空气基线",
+            "空气能量",
+            "纯水空白",
+            "纯水比色皿",
+            "样品位和参比位都留空",
+            "样品位和参比位各放入纯水比色皿",
+            "先不要放任何液体",
+        ),
+    ):
+        return _UVVIS_SHARED_BLANK_STEP_ID
+
+    if _contains_any(
+        context_text,
+        (
+            "装入比色皿",
+            "装样准备",
+            "样品比色皿",
+            "放入自动五联架",
+            "参比位纯水比色皿保持不动",
+        ),
+    ):
+        return _UVVIS_SAMPLE_LOAD_STEP_ID
+
+    if _contains_any(
+        context_text,
+        (
+            "批量测光谱",
+            "光谱测量与记录",
+            "开始1-5号样品的光谱测量",
+            "1-5号样品的光谱",
+            "开始样品测量",
+            "λmax",
+            "lambda max",
+        ),
+    ):
+        return _UVVIS_SAMPLE_RECORD_STEP_ID
+
+    if _contains_any(
+        context_text,
+        (
+            "清洗比色皿",
+            "统一清洗比色皿",
+            "测量后的统一清洗",
+        ),
+    ):
+        return _UVVIS_SAMPLE_CLEAN_STEP_ID
+
+    if _contains_any(
+        context_text,
+        (
+            "数据分析",
+            "绘制ag nps吸收光谱",
+            "lambda max与kbr用量",
+        ),
+    ):
+        return _UVVIS_ANALYSIS_STEP_ID
+
+    return ""
 
 
 def _normalize_uvvis_device_id(conn) -> str:
@@ -3173,7 +3408,20 @@ async def _handle_uvvis_kinetics_measurement(
 async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: str) -> bool:
     step_id = _get_current_experiment_step_id(conn)
     if not _is_uvvis_step(step_id):
-        return False
+        inferred_step_id = _infer_uvvis_step_id_from_context(
+            conn,
+            original_text,
+            filtered_text,
+        )
+        if not inferred_step_id:
+            return False
+        if inferred_step_id != step_id:
+            await _try_redirect_experiment_step_fast(
+                conn,
+                inferred_step_id,
+                log_reason="direct uvvis redirecting stale graph step",
+            )
+        step_id = inferred_step_id
 
     if step_id == _UVVIS_ANALYSIS_STEP_ID:
         await _release_uvvis_session_for_analysis(conn)
