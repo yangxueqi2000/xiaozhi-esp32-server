@@ -5035,8 +5035,25 @@ def _assistant_is_waiting_for_photo_permission_fixed(conn) -> bool:
     if not last_text:
         return False
 
-    photo_tokens = ("拍照", "拍一张", "拍一下", "照一下", "照片")
+    photo_tokens = ("拍照", "拍一张", "拍一下", "照一下", "拍摄", "照片", "拍吧")
     if not _contains_any(last_text, photo_tokens):
+        return False
+
+    negative_prompt_tokens = (
+        "不要拍",
+        "别拍",
+        "先别拍",
+        "不可以拍",
+        "不能拍",
+        "还不能拍",
+        "不要拍照",
+        "别拍照",
+        "先别拍照",
+        "不可以拍照",
+        "不能拍照",
+        "还不能拍照",
+    )
+    if _contains_any(last_text, negative_prompt_tokens):
         return False
 
     explicit_wait_tokens = (
@@ -5047,11 +5064,25 @@ def _assistant_is_waiting_for_photo_permission_fixed(conn) -> bool:
         "允许拍照后再告诉我",
         "告诉我可以拍照",
         "等你允许后我再拍",
+        "再说一声拍吧",
+        "说一声拍吧",
+        "再说一遍拍吧",
+        "说一遍拍吧",
+        "再说一声拍照",
+        "说一声拍照",
+        "再说一遍拍照",
+        "说一遍拍照",
+        "拍吧",
+        "拍照吧",
+        "拍一张吧",
+        "拍一下吧",
+        "直接拍吧",
+        "开始拍吧",
     )
     if _contains_any(last_text, explicit_wait_tokens):
         return True
 
-    if "告诉我" in last_text and "可以拍照" in last_text:
+    if "告诉我" in last_text and ("可以拍照" in last_text or "拍吧" in last_text):
         return True
 
     prompt_tokens = (
