@@ -354,8 +354,23 @@ class ConnectionHandler:
         context.update(self._recent_server_photo_confirmation_route_context())
         return context
 
-    def _recent_server_photo_confirmation_route_context(self) -> Dict[str, str]:
+    def _recent_server_photo_confirmation_state(self) -> Dict[str, Any] | None:
         state = getattr(self, "_recent_server_photo_confirmation", None)
+        if not isinstance(state, dict):
+            return None
+
+        try:
+            captured_at = float(state.get("captured_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if captured_at <= 0:
+            return None
+        if (time.time() - captured_at) > 900:
+            return None
+        return state
+
+    def _recent_server_photo_confirmation_route_context(self) -> Dict[str, str]:
+        state = self._recent_server_photo_confirmation_state()
         if not isinstance(state, dict):
             return {}
 
@@ -363,17 +378,16 @@ class ConnectionHandler:
             captured_at = float(state.get("captured_at", 0.0) or 0.0)
         except (TypeError, ValueError):
             return {}
-        if captured_at <= 0:
-            return {}
 
         age_seconds = max(0, int(time.time() - captured_at))
-        if age_seconds > 900:
-            return {}
 
         sample_name = str(state.get("sample_name", "") or "").strip()
         graph_advanced = bool(state.get("graph_advanced"))
         next_step_id = str(state.get("next_step_id", "") or "").strip()
         next_step_title = str(state.get("next_step_title", "") or "").strip()
+        current_step_id = str(state.get("current_step_id", "") or "").strip()
+        current_step_title = str(state.get("current_step_title", "") or "").strip()
+        graph_status_reason = str(state.get("graph_status_reason", "") or "").strip()
         photo_meta = (
             state.get("photo_meta") if isinstance(state.get("photo_meta"), dict) else {}
         )
@@ -394,6 +408,24 @@ class ConnectionHandler:
                 summary_parts.append(
                     f"The experiment was already advanced to next_step_id={next_step_id}."
                 )
+        else:
+            if current_step_title:
+                summary_parts.append(
+                    "The experiment graph was not confirmed as advanced after that photo "
+                    f"and the best-known current step is {current_step_title}."
+                )
+            elif current_step_id:
+                summary_parts.append(
+                    "The experiment graph was not confirmed as advanced after that photo "
+                    f"and the best-known current_step_id is {current_step_id}."
+                )
+            else:
+                summary_parts.append(
+                    "The experiment graph was not confirmed as advanced after that photo, "
+                    "so do not assume the next step has changed."
+                )
+            if graph_status_reason:
+                summary_parts.append(f"Follow-up status: {graph_status_reason}.")
         summary_parts.append(
             "Unless the user explicitly wants a retake, do not ask to retake the same sample photo again."
         )
@@ -408,6 +440,10 @@ class ConnectionHandler:
             context["experiment_recent_photo_next_step_id"] = next_step_id
         if next_step_title:
             context["experiment_recent_photo_next_step_title"] = next_step_title
+        if current_step_id:
+            context["experiment_recent_photo_current_step_id"] = current_step_id
+        if current_step_title:
+            context["experiment_recent_photo_current_step_title"] = current_step_title
         return context
 
     def _experiment_prewarm_enabled(self) -> bool:
@@ -1273,6 +1309,23 @@ class ConnectionHandler:
         if not session_id:
             return False
 
+        recent_photo_state = self._recent_server_photo_confirmation_state()
+        if isinstance(recent_photo_state, dict) and not bool(
+            recent_photo_state.get("graph_advanced")
+        ):
+            try:
+                captured_at = float(recent_photo_state.get("captured_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                captured_at = 0.0
+            try:
+                refresh_checked_at = float(
+                    recent_photo_state.get("graph_refresh_checked_at", 0.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                refresh_checked_at = 0.0
+            if captured_at > 0 and refresh_checked_at < captured_at:
+                return True
+
         current_step_id = self._current_experiment_step_snapshot_id()
         payload_step_id = self._extract_experiment_current_step_id(
             self.experiment_current_step,
@@ -1330,6 +1383,38 @@ class ConnectionHandler:
             self.experiment_current_step_id = current_step_id
             if self.experiment_resume_recovery_required:
                 self.experiment_resume_latest_current_step_id = current_step_id
+
+        recent_photo_state = self._recent_server_photo_confirmation_state()
+        if isinstance(recent_photo_state, dict) and not bool(
+            recent_photo_state.get("graph_advanced")
+        ):
+            recent_photo_state["graph_refresh_checked_at"] = time.time()
+            if current_step_id:
+                recent_photo_state["current_step_id"] = current_step_id
+            current_step_title = ""
+            step_body = step_payload.get("result", step_payload) if isinstance(step_payload, dict) else {}
+            if isinstance(step_body, dict):
+                step_node = step_body.get("step")
+                if isinstance(step_node, dict):
+                    current_step_title = str(step_node.get("title", "") or "").strip()
+            if not current_step_title:
+                progress_body = (
+                    progress_payload.get("result", progress_payload)
+                    if isinstance(progress_payload, dict)
+                    else {}
+                )
+                if isinstance(progress_body, dict):
+                    summary = progress_body.get("summary")
+                    if isinstance(summary, dict):
+                        current_step = summary.get("current_step")
+                        if isinstance(current_step, dict):
+                            current_step_title = str(
+                                current_step.get("title", "")
+                                or current_step.get("step_title", "")
+                                or ""
+                            ).strip()
+            if current_step_title:
+                recent_photo_state["current_step_title"] = current_step_title
 
         self.logger.bind(tag=TAG).info(
             "experiment foreground state refresh done: "

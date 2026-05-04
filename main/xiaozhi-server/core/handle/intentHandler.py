@@ -150,6 +150,17 @@ def _contains_match_token(text: str, words) -> bool:
     return False
 
 
+def _normalize_bool(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def _starts_with_any(text: str, words) -> bool:
     return any(text.startswith(w) for w in words)
 
@@ -1605,6 +1616,10 @@ def _remember_recent_server_photo_confirmation(
     next_step_id: str = "",
     next_step_title: str = "",
     next_step_reply: str = "",
+    graph_status_reason: str = "",
+    current_step_id: str = "",
+    current_step_title: str = "",
+    graph_refresh_checked_at: float | None = None,
 ) -> dict:
     photo_meta = _extract_photo_result_meta(payload)
     sample_index = None
@@ -1633,9 +1648,122 @@ def _remember_recent_server_photo_confirmation(
         "next_step_id": str(next_step_id or "").strip(),
         "next_step_title": str(next_step_title or "").strip(),
         "next_step_reply": str(next_step_reply or "").strip(),
+        "graph_status_reason": str(graph_status_reason or "").strip(),
+        "current_step_id": str(current_step_id or "").strip(),
+        "current_step_title": str(current_step_title or "").strip(),
+        "graph_refresh_checked_at": (
+            float(graph_refresh_checked_at or 0.0)
+            if graph_refresh_checked_at not in (None, "")
+            else 0.0
+        ),
     }
     setattr(conn, "_recent_server_photo_confirmation", state)
     return state
+
+
+def _compose_photo_confirmation_not_advanced_reply(
+    confirmation_reply: str,
+    followup_reply: str = "",
+) -> str:
+    confirmation = textUtils.prepare_runtime_spoken_text(confirmation_reply)
+    followup = textUtils.prepare_runtime_spoken_text(followup_reply)
+    bridge = "这边步骤还没有自动切到下一步，我先按当前步骤继续。"
+
+    if confirmation and not followup:
+        confirmation = confirmation.rstrip("。！？!? ").strip()
+        if confirmation:
+            return f"{confirmation}。{bridge}"
+        return bridge
+
+    if followup and not confirmation:
+        return f"{bridge}{followup}"
+
+    if not confirmation and not followup:
+        return bridge
+
+    if confirmation == followup:
+        return f"{bridge}{followup}"
+
+    confirmation = confirmation.rstrip("。！？!? ").strip()
+    if confirmation:
+        confirmation = f"{confirmation}。"
+    return f"{confirmation}{bridge}{followup}"
+
+
+async def _safe_refresh_experiment_step_cache(
+    conn,
+    session_id: str,
+    *,
+    reason: str = "",
+) -> dict:
+    if not session_id:
+        return _get_cached_experiment_step_meta(conn)
+    try:
+        return await _refresh_experiment_step_cache(conn, session_id)
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            "experiment step cache refresh failed: "
+            f"session_id={session_id}, reason={reason or 'unknown'}, error={exc}"
+        )
+        return _get_cached_experiment_step_meta(conn)
+
+
+async def _finalize_photo_followup_without_graph_advance(
+    conn,
+    session_id: str,
+    payload,
+    *,
+    requested_arguments: dict | None = None,
+    confirmation_reply: str = "",
+    followup_reply: str = "",
+    reason: str = "",
+    expected_step_id: str = "",
+    refresh_state: bool = True,
+) -> str:
+    step_meta = _get_cached_experiment_step_meta(conn)
+    if refresh_state and session_id:
+        step_meta = await _safe_refresh_experiment_step_cache(
+            conn,
+            session_id,
+            reason=f"photo_followup_{reason or 'not_advanced'}",
+        )
+
+    current_step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+    current_step_title = str(step_meta.get("title", "") or "").strip()
+    current_step_reply = _compose_experiment_step_reply(step_meta, mode="guide")
+    final_reply = _compose_photo_confirmation_not_advanced_reply(
+        confirmation_reply,
+        followup_reply or current_step_reply,
+    )
+
+    recent_state = _remember_recent_server_photo_confirmation(
+        conn,
+        payload=payload,
+        requested_arguments=requested_arguments,
+        graph_advanced=False,
+        next_step_reply=final_reply,
+        graph_status_reason=reason,
+        current_step_id=current_step_id,
+        current_step_title=current_step_title,
+        graph_refresh_checked_at=time.time(),
+    )
+    hidden_note = _build_hidden_photo_confirmation_note(recent_state)
+    if hidden_note:
+        _append_hidden_assistant_context(
+            conn,
+            hidden_note,
+            source="photo_confirmation_context",
+        )
+
+    conn.logger.bind(tag=TAG).warning(
+        "local photo follow-up did not advance experiment graph: "
+        f"session_id={session_id or ''}, "
+        f"reason={reason or 'unknown'}, "
+        f"expected_step_id={expected_step_id or ''}, "
+        f"current_step_id={current_step_id}, "
+        f"current_step_title={current_step_title or ''}"
+    )
+    return final_reply
 
 
 def _build_hidden_photo_confirmation_note(state: dict) -> str:
@@ -1695,6 +1823,13 @@ async def _advance_photo_confirmation_step_locally(
     *,
     requested_arguments: dict | None = None,
 ) -> str:
+    return await _advance_photo_confirmation_step_locally_v2(
+        conn,
+        payload,
+        fallback_reply,
+        requested_arguments=requested_arguments,
+    )
+
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     if not session_id:
         return fallback_reply or "拍好了。"
@@ -1930,6 +2065,304 @@ async def _advance_photo_confirmation_step_locally(
     return fallback_reply or "拍照已经完成，继续做当前下一步。"
 
 
+async def _advance_photo_confirmation_step_locally_v2(
+    conn,
+    payload,
+    fallback_reply: str = "",
+    *,
+    requested_arguments: dict | None = None,
+) -> str:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    confirmation_reply = fallback_reply or "拍好了。"
+    if not session_id:
+        return await _finalize_photo_followup_without_graph_advance(
+            conn,
+            session_id,
+            payload,
+            requested_arguments=requested_arguments,
+            confirmation_reply=confirmation_reply,
+            reason="missing_experiment_session",
+            refresh_state=False,
+        )
+
+    photo_meta = _extract_photo_result_meta(payload)
+
+    step_payload, progress_payload, schema_payload = await asyncio.gather(
+        _call_experiment_graph_tool_fast(
+            conn,
+            "get_step",
+            {"session_id": session_id},
+            priority="foreground",
+        ),
+        _call_experiment_graph_tool_fast(
+            conn,
+            "get_current_progress",
+            {"session_id": session_id},
+            priority="foreground",
+        ),
+        _call_experiment_graph_tool_fast(
+            conn,
+            "get_schema",
+            {"session_id": session_id},
+            priority="foreground",
+        ),
+    )
+
+    conn.experiment_current_step = step_payload
+    if hasattr(conn, "_extract_experiment_current_step_id"):
+        current_step_id = conn._extract_experiment_current_step_id(step_payload)
+        if current_step_id:
+            conn.experiment_current_step_id = current_step_id
+
+    step_meta = _merge_experiment_step_meta(
+        _extract_experiment_step_meta(step_payload),
+        _extract_experiment_step_meta(getattr(conn, "experiment_progress_summary", None)),
+    )
+    current_progress = _extract_experiment_current_progress(progress_payload)
+    if current_progress is None:
+        start_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "start_trial",
+            {"session_id": session_id},
+            priority="foreground",
+        )
+        current_progress = _extract_experiment_current_progress(start_payload)
+
+    schema_by_name = _extract_experiment_schema_view(schema_payload)
+    photo_fields = _build_experiment_photo_writeback_fields(schema_by_name, photo_meta)
+    missing_fields = list((current_progress or {}).get("missing_fields") or [])
+    photo_related_fields = {
+        "photo_taken",
+        "color_confirmed_by_photo",
+        "photo_file_name",
+        "photo_path",
+    }
+    is_photo_confirmation_step = _step_meta_looks_like_photo_confirmation(step_meta) or (
+        bool(schema_by_name)
+        and any(name in schema_by_name for name in photo_related_fields)
+    ) or any(name in photo_related_fields for name in missing_fields)
+
+    if not is_photo_confirmation_step:
+        inferred_step_id = _infer_photo_confirmation_step_id_from_context(
+            conn,
+            payload,
+            requested_arguments=requested_arguments,
+        )
+        if inferred_step_id:
+            conn.logger.bind(tag=TAG).info(
+                "local photo follow-up redirecting stale graph step: "
+                f"session_id={session_id}, inferred_step_id={inferred_step_id}, "
+                f"current_step_id={getattr(conn, 'experiment_current_step_id', '')}"
+            )
+            redirect_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "redirect_to_step",
+                {"session_id": session_id, "step_id": inferred_step_id},
+                priority="foreground",
+            )
+            if not bool(_experiment_result_body(redirect_payload).get("ok")):
+                message = _extract_experiment_result_message(redirect_payload)
+                followup_reply = message or _compose_experiment_step_reply(
+                    _get_cached_experiment_step_meta(conn),
+                    mode="guide",
+                )
+                return await _finalize_photo_followup_without_graph_advance(
+                    conn,
+                    session_id,
+                    payload,
+                    requested_arguments=requested_arguments,
+                    confirmation_reply=confirmation_reply,
+                    followup_reply=followup_reply,
+                    reason="redirect_to_inferred_photo_step_rejected",
+                    expected_step_id=inferred_step_id,
+                    refresh_state=False,
+                )
+
+            step_meta = await _safe_refresh_experiment_step_cache(
+                conn,
+                session_id,
+                reason="photo_followup_redirect_to_inferred_step",
+            )
+            step_payload = getattr(conn, "experiment_current_step", step_payload)
+            progress_payload, schema_payload = await asyncio.gather(
+                _call_experiment_graph_tool_fast(
+                    conn,
+                    "get_current_progress",
+                    {"session_id": session_id},
+                    priority="foreground",
+                ),
+                _call_experiment_graph_tool_fast(
+                    conn,
+                    "get_schema",
+                    {"session_id": session_id},
+                    priority="foreground",
+                ),
+            )
+
+            step_meta = _merge_experiment_step_meta(
+                _extract_experiment_step_meta(step_payload),
+                step_meta,
+            )
+            current_progress = _extract_experiment_current_progress(progress_payload)
+            if current_progress is None:
+                start_payload = await _call_experiment_graph_tool_fast(
+                    conn,
+                    "start_trial",
+                    {"session_id": session_id},
+                    priority="foreground",
+                )
+                current_progress = _extract_experiment_current_progress(start_payload)
+
+            schema_by_name = _extract_experiment_schema_view(schema_payload)
+            photo_fields = _build_experiment_photo_writeback_fields(
+                schema_by_name, photo_meta
+            )
+            missing_fields = list((current_progress or {}).get("missing_fields") or [])
+            is_photo_confirmation_step = _step_meta_looks_like_photo_confirmation(
+                step_meta
+            ) or (
+                bool(schema_by_name)
+                and any(name in schema_by_name for name in photo_related_fields)
+            ) or any(name in photo_related_fields for name in missing_fields)
+
+        if not is_photo_confirmation_step:
+            return await _finalize_photo_followup_without_graph_advance(
+                conn,
+                session_id,
+                payload,
+                requested_arguments=requested_arguments,
+                confirmation_reply=confirmation_reply,
+                reason=(
+                    "redirect_did_not_land_on_photo_step"
+                    if inferred_step_id
+                    else "inferred_photo_step_not_found"
+                ),
+                expected_step_id=inferred_step_id,
+                refresh_state=not bool(inferred_step_id),
+            )
+
+    if photo_fields:
+        add_fields_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "add_fields",
+            {"session_id": session_id, "data": photo_fields},
+            priority="foreground",
+        )
+        updated_progress = _extract_experiment_current_progress(add_fields_payload)
+        if isinstance(updated_progress, dict):
+            current_progress = updated_progress
+        missing_fields = list((current_progress or {}).get("missing_fields") or [])
+
+    if missing_fields:
+        return await _finalize_photo_followup_without_graph_advance(
+            conn,
+            session_id,
+            payload,
+            requested_arguments=requested_arguments,
+            confirmation_reply=confirmation_reply,
+            followup_reply=_compose_missing_field_reply(missing_fields, schema_by_name),
+            reason="photo_confirmation_missing_fields_remaining",
+            refresh_state=False,
+        )
+
+    finish_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "finish_trial",
+        {"session_id": session_id, "validate": True},
+        priority="foreground",
+    )
+    if not bool(_experiment_result_body(finish_payload).get("ok")):
+        message = _extract_experiment_result_message(finish_payload)
+        followup_reply = message or _compose_experiment_step_reply(step_meta, mode="guide")
+        return await _finalize_photo_followup_without_graph_advance(
+            conn,
+            session_id,
+            payload,
+            requested_arguments=requested_arguments,
+            confirmation_reply=confirmation_reply,
+            followup_reply=followup_reply,
+            reason="finish_trial_rejected_after_photo_confirmation",
+            refresh_state=False,
+        )
+
+    can_proceed_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "can_proceed",
+        {"session_id": session_id},
+        priority="foreground",
+    )
+    if not bool(_experiment_result_body(can_proceed_payload).get("ok")):
+        message = _extract_experiment_result_message(can_proceed_payload)
+        followup_reply = message or _compose_experiment_step_reply(step_meta, mode="guide")
+        return await _finalize_photo_followup_without_graph_advance(
+            conn,
+            session_id,
+            payload,
+            requested_arguments=requested_arguments,
+            confirmation_reply=confirmation_reply,
+            followup_reply=followup_reply,
+            reason="can_proceed_rejected_after_photo_confirmation",
+            refresh_state=False,
+        )
+
+    proceed_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "proceed_to_next_step",
+        {"session_id": session_id},
+        priority="foreground",
+    )
+    if not bool(_experiment_result_body(proceed_payload).get("ok")):
+        message = _extract_experiment_result_message(proceed_payload)
+        followup_reply = message or _compose_experiment_step_reply(step_meta, mode="guide")
+        return await _finalize_photo_followup_without_graph_advance(
+            conn,
+            session_id,
+            payload,
+            requested_arguments=requested_arguments,
+            confirmation_reply=confirmation_reply,
+            followup_reply=followup_reply,
+            reason="proceed_to_next_step_rejected_after_photo_confirmation",
+            refresh_state=False,
+        )
+
+    next_meta = await _safe_refresh_experiment_step_cache(
+        conn,
+        session_id,
+        reason="photo_followup_proceed_to_next_step",
+    )
+    reply = _compose_experiment_step_reply(next_meta, mode="next")
+    recent_state = _remember_recent_server_photo_confirmation(
+        conn,
+        payload=payload,
+        requested_arguments=requested_arguments,
+        graph_advanced=True,
+        next_step_id=str(next_meta.get("step_id", "") or "").strip(),
+        next_step_title=str(next_meta.get("title", "") or "").strip(),
+        next_step_reply=reply or confirmation_reply,
+    )
+    hidden_note = _build_hidden_photo_confirmation_note(recent_state)
+    if hidden_note:
+        _append_hidden_assistant_context(
+            conn,
+            hidden_note,
+            source="photo_confirmation_context",
+        )
+    conn.logger.bind(tag=TAG).info(
+        "local photo follow-up advanced experiment step: "
+        f"session_id={session_id}, next_step_id={str(next_meta.get('step_id', '') or '').strip()}, "
+        f"next_step_title={str(next_meta.get('title', '') or '').strip()}"
+    )
+    spoken_reply = _compose_photo_confirmation_advance_reply(
+        confirmation_reply,
+        reply,
+    )
+    if spoken_reply:
+        return spoken_reply
+    if reply:
+        return reply
+    return confirmation_reply or "照片已经完成，继续做当前下一步。"
+
+
 async def _start_direct_intent_turn(conn, original_text: str):
     await send_stt_message(conn, original_text)
     conn.client_abort = False
@@ -1997,6 +2430,20 @@ async def _try_redirect_experiment_step_fast(
     if getattr(conn, "experiment_resume_recovery_required", False):
         conn.experiment_resume_latest_current_step_id = target_step_id
     return True
+
+
+def _compose_uvvis_step_rejection_reply(step_id: str) -> str:
+    step_id = str(step_id or "").strip()
+    if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
+        return "当前实验图谱还没推进到 UV-Vis 前置校正，先完成丁达尔现象观察。"
+    if step_id == _UVVIS_SAMPLE_RECORD_STEP_ID:
+        return "当前实验图谱还没推进到 1-5 号样品的批量光谱测量，先完成前面的步骤。"
+    if step_id in {
+        _UVVIS_KINETICS_SAMPLE2_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE4_STEP_ID,
+    }:
+        return "当前实验图谱还没推进到对应的 400 纳米动力学步骤，先完成前面的步骤。"
+    return _UVVIS_NOT_READY_REPLY
 
 
 def _get_current_experiment_step_id(conn) -> str:
@@ -2281,6 +2728,27 @@ def _extract_uvvis_payload_message(payload) -> str:
 
 
 def _payload_looks_busy_or_inaccessible(payload) -> bool:
+    data = _to_plain_data(payload)
+    for candidate in (
+        data,
+        data.get("result") if isinstance(data, dict) and isinstance(data.get("result"), dict) else None,
+    ):
+        if not isinstance(candidate, dict):
+            continue
+        access_state = str(candidate.get("access_state", "") or "").strip().lower()
+        if access_state == "inaccessible":
+            return True
+        occupied = _normalize_bool(candidate.get("occupied"))
+        active_measurement = _normalize_bool(candidate.get("active_measurement"))
+        available = _normalize_bool(candidate.get("available"))
+        if occupied is True or active_measurement is True:
+            return True
+        if available is False and any(
+            key in candidate
+            for key in ("available", "occupied", "active_measurement", "access_state")
+        ):
+            return True
+
     text = _extract_uvvis_payload_message(payload).lower()
     if not text:
         return False
@@ -2290,7 +2758,9 @@ def _payload_looks_busy_or_inaccessible(payload) -> bool:
         "busy",
         "occupied",
         "already held",
-        "lease",
+        "lease already held",
+        "lease is held",
+        "lease owner",
         "占用",
         "忙",
         "请你过5min再试",
@@ -2378,6 +2848,126 @@ async def _execute_uvvis_tool_payload(conn, tool_name: str, arguments: dict) -> 
     return payload
 
 
+def _extract_uvvis_status_snapshot(payload) -> dict:
+    data = _to_plain_data(payload)
+    if isinstance(data, dict) and isinstance(data.get("result"), dict):
+        data = data.get("result")
+    if not isinstance(data, dict):
+        data = {}
+
+    return {
+        "available": _normalize_bool(data.get("available")),
+        "occupied": _normalize_bool(data.get("occupied")),
+        "active_measurement": _normalize_bool(data.get("active_measurement")),
+        "lease_owner_is_caller": _normalize_bool(data.get("lease_owner_is_caller")),
+        "session_key": str(data.get("session_key", "") or "").strip(),
+        "lease_owner": str(data.get("lease_owner", "") or "").strip(),
+        "last_tool_name": str(data.get("last_tool_name", "") or "").strip(),
+        "message": _extract_uvvis_payload_message(payload),
+    }
+
+
+async def _get_uvvis_session_status(conn) -> dict:
+    manager = _get_server_mcp_manager(conn)
+    if manager is None:
+        return {"ok": False, "message": _UVVIS_NOT_READY_REPLY}
+    if not manager.is_mcp_tool("uvvis_session"):
+        try:
+            await manager.ensure_client_initialized("uvvis")
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"uvvis client targeted initialize failed during status check: {exc}"
+            )
+        if not manager.is_mcp_tool("uvvis_session"):
+            return {"ok": False, "message": _UVVIS_NOT_READY_REPLY}
+
+    try:
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_session",
+            {"action": "status"},
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(f"uvvis_session status failed: {exc}")
+        message = str(exc or "").strip()
+        return {"ok": False, "message": message or _UVVIS_NOT_READY_REPLY}
+
+    status = _extract_uvvis_status_snapshot(payload)
+    status["ok"] = True
+    return status
+
+
+def _looks_like_uvvis_status_query(
+    conn,
+    original_text: str,
+    filtered_text: str,
+    *,
+    inferred_step_id: str = "",
+) -> bool:
+    normalized = _normalize_text_for_match(
+        " ".join(
+            text
+            for text in (original_text, filtered_text)
+            if str(text or "").strip()
+        )
+    )
+    if not normalized:
+        return False
+
+    query_tokens = (
+        "状态",
+        "在工作",
+        "正在工作",
+        "工作吗",
+        "忙吗",
+        "空闲吗",
+        "测完",
+        "结束了吗",
+        "完成了吗",
+        "完成了吧",
+    )
+    if not any(token in normalized for token in query_tokens):
+        return False
+
+    if any(token in normalized for token in ("uvvis", "紫外可见", "光谱仪")):
+        return True
+    if _is_uvvis_step(inferred_step_id):
+        return True
+
+    state = getattr(conn, "_uvvis_direct_state", None)
+    if isinstance(state, dict) and _is_uvvis_step(str(state.get("step_id", "") or "").strip()):
+        return True
+    return False
+
+
+def _compose_uvvis_status_reply(conn, status: dict, *, inferred_step_id: str = "") -> str:
+    if not isinstance(status, dict) or not status.get("ok"):
+        return str((status or {}).get("message", "") or _UVVIS_NOT_READY_REPLY).strip()
+
+    if status.get("active_measurement") is True:
+        return "UV-Vis 现在正在工作。"
+    if status.get("occupied") is True and not status.get("lease_owner_is_caller"):
+        return "UV-Vis 现在被别的会话占用，还没空出来。"
+
+    state = _get_uvvis_direct_state(conn, inferred_step_id if _is_uvvis_step(inferred_step_id) else "")
+    phase = str(state.get("phase", "") or "").strip()
+    if phase == "await_pure_water_blank":
+        return "UV-Vis 现在没有在工作。暗电流和空气基线已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"
+    if phase == "await_reaction_sample":
+        return "UV-Vis 现在没有在工作，这一步在等你把样品和参比液放好。"
+    if phase == "await_liquid_blank":
+        return "UV-Vis 现在没有在工作，这一步在等你把指定的空白液放好。"
+
+    blank_state = getattr(conn, "_last_uvvis_blank_baseline_state", None)
+    if (
+        inferred_step_id == _UVVIS_SHARED_BLANK_STEP_ID
+        and isinstance(blank_state, dict)
+        and blank_state.get("blank_baseline_exists")
+    ):
+        return "UV-Vis 现在没有在工作。暗电流和空气基线已经完成。"
+    return "UV-Vis 现在没有在工作。"
+
+
 async def _ensure_uvvis_session_key(conn) -> tuple[str, str]:
     existing_key = str(getattr(conn, "_uvvis_session_key", "") or "").strip()
     if existing_key:
@@ -2404,6 +2994,13 @@ async def _ensure_uvvis_session_key(conn) -> tuple[str, str]:
         )
     except Exception as exc:
         conn.logger.bind(tag=TAG).warning(f"uvvis_session acquire failed: {exc}")
+        status = await _get_uvvis_session_status(conn)
+        status_key = str(status.get("session_key", "") or "").strip()
+        if status.get("lease_owner_is_caller") and status_key:
+            setattr(conn, "_uvvis_session_key", status_key)
+            return status_key, ""
+        if status.get("active_measurement") is True or status.get("occupied") is True:
+            return "", _UVVIS_BUSY_REPLY
         if _payload_looks_busy_or_inaccessible({"message": str(exc)}):
             return "", _UVVIS_BUSY_REPLY
         return "", _UVVIS_NOT_READY_REPLY
@@ -2418,6 +3015,14 @@ async def _ensure_uvvis_session_key(conn) -> tuple[str, str]:
         setattr(conn, "_uvvis_session_key", payload_key)
         return payload_key, ""
 
+    status = await _get_uvvis_session_status(conn)
+    status_key = str(status.get("session_key", "") or "").strip()
+    if status.get("lease_owner_is_caller") and status_key:
+        setattr(conn, "_uvvis_session_key", status_key)
+        return status_key, ""
+
+    if status.get("active_measurement") is True or status.get("occupied") is True:
+        return "", _UVVIS_BUSY_REPLY
     if _payload_looks_busy_or_inaccessible(payload):
         return "", _UVVIS_BUSY_REPLY
 
@@ -3410,20 +4015,42 @@ async def _handle_uvvis_kinetics_measurement(
 
 async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: str) -> bool:
     step_id = _get_current_experiment_step_id(conn)
-    if not _is_uvvis_step(step_id):
-        inferred_step_id = _infer_uvvis_step_id_from_context(
+    inferred_step_id = step_id if _is_uvvis_step(step_id) else _infer_uvvis_step_id_from_context(
+        conn,
+        original_text,
+        filtered_text,
+    )
+
+    if _looks_like_uvvis_status_query(
+        conn,
+        original_text,
+        filtered_text,
+        inferred_step_id=inferred_step_id,
+    ):
+        await _start_direct_intent_turn(conn, original_text)
+        status = await _get_uvvis_session_status(conn)
+        speak_txt(
             conn,
-            original_text,
-            filtered_text,
+            _compose_uvvis_status_reply(
+                conn,
+                status,
+                inferred_step_id=inferred_step_id,
+            ),
         )
+        return True
+
+    if not _is_uvvis_step(step_id):
         if not inferred_step_id:
             return False
         if inferred_step_id != step_id:
-            await _try_redirect_experiment_step_fast(
+            redirected = await _try_redirect_experiment_step_fast(
                 conn,
                 inferred_step_id,
                 log_reason="direct uvvis redirecting stale graph step",
             )
+            if not redirected:
+                speak_txt(conn, _compose_uvvis_step_rejection_reply(inferred_step_id))
+                return True
         step_id = inferred_step_id
 
     if step_id == _UVVIS_ANALYSIS_STEP_ID:
@@ -4797,21 +5424,14 @@ async def _execute_server_photo_intent(conn, arguments: dict) -> bool:
         conn.logger.bind(tag=TAG).warning(
             f"local server photo follow-up failed: {exc}"
         )
-        recent_state = _remember_recent_server_photo_confirmation(
+        local_reply = await _finalize_photo_followup_without_graph_advance(
             conn,
-            payload=payload,
+            str(getattr(conn, "experiment_session_id", "") or "").strip(),
+            payload,
             requested_arguments=call_arguments,
-            graph_advanced=False,
-            next_step_reply=reply,
+            confirmation_reply=reply,
+            reason="photo_followup_exception",
         )
-        hidden_note = _build_hidden_photo_confirmation_note(recent_state)
-        if hidden_note:
-            _append_hidden_assistant_context(
-                conn,
-                hidden_note,
-                source="photo_confirmation_context",
-            )
-        local_reply = reply
 
     if hasattr(conn, "enrich_latest_clean_user_utterance_snapshot"):
         try:

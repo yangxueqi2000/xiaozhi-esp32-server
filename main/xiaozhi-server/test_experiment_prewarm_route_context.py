@@ -1,10 +1,79 @@
 import sys
+import time
+import types
 import unittest
 from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
+
+
+class _FakeLogger:
+    def bind(self, **kwargs):
+        return self
+
+    def info(self, *args, **kwargs):
+        return None
+
+    def debug(self, *args, **kwargs):
+        return None
+
+    def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
+        return None
+
+
+fake_logger_module = types.ModuleType("config.logger")
+fake_logger_module.setup_logging = lambda: _FakeLogger()
+fake_logger_module.build_module_string = lambda *args, **kwargs: ""
+fake_logger_module.create_connection_logger = lambda *args, **kwargs: _FakeLogger()
+sys.modules.setdefault("config.logger", fake_logger_module)
+sys.modules.setdefault("opuslib_next", types.ModuleType("opuslib_next"))
+sys.modules.setdefault("portalocker", types.ModuleType("portalocker"))
+
+fake_pydub_module = types.ModuleType("pydub")
+fake_pydub_module.AudioSegment = object
+sys.modules.setdefault("pydub", fake_pydub_module)
+
+fake_hello_module = types.ModuleType("core.handle.helloHandle")
+
+
+async def _fake_check_wakeup_words(conn, filtered_text):
+    return False
+
+
+fake_hello_module.checkWakeupWords = _fake_check_wakeup_words
+fake_hello_module.handleHelloMessage = lambda *args, **kwargs: None
+sys.modules.setdefault("core.handle.helloHandle", fake_hello_module)
+
+fake_device_mcp_module = types.ModuleType("core.providers.tools.device_mcp")
+fake_device_mcp_module.call_mcp_tool = lambda *args, **kwargs: None
+fake_device_mcp_module.handle_mcp_message = lambda *args, **kwargs: None
+fake_device_mcp_module.DeviceMCPExecutor = object
+sys.modules.setdefault("core.providers.tools.device_mcp", fake_device_mcp_module)
+
+fake_send_audio_module = types.ModuleType("core.handle.sendAudioHandle")
+
+
+async def _fake_send_stt_message(conn, text):
+    return None
+
+
+fake_send_audio_module.send_stt_message = _fake_send_stt_message
+fake_send_audio_module.send_tts_message = lambda *args, **kwargs: None
+fake_send_audio_module.sendAudioMessage = lambda *args, **kwargs: None
+fake_send_audio_module.SentenceType = types.SimpleNamespace(
+    FIRST="FIRST",
+    LAST="LAST",
+)
+sys.modules.setdefault("core.handle.sendAudioHandle", fake_send_audio_module)
+
+fake_loadplugins_module = types.ModuleType("plugins_func.loadplugins")
+fake_loadplugins_module.auto_import_modules = lambda *args, **kwargs: None
+sys.modules.setdefault("plugins_func.loadplugins", fake_loadplugins_module)
 
 from core.connection import ConnectionHandler
 
@@ -26,6 +95,7 @@ class ExperimentPrewarmRouteContextTest(unittest.TestCase):
         handler.experiment_current_step_id = ""
         handler.experiment_overview = None
         handler.experiment_current_step = None
+        handler.experiment_progress_summary = None
         handler.experiment_list_steps = None
         handler.experiment_schema = None
         handler.experiment_reference = None
@@ -124,6 +194,47 @@ class ExperimentPrewarmRouteContextTest(unittest.TestCase):
 
         self.assertIn("list_steps", context["experiment_list_steps_summary"])
         self.assertIn("get_schema", context["experiment_schema_summary"])
+
+    def test_recent_unadvanced_photo_confirmation_forces_foreground_refresh_once(self):
+        handler = self._make_handler()
+        handler.experiment_session_id = "exp-photo-1"
+        handler.experiment_current_step_id = "step_prepare_setup_all"
+        captured_at = time.time()
+        handler._recent_server_photo_confirmation = {
+            "captured_at": captured_at,
+            "graph_advanced": False,
+            "graph_refresh_checked_at": 0.0,
+        }
+
+        self.assertTrue(handler._should_refresh_experiment_state_before_llm())
+
+        handler._recent_server_photo_confirmation["graph_refresh_checked_at"] = (
+            captured_at + 1.0
+        )
+        self.assertFalse(handler._should_refresh_experiment_state_before_llm())
+
+    def test_recent_unadvanced_photo_context_mentions_graph_not_advanced(self):
+        handler = self._make_handler()
+        handler._recent_server_photo_confirmation = {
+            "captured_at": time.time(),
+            "graph_advanced": False,
+            "graph_status_reason": "redirect_did_not_land_on_photo_step",
+            "current_step_id": "step_prepare_setup_all",
+            "current_step_title": "Prepare all vessels and stir bars",
+            "photo_meta": {"file_name": "sample1.png"},
+        }
+
+        context = handler._recent_server_photo_confirmation_route_context()
+
+        self.assertEqual("false", context["experiment_recent_photo_graph_advanced"])
+        self.assertIn(
+            "not confirmed as advanced",
+            context["experiment_recent_photo_confirmation_summary"],
+        )
+        self.assertIn(
+            "Prepare all vessels and stir bars",
+            context["experiment_recent_photo_confirmation_summary"],
+        )
 
 
 if __name__ == "__main__":

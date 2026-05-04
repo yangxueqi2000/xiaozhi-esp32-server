@@ -300,6 +300,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             result,
         )
 
+    def test_payload_looks_busy_or_inaccessible_ignores_idle_lease_metadata(self):
+        payload = {
+            "available": True,
+            "occupied": False,
+            "active_measurement": False,
+            "session_key": "lease-1",
+            "lease_idle_timeout_seconds": 14400.0,
+        }
+
+        self.assertFalse(intentHandler._payload_looks_busy_or_inaccessible(payload))
+
     def test_normalize_tts_text_reads_numbered_labels_with_erhao(self):
         result = textUtils.normalize_tts_text(
             "现在做2号样品：在2号烧杯里加入溴化钾0.80毫升，再加入纯水2.10毫升。"
@@ -1745,6 +1756,110 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(recent_state.get("graph_advanced"))
         self.assertEqual(1, recent_state.get("sample_index"))
 
+    async def test_local_photo_followup_refreshes_current_step_when_graph_does_not_advance(
+        self,
+    ):
+        conn = _FakeConn()
+        tool_calls = []
+        state = {"redirected": False, "progress_summary_reads": 0}
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_prepare_setup_all",
+                            "title": "1-5号样品：准备烧杯与磁子",
+                            "prompts": {
+                                "instruction": "先完成 1-5 号样品的烧杯编号和磁子放置。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": ["beakers_labeled"]},
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [{"name": "beakers_labeled", "type": "bool"}],
+                    }
+                }
+            if tool_name == "redirect_to_step":
+                state["redirected"] = True
+                self.assertEqual("step_sample1_5_photo_confirm", arguments["step_id"])
+                return {"result": {"ok": True}}
+            if tool_name == "get_progress_summary":
+                state["progress_summary_reads"] += 1
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_prepare_setup_all",
+                                "title": "1-5号样品：准备烧杯与磁子",
+                            },
+                            "current_step_details": {
+                                "instruction": "先完成 1-5 号样品的烧杯编号和磁子放置。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(
+            intentHandler,
+            "_infer_photo_confirmation_step_id_from_context",
+            return_value="step_sample1_5_photo_confirm",
+        ):
+            reply = await intentHandler._advance_photo_confirmation_step_locally(
+                conn,
+                {
+                    "photo_meta": {
+                        "found": True,
+                        "file_name": "1号样品_20260504_145218.png",
+                        "mirrored_path": "C:/demo/1号样品_20260504_145218.png",
+                    }
+                },
+                fallback_reply="拍好了，已经保存。",
+                requested_arguments={"photo_name": "1号样品"},
+            )
+
+        self.assertTrue(state["redirected"])
+        self.assertGreaterEqual(state["progress_summary_reads"], 1)
+        self.assertIn(
+            "redirect_to_step",
+            [name for name, _args, _priority in tool_calls],
+        )
+        self.assertEqual("step_prepare_setup_all", conn.experiment_current_step_id)
+        self.assertIn("拍好了", reply)
+        self.assertIn("还没有自动切到下一步", reply)
+        self.assertIn("烧杯编号和磁子放置", reply)
+        recent_state = getattr(conn, "_recent_server_photo_confirmation", {})
+        self.assertFalse(recent_state.get("graph_advanced"))
+        self.assertEqual(
+            "redirect_did_not_land_on_photo_step",
+            recent_state.get("graph_status_reason"),
+        )
+        self.assertEqual(
+            "step_prepare_setup_all",
+            recent_state.get("current_step_id"),
+        )
+        self.assertEqual(
+            "1-5号样品：准备烧杯与磁子",
+            recent_state.get("current_step_title"),
+        )
+        self.assertGreater(recent_state.get("graph_refresh_checked_at", 0.0), 0.0)
+
     def test_infer_photo_confirmation_step_id_ignores_non_photo_step_mentions(self):
         conn = _FakeConn()
         conn._experiment_yaml_steps_cache = [
@@ -2150,6 +2265,101 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "先不要放任何液体，我先进行暗电流和空气基线准备。",
                 "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。",
             ],
+            spoken,
+        )
+
+    async def test_handle_direct_uvvis_status_query_reports_idle_shared_blank_waiting(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        conn._uvvis_direct_state = {
+            "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
+            "phase": "await_pure_water_blank",
+        }
+        spoken = []
+        started = []
+
+        async def fake_start(_conn, original_text):
+            started.append(original_text)
+
+        async def fake_status(_conn):
+            return {
+                "ok": True,
+                "available": True,
+                "occupied": False,
+                "active_measurement": False,
+                "lease_owner_is_caller": False,
+                "session_key": "",
+            }
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_start_direct_intent_turn", fake_start):
+            with patch.object(intentHandler, "_get_uvvis_session_status", fake_status):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "Uvvis现在正在工作吗？",
+                        "Uvvis现在正在工作吗？",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(["Uvvis现在正在工作吗？"], started)
+        self.assertEqual(
+            ["UV-Vis 现在没有在工作。暗电流和空气基线已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"],
+            spoken,
+        )
+
+    async def test_handle_direct_uvvis_intent_stops_when_redirect_is_rejected(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        spoken = []
+        graph_calls = []
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            graph_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "redirect_to_step":
+                return {
+                    "result": {
+                        "ok": False,
+                        "message": "无法跳转到 step_3_uv_vis_shared_dark_blank_prep：前置步骤未完成: step_2_tyndall_effect",
+                    }
+                }
+            raise AssertionError(f"unexpected graph tool call: {tool_name}")
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(
+            intentHandler,
+            "_infer_uvvis_step_id_from_context",
+            return_value=intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
+        ):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_direct_uvvis_intent(
+                    conn,
+                    "继续下一步。",
+                    "继续下一步。",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "redirect_to_step",
+                    {
+                        "session_id": "exp-1",
+                        "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
+                    },
+                    "foreground",
+                )
+            ],
+            graph_calls,
+        )
+        self.assertEqual(
+            ["当前实验图谱还没推进到 UV-Vis 前置校正，先完成丁达尔现象观察。"],
             spoken,
         )
 
