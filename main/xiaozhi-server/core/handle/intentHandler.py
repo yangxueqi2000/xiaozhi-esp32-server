@@ -505,6 +505,28 @@ def _prepare_fastpath_spoken_reply(
     return ""
 
 
+def _compose_photo_confirmation_advance_reply(
+    confirmation_reply: str,
+    next_step_reply: str,
+) -> str:
+    confirmation = textUtils.prepare_runtime_spoken_text(confirmation_reply)
+    followup = textUtils.prepare_runtime_spoken_text(next_step_reply)
+
+    if not confirmation:
+        return followup
+    if not followup:
+        return confirmation
+    if confirmation == followup:
+        return confirmation
+    if followup.startswith(confirmation):
+        return followup
+
+    confirmation = confirmation.rstrip("。！？!?；;，, ").strip()
+    if confirmation:
+        confirmation = f"{confirmation}。"
+    return f"{confirmation}我接着带你做下一步。{followup}"
+
+
 def _extract_experiment_overview_title(payload) -> str:
     body = _experiment_result_body(payload)
     for key in ("title", "experiment_title", "name"):
@@ -1820,6 +1842,12 @@ async def _advance_photo_confirmation_step_locally(
         f"session_id={session_id}, next_step_id={str(next_meta.get('step_id', '') or '').strip()}, "
         f"next_step_title={str(next_meta.get('title', '') or '').strip()}"
     )
+    spoken_reply = _compose_photo_confirmation_advance_reply(
+        fallback_reply,
+        reply,
+    )
+    if spoken_reply:
+        return spoken_reply
     if reply:
         return reply
     return fallback_reply or "拍照已经完成，继续做当前下一步。"
@@ -3238,7 +3266,7 @@ async def handle_pending_server_photo_confirmation(
         reply = str(recent_state.get("next_step_reply", "") or "").strip()
         if not reply:
             sample_name = str(recent_state.get("sample_name", "") or "").strip() or "当前样品"
-            reply = f"{sample_name}刚才已经拍好了，我们继续下一步。"
+            reply = f"{sample_name}刚才已经拍好了。我接着带你做下一步。"
         conn.logger.bind(tag=TAG).info(
             "reusing recent server photo confirmation instead of retaking photo"
         )

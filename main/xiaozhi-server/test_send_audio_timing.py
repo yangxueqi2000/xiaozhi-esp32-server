@@ -292,6 +292,37 @@ class SendAudioTimingTest(unittest.TestCase):
             "fallback subtitle for middle audio", sentence_payload["text"]
         )
 
+    def test_first_audio_message_refreshes_start_when_speaking_state_is_reused(self):
+        ws = _DummyWebSocket()
+        conn = SimpleNamespace(
+            session_id="sess-4b",
+            sentence_id="turn-2b",
+            websocket=ws,
+            config={},
+            logger=_DummyLogger(),
+            tts=SimpleNamespace(tts_audio_first_sentence=True),
+            client_is_speaking=True,
+            close_after_chat=False,
+        )
+
+        asyncio.run(
+            sendAudioMessage(
+                conn,
+                SentenceType.FIRST,
+                [],
+                "新的语音字幕",
+                sentence_id="turn-2b",
+            )
+        )
+
+        self.assertEqual(2, len(ws.messages))
+        start_payload = json.loads(ws.messages[0])
+        sentence_payload = json.loads(ws.messages[1])
+        self.assertEqual("start", start_payload["state"])
+        self.assertEqual("新的语音字幕", start_payload["text"])
+        self.assertEqual("sentence_start", sentence_payload["state"])
+        self.assertEqual("新的语音字幕", sentence_payload["text"])
+
     def test_last_audio_message_with_text_still_emits_sentence_start_before_stop(self):
         ws = _DummyWebSocket()
         conn = SimpleNamespace(

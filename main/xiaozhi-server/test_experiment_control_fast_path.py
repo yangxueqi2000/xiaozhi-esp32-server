@@ -1513,6 +1513,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             fallback_reply="拍好了。",
         )
 
+        self.assertIn("拍好了", reply)
+        self.assertIn("我接着带你做下一步", reply)
         self.assertIn("接下来做这一步", reply)
         self.assertIn("丁达尔现象观察", reply)
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
@@ -1686,6 +1688,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual("step_sample1_5_photo_confirm", state["redirect_step_id"])
+        self.assertIn("拍好了", reply)
+        self.assertIn("我接着带你做下一步", reply)
         self.assertIn("2号样品", reply)
         self.assertIn(
             "redirect_to_step",

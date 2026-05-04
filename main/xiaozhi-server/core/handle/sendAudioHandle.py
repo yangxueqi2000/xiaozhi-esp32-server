@@ -120,7 +120,16 @@ async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
                 f"sentence_id={active_sentence_id or 'unknown'}"
             )
             conn.clearSpeakStatus()
-        if force_independent_cycle or not conn.client_is_speaking:
+        should_emit_start = (
+            force_independent_cycle
+            or not conn.client_is_speaking
+            or sentenceType == SentenceType.FIRST
+        )
+        if should_emit_start:
+            # Some devices only refresh their subtitle/status overlay on a
+            # fresh TTS start transition. Re-emit start for a new FIRST
+            # sentence even if we intentionally reused the speaking state
+            # across queued follow-up speech.
             # Some clients only refresh their on-screen subtitle region on the
             # initial speaking transition, so include the first sentence text
             # there as a compatibility fallback in addition to sentence_start.
