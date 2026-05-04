@@ -740,7 +740,7 @@ def _replace_range_for_tts(text: str) -> str:
     def _repl(match: re.Match) -> str:
         start = match.group(1)
         end = match.group(2)
-        suffix = match.group(0)[match.end(2) :]
+        suffix = match.group(0)[match.end(2) - match.start(0) :]
         suffix = re.sub(r"^\s*", "", suffix)
         return f"{start}到{end}{suffix}"
 
@@ -1118,6 +1118,7 @@ def normalize_tts_text(text, custom_aliases=None):
         return ""
 
     normalized = _replace_range_for_tts(normalized)
+    normalized = _replace_numbered_hao_labels_for_tts(normalized)
     normalized = _replace_units_for_tts(normalized)
     normalized = _replace_measurement_ranges_for_tts(normalized)
     normalized = _replace_parenthesized_element_aliases_for_tts(normalized)
@@ -1152,6 +1153,10 @@ _DIGIT_TO_CHINESE = {
 _SPOKEN_DECIMAL_RE = re.compile(
     r"(?<![0-9A-Za-z_-])([+-]?\d+)\.(\d+)(?![0-9A-Za-z_.-])"
 )
+_SPOKEN_HAO_RANGE_RE = re.compile(
+    r"(?<![0-9A-Za-z_.-])([+-]?\d+)\s*(?:到|至)\s*([+-]?\d+)\s*号"
+)
+_SPOKEN_HAO_INDEX_RE = re.compile(r"(?<![0-9A-Za-z_.-])([+-]?\d+)\s*号")
 _SPOKEN_URL_RE = re.compile(r"\b(?:https?|wss?)://\S+", re.IGNORECASE)
 _SPOKEN_WINDOWS_PATH_RE = re.compile(
     r"(?<!\w)(?:[A-Za-z]:\\|\\\\)[^\s，。！？；]+"
@@ -1270,6 +1275,21 @@ def _replace_decimal_numbers_for_tts(text: str) -> str:
         return f"{integer_part}点{fractional_part}"
 
     return _SPOKEN_DECIMAL_RE.sub(_repl, text)
+
+
+def _replace_numbered_hao_labels_for_tts(text: str) -> str:
+    def _range_repl(match: re.Match) -> str:
+        start = _integer_to_chinese(match.group(1))
+        end = _integer_to_chinese(match.group(2))
+        return f"{start}到{end}号"
+
+    normalized = _SPOKEN_HAO_RANGE_RE.sub(_range_repl, text)
+
+    def _index_repl(match: re.Match) -> str:
+        number = _integer_to_chinese(match.group(1))
+        return f"{number}号"
+
+    return _SPOKEN_HAO_INDEX_RE.sub(_index_repl, normalized)
 
 
 def _split_spoken_sentence_chunks(text: str):

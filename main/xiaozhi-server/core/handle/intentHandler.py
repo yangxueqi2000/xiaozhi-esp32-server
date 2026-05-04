@@ -1531,6 +1531,9 @@ def _infer_photo_confirmation_step_id_from_context(
         str((requested_arguments or {}).get("photo_name", "") or ""),
         str((requested_arguments or {}).get("question", "") or ""),
         _get_last_assistant_text_raw(conn),
+        _get_recent_assistant_text(conn, limit=5),
+        _get_recent_user_text(conn, limit=5),
+        _get_recent_dialogue_text(conn, roles=("user", "assistant"), limit=8),
     ]
     for text in candidate_texts:
         sample_index = _extract_sample_index_from_text(text)
@@ -4205,11 +4208,23 @@ def _get_last_assistant_text_raw(conn) -> str:
     return ""
 
 
-def _get_recent_assistant_text(conn, limit: int = 3) -> str:
+def _get_recent_dialogue_text(
+    conn,
+    *,
+    roles: tuple[str, ...] = ("assistant",),
+    limit: int = 3,
+) -> str:
     dialogue_items = getattr(getattr(conn, "dialogue", None), "dialogue", [])
+    normalized_roles = {
+        str(role or "").strip().lower() for role in roles if str(role or "").strip()
+    }
+    if not normalized_roles:
+        return ""
+
     texts = []
     for item in reversed(dialogue_items):
-        if getattr(item, "role", "") != "assistant":
+        role = str(getattr(item, "role", "") or "").strip().lower()
+        if role not in normalized_roles:
             continue
         content = getattr(item, "content", "")
         if not isinstance(content, str):
@@ -4222,6 +4237,14 @@ def _get_recent_assistant_text(conn, limit: int = 3) -> str:
             break
     texts.reverse()
     return " ".join(texts).strip()
+
+
+def _get_recent_assistant_text(conn, limit: int = 3) -> str:
+    return _get_recent_dialogue_text(conn, roles=("assistant",), limit=limit)
+
+
+def _get_recent_user_text(conn, limit: int = 3) -> str:
+    return _get_recent_dialogue_text(conn, roles=("user",), limit=limit)
 
 
 def _extract_sample_photo_name_fixed(text: str) -> str:
@@ -4426,6 +4449,14 @@ def _assistant_is_waiting_for_photo_permission_fixed(conn) -> bool:
 def _build_pending_server_photo_request_fixed(conn) -> dict:
     last_text = _get_last_assistant_text_raw(conn)
     sample_name = _extract_sample_photo_name_fixed(last_text)
+    if not sample_name:
+        sample_name = _extract_sample_photo_name_fixed(
+            _get_recent_assistant_text(conn, limit=4)
+        )
+    if not sample_name:
+        sample_name = _extract_sample_photo_name_fixed(
+            _get_recent_user_text(conn, limit=4)
+        )
     safe_device_id = str(getattr(conn, "device_id", "") or "").strip()
 
     if sample_name:

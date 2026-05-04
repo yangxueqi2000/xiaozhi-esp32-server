@@ -300,6 +300,21 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             result,
         )
 
+    def test_normalize_tts_text_reads_numbered_labels_with_erhao(self):
+        result = textUtils.normalize_tts_text(
+            "现在做2号样品：在2号烧杯里加入溴化钾0.80毫升，再加入纯水2.10毫升。"
+        )
+
+        self.assertIn("二号样品", result)
+        self.assertIn("二号烧杯", result)
+        self.assertIn("零点八零毫升", result)
+        self.assertIn("二点一零毫升", result)
+
+    def test_normalize_tts_text_reads_numbered_label_ranges_with_chinese_digits(self):
+        result = textUtils.normalize_tts_text("请把1-5号样品位和参比位都放好。")
+
+        self.assertEqual("请把一到五号样品位和参比位都放好。", result)
+
     def test_prepare_runtime_spoken_text_strips_meta_scope_clauses(self):
         text = (
             "接下来做这一步：1到5：同时启动搅拌并混匀。"
@@ -1730,6 +1745,111 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(recent_state.get("graph_advanced"))
         self.assertEqual(1, recent_state.get("sample_index"))
 
+    def test_infer_photo_confirmation_step_id_ignores_non_photo_step_mentions(self):
+        conn = _FakeConn()
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_sample1_2_add_kbr_water_nabh4",
+                "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                "interaction": {
+                    "fast_path_mode": "observation_record_step",
+                },
+                "prompts": {
+                    "instruction": (
+                        "完成 1 号样品 KBr 和纯水加入并混匀后，快速加入 NaBH4；"
+                        "完成后进入本样品拍照记录步骤。"
+                    ),
+                },
+                "record_schema": {
+                    "color": {"type": "string"},
+                },
+            },
+            {
+                "id": "step_sample1_5_photo_confirm",
+                "title": "1号样品：颜色稳定后拍照记录",
+                "interaction": {
+                    "fast_path_mode": "photo_confirmation_step",
+                },
+                "prompts": {
+                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                },
+                "record_schema": {
+                    "photo_taken": {"type": "bool"},
+                    "color_confirmed_by_photo": {"type": "bool"},
+                },
+            },
+        ]
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="1号样品颜色已经稳定，现在可以拍照吗？",
+            )
+        )
+
+        inferred = intentHandler._infer_photo_confirmation_step_id_from_context(
+            conn,
+            {
+                "photo_meta": {
+                    "file_name": "1号样品_20260504_145218.png",
+                }
+            },
+            requested_arguments={"photo_name": "1号样品照片"},
+        )
+
+        self.assertEqual("step_sample1_5_photo_confirm", inferred)
+
+    def test_infer_photo_confirmation_step_id_uses_recent_dialogue_when_request_is_generic(self):
+        conn = _FakeConn()
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_sample1_5_photo_confirm",
+                "title": "1号样品：颜色稳定后拍照记录",
+                "interaction": {
+                    "fast_path_mode": "photo_confirmation_step",
+                },
+                "prompts": {
+                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                },
+                "record_schema": {
+                    "photo_taken": {"type": "bool"},
+                    "color_confirmed_by_photo": {"type": "bool"},
+                },
+            },
+        ]
+        conn.dialogue.put(
+            Message(role="user", content="1号样品颜色已经稳定了。")
+        )
+        conn.dialogue.put(
+            Message(role="assistant", content="现在可以拍照吗？")
+        )
+
+        inferred = intentHandler._infer_photo_confirmation_step_id_from_context(
+            conn,
+            {
+                "photo_meta": {
+                    "file_name": "capture.png",
+                }
+            },
+            requested_arguments={"question": "请拍摄当前样品的照片。"},
+        )
+
+        self.assertEqual("step_sample1_5_photo_confirm", inferred)
+
+    def test_build_pending_server_photo_request_fixed_uses_recent_dialogue_sample_name(self):
+        conn = _FakeConn()
+        conn.device_id = "94:a9:90:27:3c:84"
+        conn.dialogue.put(
+            Message(role="user", content="1号样品颜色已经稳定了。")
+        )
+        conn.dialogue.put(
+            Message(role="assistant", content="现在可以拍照吗？")
+        )
+
+        request = intentHandler._build_pending_server_photo_request_fixed(conn)
+
+        self.assertEqual("94:a9:90:27:3c:84", request["device_id"])
+        self.assertEqual("1号样品", request.get("photo_name"))
+
     async def test_server_photo_timeout_recovery_uses_latest_photo_and_continues(self):
         conn = _FakeConn()
         conn.device_id = "94:a9:90:27:3c:84"
@@ -1938,6 +2058,93 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             },
             getattr(conn, "_uvvis_direct_state", {}),
         )
+        self.assertEqual(
+            [
+                "先不要放任何液体，我先进行暗电流和空气基线准备。",
+                "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。",
+            ],
+            spoken,
+        )
+
+    async def test_handle_direct_uvvis_shared_blank_infers_step_from_context_when_graph_stale(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content=(
+                    "先不要放任何液体，把样品位和参比位都留空，"
+                    "准备做暗电流和空气基线。做好了告诉我。"
+                ),
+            )
+        )
+        spoken = []
+        executed = []
+        redirected = []
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            if tool_name == "redirect_to_step":
+                redirected.append((tool_name, dict(arguments), priority))
+                return {"result": {"ok": True}}
+            raise AssertionError(f"unexpected graph tool call: {tool_name}")
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"message": "pure water blank missing"}
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "已经放好了，可以开始了。",
+                        "已经放好了，可以开始了。",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "redirect_to_step",
+                    {
+                        "session_id": "exp-1",
+                        "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
+                    },
+                    "foreground",
+                )
+            ],
+            redirected,
+        )
+        self.assertEqual(
+            [
+                (
+                    "uvvis_measure_spectra",
+                    {
+                        "session_key": "lease-1",
+                        "sample_positions": [1, 2, 3, 4, 5],
+                        "ready_for_samples": False,
+                    },
+                )
+            ],
+            executed,
+        )
+        self.assertEqual(
+            {
+                "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
+                "phase": "await_pure_water_blank",
+                "session_key": "lease-1",
+            },
+            getattr(conn, "_uvvis_direct_state", {}),
+        )
+        self.assertEqual(intentHandler._UVVIS_SHARED_BLANK_STEP_ID, conn.experiment_current_step_id)
         self.assertEqual(
             [
                 "先不要放任何液体，我先进行暗电流和空气基线准备。",
