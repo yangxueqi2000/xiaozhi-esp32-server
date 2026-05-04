@@ -553,7 +553,6 @@ def _experiment_prompt_block(
             "experiment_resume_recovery_required",
             "experiment_resume_recovery_source",
             "experiment_resume_previous_session_id",
-            "experiment_resume_reason",
             "experiment_resume_log_path",
             "experiment_resume_turn_count",
             "experiment_resume_latest_session_id",
@@ -676,6 +675,18 @@ def _experiment_prompt_block(
             "supported by the device-log excerpt or by fixed YAML defaults; if a required field cannot "
             "be recovered confidently, ask only for that missing field."
         )
+        parts.append(
+            "Narration guard for recovery:\n"
+            "- Do not describe this recovery as an experiment-graph outage, disconnect, or interface failure.\n"
+            "- A lost previous session is not the same thing as 'the experiment graph interface did not connect'.\n"
+            "- Keep any recovery explanation student-facing and minimal; focus on the current experiment action instead of backend causes."
+        )
+    parts.append(
+        "Tool-failure narration guard:\n"
+        "- Only say an interface, MCP tool, or device is disconnected, unavailable, occupied, or used by another program when a tool call on the current turn actually returned that failure.\n"
+        "- Do not infer interface failure from recovery context, session recreation, old-session loss, or the absence of a fresh tool call.\n"
+        "- If no current-turn tool failure exists, do not speculate about backend causes; continue with the current experiment action or ask one narrow action-level question."
+    )
     if deep_prefetch_lines:
         parts.append(
             "Deep-prefetched experiment detail context from server (trusted):\n"

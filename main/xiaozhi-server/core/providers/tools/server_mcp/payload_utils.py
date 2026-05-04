@@ -222,6 +222,11 @@ def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None, ar
     actual_tool_name = str(tool_name or "").strip()
     setattr(conn, "_last_server_mcp_tool_name", actual_tool_name)
     setattr(conn, "_last_server_mcp_payload", payload)
+    setattr(
+        conn,
+        "_last_server_mcp_sentence_id",
+        str(getattr(conn, "sentence_id", "") or "").strip(),
+    )
 
     if actual_tool_name.startswith("uvvis_"):
         blank_baseline_state = extract_blank_baseline_state(payload)

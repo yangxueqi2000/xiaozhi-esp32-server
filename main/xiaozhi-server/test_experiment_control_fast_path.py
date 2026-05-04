@@ -1,3 +1,4 @@
+import csv
 import sys
 import time
 import types
@@ -201,6 +202,28 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual("实验报告还没有完整生成成功，请稍后再试。", result)
+
+    def test_conn_runtime_spoken_text_rewrites_speculative_uvvis_occupation(self):
+        conn = _FakeConn()
+        conn.sentence_id = "turn-uvvis-1"
+
+        result = textUtils.prepare_runtime_spoken_text_for_conn(
+            conn,
+            "这里暂时还没能直接启动校正，你先检查一下光谱仪有没有被别的程序占用，确认后告诉我继续。",
+        )
+
+        self.assertEqual("UV-Vis 这边还没准备好，请稍后再试。", result)
+
+    def test_conn_runtime_spoken_text_strips_speculative_interface_outage(self):
+        conn = _FakeConn()
+        conn.sentence_id = "turn-graph-1"
+
+        result = textUtils.prepare_runtime_spoken_text_for_conn(
+            conn,
+            "实验图谱接口这轮没接通。",
+        )
+
+        self.assertEqual("", result)
 
     def test_conn_runtime_spoken_text_bypasses_ready_guard_for_same_sentence(self):
         conn = _FakeConn()
@@ -1867,6 +1890,622 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             ["接下来做这一步：2号样品先加入溴化钾和纯水。"],
             spoken,
         )
+
+    async def test_handle_direct_uvvis_shared_blank_prep_calls_measurement_and_waits_for_blank(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_BLANK_STEP_ID
+        spoken = []
+        executed = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"message": "pure water blank missing"}
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "开始测量",
+                        "开始测量",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "uvvis_measure_spectra",
+                    {
+                        "session_key": "lease-1",
+                        "sample_positions": [1, 2, 3, 4, 5],
+                        "ready_for_samples": False,
+                    },
+                )
+            ],
+            executed,
+        )
+        self.assertEqual(
+            {
+                "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
+                "phase": "await_pure_water_blank",
+                "session_key": "lease-1",
+            },
+            getattr(conn, "_uvvis_direct_state", {}),
+        )
+        self.assertEqual(
+            [
+                "先不要放任何液体，我先进行暗电流和空气基线准备。",
+                "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。",
+            ],
+            spoken,
+        )
+
+    async def test_handle_direct_uvvis_shared_blank_prep_reuses_blank_and_advances(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_BLANK_STEP_ID
+        spoken = []
+        executed = []
+        completed = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"message": "shared dark current reused and pure water blank reused"}
+
+        async def fake_complete(_conn, *, fields, auto_advance, fallback_reply=""):
+            completed.append(
+                {
+                    "fields": dict(fields),
+                    "auto_advance": auto_advance,
+                    "fallback_reply": fallback_reply,
+                }
+            )
+            return True, "接下来做这一步：装入比色皿。"
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(
+                    intentHandler,
+                    "_complete_experiment_step_with_fields",
+                    fake_complete,
+                ):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_direct_uvvis_intent(
+                            conn,
+                            "开始测量",
+                            "开始测量",
+                        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "uvvis_measure_spectra",
+                    {
+                        "session_key": "lease-1",
+                        "sample_positions": [1, 2, 3, 4, 5],
+                        "ready_for_samples": False,
+                    },
+                )
+            ],
+            executed,
+        )
+        self.assertEqual(1, len(completed))
+        self.assertEqual(
+            {
+                "shared_dark_current_ready": True,
+                "shared_air_baseline_ready": True,
+                "pure_water_blank_ready": True,
+                "reference_cuvette_ready": True,
+                "observations": "共享暗电流、空气基线和纯水空白已完成或可复用",
+            },
+            completed[0]["fields"],
+        )
+        self.assertTrue(completed[0]["auto_advance"])
+        self.assertEqual(
+            [
+                "先不要放任何液体，我先进行暗电流和空气基线准备。",
+                "接下来做这一步：装入比色皿。",
+            ],
+            spoken,
+        )
+
+    async def test_handle_direct_uvvis_spectra_measurement_records_all_samples(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_SAMPLE_RECORD_STEP_ID
+        spoken = []
+        completed = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            self.assertEqual("uvvis_measure_spectra", tool_name)
+            self.assertEqual(
+                {
+                    "session_key": "lease-1",
+                    "sample_positions": [1, 2, 3, 4, 5],
+                    "ready_for_samples": True,
+                },
+                arguments,
+            )
+            return {
+                "result": {
+                    "samples": [
+                        {
+                            "sample_position": index,
+                            "lambda_max_nm": 400.0 + index * 10,
+                            "max_absorbance": round(0.1 * index, 3),
+                        }
+                        for index in range(1, 6)
+                    ]
+                }
+            }
+
+        async def fake_complete(_conn, *, fields, auto_advance, fallback_reply=""):
+            completed.append(
+                {
+                    "fields": dict(fields),
+                    "auto_advance": auto_advance,
+                    "fallback_reply": fallback_reply,
+                }
+            )
+            return True, "接下来做这一步：清洗比色皿。"
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(
+                    intentHandler,
+                    "_complete_experiment_step_with_fields",
+                    fake_complete,
+                ):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_direct_uvvis_intent(
+                            conn,
+                            "都放好了",
+                            "都放好了",
+                        )
+
+        self.assertTrue(handled)
+        self.assertEqual(1, len(completed))
+        self.assertEqual(
+            {
+                "sample_1_lambda_max": 410.0,
+                "sample_2_lambda_max": 420.0,
+                "sample_3_lambda_max": 430.0,
+                "sample_4_lambda_max": 440.0,
+                "sample_5_lambda_max": 450.0,
+                "sample_1_absorbance_max": 0.1,
+                "sample_2_absorbance_max": 0.2,
+                "sample_3_absorbance_max": 0.3,
+                "sample_4_absorbance_max": 0.4,
+                "sample_5_absorbance_max": 0.5,
+                "spectrum_saved": True,
+                "observations": "1-5号样品批量扫描完成，1号样品λmax=410.0nm；2号样品λmax=420.0nm；3号样品λmax=430.0nm；4号样品λmax=440.0nm；5号样品λmax=450.0nm",
+            },
+            completed[0]["fields"],
+        )
+        self.assertTrue(completed[0]["auto_advance"])
+        self.assertEqual(1, len(spoken))
+        self.assertIn("1号410.0纳米", spoken[0])
+        self.assertIn("5号450.0纳米", spoken[0])
+        self.assertIn("接下来做这一步：清洗比色皿。", spoken[0])
+
+    async def test_handle_direct_uvvis_spectra_measurement_skips_negative_absorbance(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_SAMPLE_RECORD_STEP_ID
+        completed = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            self.assertEqual("uvvis_measure_spectra", tool_name)
+            self.assertTrue(arguments["ready_for_samples"])
+            return {
+                "result": {
+                    "samples": [
+                        {"sample_position": 1, "lambda_max_nm": 430.0, "max_absorbance": 0.021523},
+                        {"sample_position": 2, "lambda_max_nm": 400.0, "max_absorbance": -0.005743},
+                        {"sample_position": 3, "lambda_max_nm": 440.0, "max_absorbance": 0.024618},
+                        {"sample_position": 4, "lambda_max_nm": 400.0, "max_absorbance": -0.01182},
+                        {"sample_position": 5, "lambda_max_nm": 410.0, "max_absorbance": 1.318574},
+                    ]
+                }
+            }
+
+        async def fake_complete(_conn, *, fields, auto_advance, fallback_reply=""):
+            completed.append(dict(fields))
+            return True, "ok"
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(
+                    intentHandler,
+                    "_complete_experiment_step_with_fields",
+                    fake_complete,
+                ):
+                    with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
+                        handled = await intentHandler.handle_direct_uvvis_intent(
+                            conn,
+                            "都放好了",
+                            "都放好了",
+                        )
+
+        self.assertTrue(handled)
+        self.assertEqual(1, len(completed))
+        self.assertNotIn("sample_2_absorbance_max", completed[0])
+        self.assertNotIn("sample_4_absorbance_max", completed[0])
+        self.assertEqual(0.021523, completed[0]["sample_1_absorbance_max"])
+        self.assertEqual(0.024618, completed[0]["sample_3_absorbance_max"])
+        self.assertEqual(1.318574, completed[0]["sample_5_absorbance_max"])
+
+    async def test_handle_direct_uvvis_spectra_measurement_redirects_when_blank_missing(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_SAMPLE_RECORD_STEP_ID
+        spoken = []
+        graph_calls = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            self.assertEqual("uvvis_measure_spectra", tool_name)
+            self.assertTrue(arguments["ready_for_samples"])
+            return {"message": "pure water blank missing"}
+
+        async def fake_graph_tool(_conn, tool_name, arguments, priority="foreground"):
+            graph_calls.append((tool_name, dict(arguments), priority))
+            return {"result": {"ok": True}}
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(
+                    intentHandler,
+                    "_call_experiment_graph_tool_fast",
+                    fake_graph_tool,
+                ):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_direct_uvvis_intent(
+                            conn,
+                            "都放好了",
+                            "都放好了",
+                        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "redirect_to_step",
+                    {
+                        "session_id": "exp-1",
+                        "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
+                    },
+                    "foreground",
+                )
+            ],
+            graph_calls,
+        )
+        self.assertEqual(
+            ["这一步缺少纯水空白，我先退回前置校正。请先把样品位和参比位都清空，再告诉我开始。"],
+            spoken,
+        )
+
+    def test_extract_uvvis_measure_spectra_rows_uses_payload_absorbance_csv_paths(self):
+        conn = _FakeConn()
+
+        with TemporaryDirectory() as temp_dir:
+            csv_paths = []
+            for sample_position in range(1, 6):
+                csv_path = Path(temp_dir) / f"sample{sample_position}_latest_absorbance.csv"
+                with csv_path.open("w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(
+                        handle,
+                        fieldnames=["wavelength_nm", "absorbance"],
+                    )
+                    writer.writeheader()
+                    writer.writerow({"wavelength_nm": 400, "absorbance": 0.1})
+                    writer.writerow(
+                        {
+                            "wavelength_nm": 400 + sample_position * 10,
+                            "absorbance": 0.2 + sample_position * 0.1,
+                        }
+                    )
+                    writer.writerow({"wavelength_nm": 700, "absorbance": 0.05})
+                csv_paths.append(str(csv_path))
+
+            rows = intentHandler._extract_uvvis_measure_spectra_rows(csv_paths, conn)
+
+        self.assertEqual(5, len(rows))
+        self.assertEqual(410.0, rows[1]["lambda_max_nm"])
+        self.assertEqual(450.0, rows[5]["lambda_max_nm"])
+        self.assertAlmostEqual(0.7, rows[5]["max_absorbance"])
+
+    async def test_handle_direct_uvvis_kinetics_start_requests_liquid_blank(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_KINETICS_SAMPLE2_STEP_ID
+        spoken = []
+        executed = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"message": "liquid blank missing for sample2"}
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "开始动力学测量",
+                        "开始动力学测量",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "uvvis_measure_kinetics",
+                    {
+                        "session_key": "lease-1",
+                        "wavelength_nm": 400,
+                        "duration_minutes": 34,
+                        "interval_seconds": 60,
+                        "run_name": "sample2",
+                        "ready_for_samples": False,
+                        "sample_positions": [1],
+                    },
+                )
+            ],
+            executed,
+        )
+        self.assertEqual(
+            {
+                "step_id": intentHandler._UVVIS_KINETICS_SAMPLE2_STEP_ID,
+                "run_name": "sample2",
+                "sample_position": 1,
+                "phase": "await_liquid_blank",
+                "session_key": "lease-1",
+            },
+            getattr(conn, "_uvvis_direct_state", {}),
+        )
+        self.assertEqual(
+            [
+                "先保持样品位为空，我先做暗电流和 400 纳米空气基线准备。",
+                "这一步指定的参比液/化学空白液还没放好，请把样品位和参比位同时放入该步骤指定的空白液，不是纯水。放好了告诉我。",
+            ],
+            spoken,
+        )
+
+    async def test_handle_direct_uvvis_kinetics_blank_uses_latest_spoken_sample_position(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_KINETICS_SAMPLE4_STEP_ID
+        conn._uvvis_direct_state = {
+            "step_id": intentHandler._UVVIS_KINETICS_SAMPLE4_STEP_ID,
+            "run_name": "sample4",
+            "sample_position": 1,
+            "phase": "await_liquid_blank",
+        }
+        spoken = []
+        executed = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-4", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"message": "liquid blank recorded"}
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "2号位放好了",
+                        "2号位放好了",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "uvvis_measure_kinetics",
+                    {
+                        "session_key": "lease-4",
+                        "wavelength_nm": 400,
+                        "duration_minutes": 34,
+                        "interval_seconds": 60,
+                        "run_name": "sample4",
+                        "ready_for_samples": True,
+                        "sample_positions": [2],
+                    },
+                )
+            ],
+            executed,
+        )
+        self.assertEqual(
+            {
+                "step_id": intentHandler._UVVIS_KINETICS_SAMPLE4_STEP_ID,
+                "run_name": "sample4",
+                "sample_position": 2,
+                "phase": "await_reaction_sample",
+                "session_key": "lease-4",
+            },
+            getattr(conn, "_uvvis_direct_state", {}),
+        )
+        self.assertEqual(
+            ["液体空白已经记录好了。请把参比位保持不变，把2号样品位换成真实反应液，放好了告诉我。"],
+            spoken,
+        )
+
+    async def test_handle_direct_uvvis_kinetics_measurement_records_fields_and_waits_for_next_turn(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_KINETICS_SAMPLE2_STEP_ID
+        conn._uvvis_direct_state = {
+            "step_id": intentHandler._UVVIS_KINETICS_SAMPLE2_STEP_ID,
+            "run_name": "sample2",
+            "sample_position": 3,
+            "phase": "await_reaction_sample",
+            "session_key": "lease-1",
+        }
+        spoken = []
+        completed = []
+        record_fields = {
+            f"t{index}_absorbance": round(1.2 - index * 0.01, 4)
+            for index in range(35)
+        }
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            self.assertEqual("uvvis_measure_kinetics", tool_name)
+            self.assertEqual([3], arguments["sample_positions"])
+            self.assertTrue(arguments["ready_for_samples"])
+            return {
+                "record_fields": dict(record_fields),
+                "bubble_observed": True,
+            }
+
+        async def fake_complete(_conn, *, fields, auto_advance, fallback_reply=""):
+            completed.append(
+                {
+                    "fields": dict(fields),
+                    "auto_advance": auto_advance,
+                    "fallback_reply": fallback_reply,
+                }
+            )
+            return True, fallback_reply
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(
+                    intentHandler,
+                    "_complete_experiment_step_with_fields",
+                    fake_complete,
+                ):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_direct_uvvis_intent(
+                            conn,
+                            "可以开始了",
+                            "可以开始了",
+                        )
+
+        self.assertTrue(handled)
+        self.assertEqual(1, len(completed))
+        self.assertFalse(completed[0]["auto_advance"])
+        self.assertEqual("我记录好了，可以继续进行下一步了吗？", completed[0]["fallback_reply"])
+        for index in range(35):
+            self.assertEqual(
+                record_fields[f"t{index}_absorbance"],
+                completed[0]["fields"][f"t{index}_absorbance"],
+            )
+        self.assertTrue(completed[0]["fields"]["bubble_observed"])
+        self.assertEqual(
+            "3号样品400纳米动力学测量完成，共记录35个时间点。",
+            completed[0]["fields"]["observations"],
+        )
+        self.assertEqual("done", getattr(conn, "_uvvis_direct_state", {}).get("phase"))
+        self.assertEqual(["我记录好了，可以继续进行下一步了吗？"], spoken)
+
+    async def test_handle_direct_uvvis_kinetics_done_advances_and_releases(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_KINETICS_SAMPLE2_STEP_ID
+        conn._uvvis_direct_state = {
+            "step_id": intentHandler._UVVIS_KINETICS_SAMPLE2_STEP_ID,
+            "run_name": "sample2",
+            "sample_position": 1,
+            "phase": "done",
+            "session_key": "lease-1",
+        }
+        spoken = []
+        released = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_advance(_conn, *, fallback_reply=""):
+            conn.experiment_current_step_id = intentHandler._UVVIS_ANALYSIS_STEP_ID
+            return True, "接下来做这一步：数据分析。"
+
+        async def fake_release(_conn):
+            released.append(True)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_advance_finished_experiment_step", fake_advance):
+                with patch.object(intentHandler, "_release_uvvis_session_for_analysis", fake_release):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_direct_uvvis_intent(
+                            conn,
+                            "继续下一步",
+                            "继续下一步",
+                        )
+
+        self.assertTrue(handled)
+        self.assertEqual([True], released)
+        self.assertEqual(["接下来做这一步：数据分析。"], spoken)
+        self.assertEqual({}, getattr(conn, "_uvvis_direct_state", {}))
+
+    async def test_handle_direct_uvvis_analysis_step_releases_session(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_ANALYSIS_STEP_ID
+        conn._uvvis_session_key = "lease-9"
+        executed = []
+
+        class _FakeManager:
+            @staticmethod
+            def is_mcp_tool(name):
+                return name == "uvvis_session"
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"session_key": ""}
+
+        with patch.object(intentHandler, "_get_server_mcp_manager", return_value=_FakeManager()):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                handled = await intentHandler.handle_direct_uvvis_intent(
+                    conn,
+                    "开始分析",
+                    "开始分析",
+                )
+
+        self.assertFalse(handled)
+        self.assertEqual(
+            [("uvvis_session", {"action": "release", "session_key": "lease-9"})],
+            executed,
+        )
+        self.assertEqual("", getattr(conn, "_uvvis_session_key", ""))
 
     def test_backstage_filter_drops_new_transition_phrases(self):
         self.assertEqual(

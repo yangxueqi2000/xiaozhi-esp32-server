@@ -1,4 +1,6 @@
+import csv
 import json
+import math
 import re
 import uuid
 import asyncio
@@ -53,6 +55,7 @@ async def handle_user_intent(conn, text):
         handle_pending_server_photo_confirmation,
         handle_direct_photo_navigation_intent,
         handle_direct_photo_intent,
+        handle_direct_uvvis_intent,
     )
     for handler in photo_direct_handlers:
         try:
@@ -1858,6 +1861,1350 @@ async def _start_direct_intent_turn(conn, original_text: str):
     conn.client_abort = False
     conn.sentence_id = str(uuid.uuid4().hex)
     conn.dialogue.put(Message(role="user", content=original_text))
+
+
+_UVVIS_SHARED_BLANK_STEP_ID = "step_3_uv_vis_shared_dark_blank_prep"
+_UVVIS_SAMPLE_RECORD_STEP_ID = "step_3_uv_vis_sample1-5_record_data"
+_UVVIS_SAMPLE_LOAD_STEP_ID = "step_3_uv_vis_sample1-5_load_cuvette"
+_UVVIS_SAMPLE_CLEAN_STEP_ID = "step_3_uv_vis_sample5_clean_cuvette"
+_UVVIS_KINETICS_SAMPLE2_STEP_ID = "step_4_kinetics_sample2_measurement"
+_UVVIS_KINETICS_SAMPLE4_STEP_ID = "step_5_kinetics_sample4_measurement"
+_UVVIS_ANALYSIS_STEP_ID = "step_6_data_analysis"
+_UVVIS_BUSY_REPLY = "我现在正在工作请你过5min再试"
+_UVVIS_NOT_READY_REPLY = "UV-Vis 这边还没准备好，请稍后再试。"
+_UVVIS_SAMPLE_POSITIONS = (1, 2, 3, 4, 5)
+
+
+def _get_current_experiment_step_id(conn) -> str:
+    step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+    if step_id:
+        return step_id
+    step_meta = _get_cached_experiment_step_meta(conn)
+    return str(step_meta.get("step_id", "") or "").strip()
+
+
+def _is_uvvis_step(step_id: str) -> bool:
+    return str(step_id or "").strip() in {
+        _UVVIS_SHARED_BLANK_STEP_ID,
+        _UVVIS_SAMPLE_LOAD_STEP_ID,
+        _UVVIS_SAMPLE_RECORD_STEP_ID,
+        _UVVIS_SAMPLE_CLEAN_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE2_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE4_STEP_ID,
+        _UVVIS_ANALYSIS_STEP_ID,
+    }
+
+
+def _is_uvvis_measurement_step(step_id: str) -> bool:
+    return str(step_id or "").strip() in {
+        _UVVIS_SHARED_BLANK_STEP_ID,
+        _UVVIS_SAMPLE_RECORD_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE2_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE4_STEP_ID,
+    }
+
+
+def _is_uvvis_kinetics_step(step_id: str) -> bool:
+    return str(step_id or "").strip() in {
+        _UVVIS_KINETICS_SAMPLE2_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE4_STEP_ID,
+    }
+
+
+def _is_uvvis_spectra_step(step_id: str) -> bool:
+    return str(step_id or "").strip() in {
+        _UVVIS_SHARED_BLANK_STEP_ID,
+        _UVVIS_SAMPLE_RECORD_STEP_ID,
+    }
+
+
+def _normalize_uvvis_device_id(conn) -> str:
+    device_id = str(getattr(conn, "device_id", "") or "").strip()
+    if not device_id and isinstance(getattr(conn, "headers", None), dict):
+        headers = getattr(conn, "headers", {}) or {}
+        device_id = str(
+            headers.get("device-id")
+            or headers.get("Device-Id")
+            or headers.get("device_id")
+            or ""
+        ).strip()
+    safe = re.sub(r"[^0-9a-zA-Z._-]+", "_", device_id.lower()).strip("._-")
+    return safe or "unknown_device"
+
+
+def _resolve_uvvis_root_candidates(conn) -> list[Path]:
+    candidates: list[Path] = []
+
+    override_root = str(conn.config.get("uvvis_scan_output_root", "") or "").strip()
+    if override_root:
+        root = Path(override_root).expanduser().resolve()
+        candidates.append(root)
+        candidates.append(root.parent)
+
+    llm_cfg = conn.config.get("LLM", {}).get("codex_app_server", {}) or {}
+    workspace = str(llm_cfg.get("workspace", "") or "").strip()
+    if workspace:
+        workspace_root = Path(workspace).expanduser().resolve()
+        candidates.append(workspace_root / "lab_runs" / "exp1_AgNPs_synthesis" / "data")
+        candidates.append(
+            workspace_root / "lab_runs" / "exp1_AgNPs_synthesis" / "data" / "uv_data_common"
+        )
+
+    candidates.append(Path("data").resolve())
+    candidates.append((Path("data") / "uv_data_common").resolve())
+
+    deduped = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _resolve_uvvis_runtime_device_dirs(conn) -> list[Path]:
+    device_id = _normalize_uvvis_device_id(conn)
+    dirs: list[Path] = []
+    for root in _resolve_uvvis_root_candidates(conn):
+        dirs.append((root / device_id).resolve())
+    return dirs
+
+
+def _collect_payload_strings(payload) -> list[str]:
+    strings: list[str] = []
+
+    def _visit(node):
+        if isinstance(node, dict):
+            for value in node.values():
+                _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+        elif isinstance(node, str):
+            text = node.strip()
+            if text:
+                strings.append(text)
+
+    _visit(_to_plain_data(payload))
+    return strings
+
+
+def _collect_payload_named_values(payload, target_keys) -> dict:
+    remaining_keys = set(target_keys or ())
+    found = {}
+
+    def _visit(node):
+        nonlocal remaining_keys
+        if not remaining_keys:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in remaining_keys and value not in (None, ""):
+                    found[key] = value
+                    remaining_keys.remove(key)
+                if isinstance(value, (dict, list)):
+                    _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+
+    _visit(_to_plain_data(payload))
+    return found
+
+
+def _extract_float_value(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _extract_int_value(value):
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed
+
+
+def _extract_uvvis_payload_message(payload) -> str:
+    text = _extract_text_from_result_payload(payload)
+    if text:
+        return text
+    data = _to_plain_data(payload)
+    if isinstance(data, str):
+        return data.strip()
+    return ""
+
+
+def _payload_looks_busy_or_inaccessible(payload) -> bool:
+    text = _extract_uvvis_payload_message(payload).lower()
+    if not text:
+        return False
+    busy_tokens = (
+        "access_state=inaccessible",
+        "inaccessible",
+        "busy",
+        "occupied",
+        "already held",
+        "lease",
+        "占用",
+        "忙",
+        "请你过5min再试",
+    )
+    return any(token in text for token in busy_tokens)
+
+
+def _payload_mentions_missing_blank(payload) -> bool:
+    text = _extract_uvvis_payload_message(payload).lower()
+    if not text:
+        return False
+    missing_tokens = (
+        "liquid blank",
+        "pure water",
+        "pure_water",
+        "blank",
+        "空白",
+        "纯水",
+        "参比液",
+        "化学空白",
+    )
+    if not any(token in text for token in missing_tokens):
+        return False
+    return any(
+        token in text
+        for token in (
+            "missing",
+            "not found",
+            "absent",
+            "need",
+            "required",
+            "不存在",
+            "缺少",
+            "没有",
+            "未找到",
+            "还没有",
+        )
+    )
+
+
+def _payload_has_success_flag(payload) -> bool | None:
+    data = _to_plain_data(payload)
+    if isinstance(data, dict):
+        success = data.get("success")
+        if isinstance(success, bool):
+            return success
+        result = data.get("result")
+        if isinstance(result, dict):
+            nested = result.get("success")
+            if isinstance(nested, bool):
+                return nested
+    return None
+
+
+async def _execute_uvvis_tool_payload(conn, tool_name: str, arguments: dict) -> dict:
+    busy_token = f"uvvis:{tool_name}"
+    busy_acquired = False
+    if hasattr(conn, "acquire_external_busy"):
+        try:
+            conn.acquire_external_busy(busy_token)
+            busy_acquired = True
+        except Exception:
+            busy_acquired = False
+
+    try:
+        result = await _execute_server_mcp_tool_direct(conn, tool_name, arguments)
+    finally:
+        if busy_acquired and hasattr(conn, "release_external_busy"):
+            try:
+                conn.release_external_busy(busy_token)
+            except Exception:
+                pass
+
+    payload = finalize_server_mcp_payload(
+        result,
+        tool_name=tool_name,
+        arguments=arguments,
+    )
+    sync_server_mcp_payload_state(
+        conn,
+        tool_name=tool_name,
+        payload=payload,
+        arguments=arguments,
+    )
+    return payload
+
+
+async def _ensure_uvvis_session_key(conn) -> tuple[str, str]:
+    existing_key = str(getattr(conn, "_uvvis_session_key", "") or "").strip()
+    if existing_key:
+        return existing_key, ""
+
+    manager = _get_server_mcp_manager(conn)
+    if manager is None:
+        return "", _UVVIS_NOT_READY_REPLY
+    if not manager.is_mcp_tool("uvvis_session"):
+        try:
+            await manager.ensure_client_initialized("uvvis")
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"uvvis client targeted initialize failed: {exc}"
+            )
+        if not manager.is_mcp_tool("uvvis_session"):
+            return "", _UVVIS_NOT_READY_REPLY
+
+    try:
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_session",
+            {"action": "acquire"},
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(f"uvvis_session acquire failed: {exc}")
+        if _payload_looks_busy_or_inaccessible({"message": str(exc)}):
+            return "", _UVVIS_BUSY_REPLY
+        return "", _UVVIS_NOT_READY_REPLY
+
+    payload_key = ""
+    if isinstance(payload, dict):
+        payload_key = str(payload.get("session_key") or "").strip()
+        if not payload_key and isinstance(payload.get("result"), dict):
+            payload_key = str(payload["result"].get("session_key") or "").strip()
+
+    if payload_key:
+        setattr(conn, "_uvvis_session_key", payload_key)
+        return payload_key, ""
+
+    if _payload_looks_busy_or_inaccessible(payload):
+        return "", _UVVIS_BUSY_REPLY
+
+    message = _extract_uvvis_payload_message(payload)
+    if message:
+        return "", message
+    return "", _UVVIS_NOT_READY_REPLY
+
+
+def _clear_uvvis_direct_state(conn) -> None:
+    setattr(conn, "_uvvis_direct_state", {})
+
+
+def _get_uvvis_direct_state(conn, step_id: str = "") -> dict:
+    state = getattr(conn, "_uvvis_direct_state", None)
+    if not isinstance(state, dict):
+        state = {}
+    current_step_id = str(step_id or _get_current_experiment_step_id(conn) or "").strip()
+    state_step_id = str(state.get("step_id", "") or "").strip()
+    if state_step_id and current_step_id and state_step_id != current_step_id:
+        state = {}
+    if current_step_id and not state_step_id:
+        state = {}
+    if state != getattr(conn, "_uvvis_direct_state", None):
+        setattr(conn, "_uvvis_direct_state", state)
+    return state
+
+
+def _set_uvvis_direct_state(conn, **updates) -> dict:
+    state = dict(_get_uvvis_direct_state(conn))
+    state.update(updates)
+    setattr(conn, "_uvvis_direct_state", state)
+    return state
+
+
+def _extract_uvvis_sample_position_from_text(text: str) -> int | None:
+    source = textUtils.normalize_spoken_text(text or "")
+    if not source:
+        return None
+
+    patterns = (
+        r"([1-5])\s*\u53f7\u4f4d",
+        r"sample[_\-\s]*([1-5])",
+        r"\u653e\u5728\s*([1-5])\s*\u53f7\u4f4d",
+        r"\u6837\u54c1\u4f4d\s*([1-5])",
+        r"([一二三四五])\s*\u53f7\u4f4d",
+        r"\u653e\u5728\s*([一二三四五])\s*\u53f7\u4f4d",
+    )
+    chinese_map = {
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+    }
+    for pattern in patterns:
+        match = re.search(pattern, source, flags=re.IGNORECASE)
+        if not match:
+            continue
+        token = match.group(1)
+        if token.isdigit():
+            value = int(token)
+        else:
+            value = chinese_map.get(token)
+        if value and 1 <= value <= 5:
+            return value
+    return None
+
+
+def _extract_uvvis_sample_position_from_path(path_text: str) -> int | None:
+    source = str(path_text or "").strip().lower()
+    if not source:
+        return None
+
+    match = re.search(r"sample(?:_run_)?sample([1-5])", source)
+    if not match:
+        match = re.search(r"sample([1-5])", source)
+    if not match:
+        match = re.search(r"(^|[\\/ _-])([1-5])号", source)
+        if match:
+            return int(match.group(2))
+        return None
+    return int(match.group(1))
+
+
+def _extract_uvvis_summary_rows_from_csv(path_text: str) -> dict[int, dict]:
+    path = Path(str(path_text or "").strip())
+    if not path.exists():
+        return {}
+
+    rows: dict[int, dict] = {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                sample_position = _extract_int_value(row.get("sample_position"))
+                lambda_max_nm = _extract_float_value(row.get("lambda_max_nm"))
+                if sample_position is None or lambda_max_nm is None:
+                    continue
+                rows[sample_position] = {
+                    "lambda_max_nm": lambda_max_nm,
+                    "max_absorbance": _extract_float_value(row.get("max_absorbance")),
+                    "summary_csv": str(path.resolve()),
+                }
+    except Exception:
+        return {}
+    return rows
+
+
+def _extract_uvvis_peak_from_absorbance_csv(path_text: str) -> dict | None:
+    path = Path(str(path_text or "").strip())
+    if not path.exists():
+        return None
+
+    max_row = None
+    valid_points = 0
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                wavelength_nm = _extract_float_value(row.get("wavelength_nm"))
+                absorbance = _extract_float_value(row.get("absorbance"))
+                if wavelength_nm is None or absorbance is None:
+                    continue
+                valid_points += 1
+                if max_row is None or absorbance > max_row["max_absorbance"]:
+                    max_row = {
+                        "lambda_max_nm": wavelength_nm,
+                        "max_absorbance": absorbance,
+                    }
+    except Exception:
+        return None
+
+    if max_row is None:
+        return None
+    max_row["valid_absorbance_points"] = valid_points
+    max_row["peak_source_csv"] = str(path.resolve())
+    return max_row
+
+
+def _extract_uvvis_measure_spectra_rows(payload, conn) -> dict[int, dict]:
+    rows: dict[int, dict] = {}
+    data = _to_plain_data(payload)
+
+    def _visit(node):
+        if isinstance(node, dict):
+            sample_position = _extract_int_value(
+                node.get("sample_position")
+                or node.get("position")
+                or node.get("sample_index")
+            )
+            lambda_max_nm = _extract_float_value(
+                node.get("lambda_max_nm")
+                or node.get("lambda_max")
+                or node.get("max_lambda_nm")
+            )
+            if sample_position is not None and lambda_max_nm is not None:
+                rows[sample_position] = {
+                    "lambda_max_nm": lambda_max_nm,
+                    "max_absorbance": _extract_float_value(
+                        node.get("max_absorbance")
+                        or node.get("absorbance_max")
+                        or node.get("peak_absorbance")
+                    ),
+                }
+            if sample_position is not None and sample_position not in rows:
+                absorbance_path = (
+                    node.get("absorbance_output_csv")
+                    or node.get("absorbance_csv")
+                    or node.get("output_csv")
+                    or node.get("csv_path")
+                )
+                peak = _extract_uvvis_peak_from_absorbance_csv(absorbance_path)
+                if peak is not None:
+                    rows[sample_position] = peak
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+
+    _visit(data)
+
+    if len(rows) >= 5:
+        return rows
+
+    summary_paths = []
+    absorbance_paths = []
+    for text in _collect_payload_strings(data):
+        lower_text = text.lower()
+        if lower_text.endswith("_summary.csv") or "summary.csv" in lower_text:
+            summary_paths.append(text)
+        if lower_text.endswith("_absorbance.csv") or "absorbance.csv" in lower_text:
+            absorbance_paths.append(text)
+
+    for path_text in summary_paths:
+        rows.update(_extract_uvvis_summary_rows_from_csv(path_text))
+        if len(rows) >= 5:
+            return rows
+
+    for path_text in absorbance_paths:
+        sample_position = _extract_uvvis_sample_position_from_path(path_text)
+        if sample_position is None or sample_position in rows:
+            continue
+        peak = _extract_uvvis_peak_from_absorbance_csv(path_text)
+        if peak is not None:
+            rows[sample_position] = peak
+    if len(rows) >= 5:
+        return rows
+
+    for sample_position in _UVVIS_SAMPLE_POSITIONS:
+        if sample_position in rows:
+            continue
+        found_peak = None
+        for device_dir in _resolve_uvvis_runtime_device_dirs(conn):
+            candidate_paths = [
+                device_dir / f"sample{sample_position}_latest_absorbance.csv",
+                device_dir / f"sample_run_sample{sample_position}_latest_absorbance.csv",
+            ]
+            if (device_dir / f"sample{sample_position}_latest_absorbance.csv").exists():
+                candidate_paths.insert(0, device_dir / f"sample{sample_position}_latest_absorbance.csv")
+            for candidate in candidate_paths:
+                peak = _extract_uvvis_peak_from_absorbance_csv(str(candidate))
+                if peak is not None:
+                    found_peak = peak
+                    break
+            if found_peak is not None:
+                break
+        if found_peak is not None:
+            rows[sample_position] = found_peak
+
+    return rows
+
+
+def _extract_uvvis_measure_kinetics_record_fields(payload, conn, run_name: str) -> dict:
+    data = _to_plain_data(payload)
+    record_fields = {}
+
+    def _visit(node):
+        nonlocal record_fields
+        if isinstance(node, dict):
+            candidate = {
+                key: value
+                for key, value in node.items()
+                if re.fullmatch(r"t\d+_absorbance", str(key or ""))
+            }
+            if candidate and len(candidate) >= len(record_fields):
+                record_fields = candidate
+            nested = node.get("record_fields")
+            if isinstance(nested, dict):
+                nested_candidate = {
+                    key: value
+                    for key, value in nested.items()
+                    if re.fullmatch(r"t\d+_absorbance", str(key or ""))
+                }
+                if nested_candidate and len(nested_candidate) >= len(record_fields):
+                    record_fields = nested_candidate
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+
+    _visit(data)
+    if len(record_fields) >= 35:
+        return record_fields
+
+    absorbance_paths = []
+    for text in _collect_payload_strings(data):
+        lower_text = text.lower()
+        if "absorbance.csv" in lower_text and run_name.lower() in lower_text:
+            absorbance_paths.append(text)
+
+    if not absorbance_paths:
+        for device_dir in _resolve_uvvis_runtime_device_dirs(conn):
+            kinetics_dir = device_dir / "uvvis_measure_kinetics" / run_name
+            if not kinetics_dir.exists():
+                continue
+            for candidate in sorted(
+                kinetics_dir.glob("*absorbance*.csv"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            ):
+                absorbance_paths.append(str(candidate))
+                break
+
+    for path_text in absorbance_paths:
+        path = Path(str(path_text or "").strip())
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+        except Exception:
+            continue
+        if not rows:
+            continue
+
+        extracted = {}
+        for idx, row in enumerate(rows):
+            time_index = _extract_int_value(row.get("time_index"))
+            if time_index is None:
+                time_index = idx
+            absorbance = _extract_float_value(row.get("absorbance"))
+            if absorbance is None:
+                continue
+            field_name = f"t{time_index}_absorbance"
+            extracted[field_name] = absorbance
+        if len(extracted) > len(record_fields):
+            record_fields = extracted
+        if len(record_fields) >= 35:
+            break
+
+    return record_fields
+
+
+def _filter_fields_for_schema(fields: dict, schema_by_name: dict) -> dict:
+    if not fields:
+        return {}
+    if not schema_by_name:
+        return dict(fields)
+    allowed = set(schema_by_name)
+    return {key: value for key, value in fields.items() if key in allowed}
+
+
+async def _complete_experiment_step_with_fields(
+    conn,
+    *,
+    fields: dict,
+    auto_advance: bool,
+    fallback_reply: str = "",
+) -> tuple[bool, str]:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return False, fallback_reply or ""
+
+    step_payload, progress_payload, schema_payload = await asyncio.gather(
+        _call_experiment_graph_tool_fast(
+            conn,
+            "get_step",
+            {"session_id": session_id},
+            priority="foreground",
+        ),
+        _call_experiment_graph_tool_fast(
+            conn,
+            "get_current_progress",
+            {"session_id": session_id},
+            priority="foreground",
+        ),
+        _call_experiment_graph_tool_fast(
+            conn,
+            "get_schema",
+            {"session_id": session_id},
+            priority="foreground",
+        ),
+    )
+
+    conn.experiment_current_step = step_payload
+    conn.experiment_progress_summary = progress_payload
+    if hasattr(conn, "_extract_experiment_current_step_id"):
+        current_step_id = conn._extract_experiment_current_step_id(
+            step_payload,
+            progress_payload,
+        )
+        if current_step_id:
+            conn.experiment_current_step_id = current_step_id
+
+    schema_by_name = _extract_experiment_schema_view(schema_payload)
+    current_progress = _extract_experiment_current_progress(progress_payload)
+    if current_progress is None:
+        start_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "start_trial",
+            {"session_id": session_id},
+            priority="foreground",
+        )
+        current_progress = _extract_experiment_current_progress(start_payload)
+
+    write_fields = _filter_fields_for_schema(fields, schema_by_name)
+    if write_fields:
+        add_fields_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "add_fields",
+            {"session_id": session_id, "data": write_fields},
+            priority="foreground",
+        )
+        updated_progress = _extract_experiment_current_progress(add_fields_payload)
+        if isinstance(updated_progress, dict):
+            current_progress = updated_progress
+
+    missing_fields = list((current_progress or {}).get("missing_fields") or [])
+    if missing_fields:
+        return False, _compose_missing_field_reply(missing_fields, schema_by_name)
+
+    finish_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "finish_trial",
+        {"session_id": session_id, "validate": True},
+        priority="foreground",
+    )
+    if not bool(_experiment_result_body(finish_payload).get("ok")):
+        message = _extract_experiment_result_message(finish_payload)
+        if message:
+            return False, message
+        return False, fallback_reply or ""
+
+    if not auto_advance:
+        return True, fallback_reply or ""
+
+    can_proceed_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "can_proceed",
+        {"session_id": session_id},
+        priority="foreground",
+    )
+    if not bool(_experiment_result_body(can_proceed_payload).get("ok")):
+        message = _extract_experiment_result_message(can_proceed_payload)
+        if message:
+            return False, message
+        return False, fallback_reply or ""
+
+    proceed_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "proceed_to_next_step",
+        {"session_id": session_id},
+        priority="foreground",
+    )
+    if not bool(_experiment_result_body(proceed_payload).get("ok")):
+        message = _extract_experiment_result_message(proceed_payload)
+        if message:
+            return False, message
+        return False, fallback_reply or ""
+
+    next_meta = await _refresh_experiment_step_cache(conn, session_id)
+    reply = _compose_experiment_step_reply(next_meta, mode="next")
+    if reply:
+        return True, reply
+    return True, fallback_reply or ""
+
+
+async def _advance_finished_experiment_step(
+    conn,
+    *,
+    fallback_reply: str = "",
+) -> tuple[bool, str]:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return False, fallback_reply or ""
+
+    can_proceed_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "can_proceed",
+        {"session_id": session_id},
+        priority="foreground",
+    )
+    if not bool(_experiment_result_body(can_proceed_payload).get("ok")):
+        message = _extract_experiment_result_message(can_proceed_payload)
+        if message:
+            return False, message
+        return False, fallback_reply or ""
+
+    proceed_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "proceed_to_next_step",
+        {"session_id": session_id},
+        priority="foreground",
+    )
+    if not bool(_experiment_result_body(proceed_payload).get("ok")):
+        message = _extract_experiment_result_message(proceed_payload)
+        if message:
+            return False, message
+        return False, fallback_reply or ""
+
+    next_meta = await _refresh_experiment_step_cache(conn, session_id)
+    reply = _compose_experiment_step_reply(next_meta, mode="next")
+    if reply:
+        return True, reply
+    return True, fallback_reply or ""
+
+
+async def _release_uvvis_session_for_analysis(conn) -> None:
+    step_id = _get_current_experiment_step_id(conn)
+    if step_id != _UVVIS_ANALYSIS_STEP_ID:
+        return
+
+    session_key = str(getattr(conn, "_uvvis_session_key", "") or "").strip()
+    if not session_key:
+        return
+
+    released_step_id = str(
+        getattr(conn, "_uvvis_analysis_release_done_step_id", "") or ""
+    ).strip()
+    if released_step_id == step_id:
+        return
+
+    manager = _get_server_mcp_manager(conn)
+    if manager is None or not manager.is_mcp_tool("uvvis_session"):
+        return
+
+    try:
+        await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_session",
+            {"action": "release", "session_key": session_key},
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(f"uvvis_session release failed: {exc}")
+        return
+
+    setattr(conn, "_uvvis_session_key", "")
+    setattr(conn, "_uvvis_analysis_release_done_step_id", step_id)
+
+
+async def _handle_uvvis_shared_blank_prep(
+    conn, original_text: str, filtered_text: str, state: dict
+) -> bool:
+    session_key, busy_reply = await _ensure_uvvis_session_key(conn)
+    if not session_key:
+        if busy_reply:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, busy_reply)
+            return True
+        return False
+
+    if state.get("phase") == "await_pure_water_blank":
+        if _is_negative_short_reply_fixed(filtered_text):
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，等你把纯水比色皿放好再告诉我。")
+            return True
+
+        if not _is_affirmative_short_reply_fixed(filtered_text):
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_measure_spectra",
+            {
+                "session_key": session_key,
+                "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+                "ready_for_samples": True,
+            },
+        )
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        if _payload_mentions_missing_blank(payload):
+            _set_uvvis_direct_state(
+                conn,
+                step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+                phase="await_pure_water_blank",
+                session_key=session_key,
+            )
+            speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。")
+            return True
+
+        fields = {
+            "shared_dark_current_ready": True,
+            "shared_air_baseline_ready": True,
+            "pure_water_blank_ready": True,
+            "reference_cuvette_ready": True,
+            "observations": "共享暗电流、空气基线和纯水空白已准备完成",
+        }
+        auto_advanced, reply = await _complete_experiment_step_with_fields(
+            conn,
+            fields=fields,
+            auto_advance=True,
+            fallback_reply="共享暗电流、空气基线和纯水空白都准备好了。",
+        )
+        if auto_advanced and reply:
+            speak_txt(conn, reply)
+        elif reply:
+            speak_txt(conn, reply)
+        return True
+
+    if not (
+        _is_affirmative_short_reply_fixed(filtered_text)
+        or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
+        or _contains_any(
+            _normalize_text_for_match(filtered_text),
+            ("暗电流", "空气基线", "空气能量", "纯水空白", "空白校正", "开始uvvis", "开始紫外可见", "开始测量"),
+        )
+    ):
+        return False
+
+    await _start_direct_intent_turn(conn, original_text)
+    speak_txt(conn, "先不要放任何液体，我先进行暗电流和空气基线准备。")
+    payload = await _execute_uvvis_tool_payload(
+        conn,
+        "uvvis_measure_spectra",
+        {
+            "session_key": session_key,
+            "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+            "ready_for_samples": False,
+        },
+    )
+    if _payload_looks_busy_or_inaccessible(payload):
+        speak_txt(conn, _UVVIS_BUSY_REPLY)
+        return True
+    if _payload_mentions_missing_blank(payload):
+        speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。")
+        _set_uvvis_direct_state(
+            conn,
+            step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+            phase="await_pure_water_blank",
+            session_key=session_key,
+        )
+        return True
+
+    fields = {
+        "shared_dark_current_ready": True,
+        "shared_air_baseline_ready": True,
+        "pure_water_blank_ready": True,
+        "reference_cuvette_ready": True,
+        "observations": "共享暗电流、空气基线和纯水空白已完成或可复用",
+    }
+    auto_advanced, reply = await _complete_experiment_step_with_fields(
+        conn,
+        fields=fields,
+        auto_advance=True,
+        fallback_reply="共享暗电流、空气基线和纯水空白都准备好了。",
+    )
+    if auto_advanced and reply:
+        speak_txt(conn, reply)
+    elif reply:
+        speak_txt(conn, reply)
+    return True
+
+
+async def _handle_uvvis_spectra_measurement(
+    conn, original_text: str, filtered_text: str
+) -> bool:
+    if not (
+        _is_affirmative_short_reply_fixed(filtered_text)
+        or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
+        or _contains_any(
+            _normalize_text_for_match(filtered_text),
+            ("放好了", "都放好了", "已经放好", "可以开始了", "开始测量", "开始扫描", "测光谱"),
+        )
+    ):
+        return False
+
+    session_key, busy_reply = await _ensure_uvvis_session_key(conn)
+    if not session_key:
+        if busy_reply:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, busy_reply)
+            return True
+        return False
+
+    await _start_direct_intent_turn(conn, original_text)
+    payload = await _execute_uvvis_tool_payload(
+        conn,
+        "uvvis_measure_spectra",
+        {
+            "session_key": session_key,
+            "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+            "ready_for_samples": True,
+        },
+    )
+    if _payload_looks_busy_or_inaccessible(payload):
+        speak_txt(conn, _UVVIS_BUSY_REPLY)
+        return True
+    if _payload_mentions_missing_blank(payload):
+        _clear_uvvis_direct_state(conn)
+        await _call_experiment_graph_tool_fast(
+            conn,
+            "redirect_to_step",
+            {
+                "session_id": str(getattr(conn, "experiment_session_id", "") or "").strip(),
+                "step_id": _UVVIS_SHARED_BLANK_STEP_ID,
+            },
+            priority="foreground",
+        )
+        speak_txt(conn, "这一步缺少纯水空白，我先退回前置校正。请先把样品位和参比位都清空，再告诉我开始。")
+        return True
+
+    rows = _extract_uvvis_measure_spectra_rows(payload, conn)
+    if len(rows) < 5 or any(sample_position not in rows for sample_position in _UVVIS_SAMPLE_POSITIONS):
+        speak_txt(conn, "这次光谱结果还不完整，我还没拿到 1 到 5 号样品的完整结果，请稍后再试。")
+        return True
+
+    fields = {
+        f"sample_{sample_position}_lambda_max": rows[sample_position]["lambda_max_nm"]
+        for sample_position in _UVVIS_SAMPLE_POSITIONS
+    }
+    for sample_position in _UVVIS_SAMPLE_POSITIONS:
+        max_absorbance = rows[sample_position].get("max_absorbance")
+        # The experiment schema only accepts non-negative absorbance maxima.
+        # Slightly negative values can appear after baseline correction, so we
+        # skip recording that optional field rather than failing the whole step.
+        if max_absorbance is not None and max_absorbance >= 0:
+            fields[f"sample_{sample_position}_absorbance_max"] = max_absorbance
+    fields["spectrum_saved"] = True
+    fields["observations"] = (
+        "1-5号样品批量扫描完成，"
+        + "；".join(
+            f"{sample_position}号样品λmax={rows[sample_position]['lambda_max_nm']}nm"
+            for sample_position in _UVVIS_SAMPLE_POSITIONS
+        )
+    )
+
+    auto_advanced, reply = await _complete_experiment_step_with_fields(
+        conn,
+        fields=fields,
+        auto_advance=True,
+        fallback_reply="1-5号样品的光谱都测好了。",
+    )
+    summary = "，".join(
+        f"{sample_position}号{rows[sample_position]['lambda_max_nm']}纳米"
+        for sample_position in _UVVIS_SAMPLE_POSITIONS
+    )
+    spoken_reply = f"{summary}。"
+    if reply:
+        if reply.startswith("接下来"):
+            spoken_reply = f"{spoken_reply}{reply}"
+        else:
+            spoken_reply = f"{spoken_reply}{reply}"
+    if auto_advanced or reply:
+        speak_txt(conn, spoken_reply)
+    return True
+
+
+async def _handle_uvvis_kinetics_measurement(
+    conn, original_text: str, filtered_text: str, step_id: str
+) -> bool:
+    run_name = "sample2" if step_id == _UVVIS_KINETICS_SAMPLE2_STEP_ID else "sample4"
+    state = _get_uvvis_direct_state(conn, step_id)
+    sample_position = state.get("sample_position")
+    if sample_position is None:
+        sample_position = _extract_uvvis_sample_position_from_text(original_text)
+        if sample_position is None:
+            sample_position = 1
+        _set_uvvis_direct_state(
+            conn,
+            step_id=step_id,
+            run_name=run_name,
+            sample_position=sample_position,
+            phase="start_pending",
+        )
+        state = _get_uvvis_direct_state(conn, step_id)
+
+    mentioned_sample_position = _extract_uvvis_sample_position_from_text(original_text)
+    if (
+        mentioned_sample_position is not None
+        and mentioned_sample_position != sample_position
+        and state.get("phase") != "done"
+    ):
+        sample_position = mentioned_sample_position
+        next_state = {
+            "step_id": step_id,
+            "run_name": run_name,
+            "sample_position": sample_position,
+            "phase": str(state.get("phase") or "start_pending"),
+        }
+        existing_session_key = str(state.get("session_key") or "").strip()
+        if existing_session_key:
+            next_state["session_key"] = existing_session_key
+        _set_uvvis_direct_state(conn, **next_state)
+        state = _get_uvvis_direct_state(conn, step_id)
+
+    is_negative = _is_negative_short_reply_fixed(filtered_text)
+    is_affirmative = _is_affirmative_short_reply_fixed(filtered_text) or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"} or _contains_any(
+        _normalize_text_for_match(filtered_text),
+        ("放好了", "已经放好", "可以开始了", "开始测量", "开始动力学", "开始记录"),
+    )
+
+    session_key, busy_reply = await _ensure_uvvis_session_key(conn)
+    if not session_key:
+        if busy_reply:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, busy_reply)
+            return True
+        return False
+
+    if state.get("phase") == "done":
+        if not (
+            _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance"}
+            or is_affirmative
+        ):
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        advanced, reply = await _advance_finished_experiment_step(
+            conn,
+            fallback_reply="",
+        )
+        if advanced:
+            await _release_uvvis_session_for_analysis(conn)
+            _clear_uvvis_direct_state(conn)
+        if reply:
+            speak_txt(conn, reply)
+        return True
+
+    if state.get("phase") == "await_liquid_blank":
+        if is_negative:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，等你把参比液和样品位都放好再告诉我。")
+            return True
+        if not is_affirmative:
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_measure_kinetics",
+            {
+                "session_key": session_key,
+                "wavelength_nm": 400,
+                "duration_minutes": 34,
+                "interval_seconds": 60,
+                "run_name": run_name,
+                "ready_for_samples": True,
+                "sample_positions": [sample_position],
+            },
+        )
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        if _payload_mentions_missing_blank(payload):
+            speak_txt(conn, "这一步指定的参比液还没放好，请把参比位和样品位都放入该步骤指定的空白液，不是纯水。放好了告诉我。")
+            return True
+
+        _set_uvvis_direct_state(
+            conn,
+            step_id=step_id,
+            run_name=run_name,
+            sample_position=sample_position,
+            phase="await_reaction_sample",
+            session_key=session_key,
+        )
+        speak_txt(
+            conn,
+            f"液体空白已经记录好了。请把参比位保持不变，把{sample_position}号样品位换成真实反应液，放好了告诉我。",
+        )
+        return True
+
+    if state.get("phase") == "await_reaction_sample":
+        if is_negative:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，等你把真实反应液放好再告诉我。")
+            return True
+        if not is_affirmative:
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_measure_kinetics",
+            {
+                "session_key": session_key,
+                "wavelength_nm": 400,
+                "duration_minutes": 34,
+                "interval_seconds": 60,
+                "run_name": run_name,
+                "ready_for_samples": True,
+                "sample_positions": [sample_position],
+            },
+        )
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        if _payload_mentions_missing_blank(payload):
+            _set_uvvis_direct_state(
+                conn,
+                step_id=step_id,
+                run_name=run_name,
+                sample_position=sample_position,
+                phase="await_liquid_blank",
+                session_key=session_key,
+            )
+            speak_txt(conn, "这一步的空白还没准备好，我先退回前置校正。")
+            return True
+
+        record_fields = _extract_uvvis_measure_kinetics_record_fields(
+            payload,
+            conn,
+            run_name,
+        )
+        if len(record_fields) < 35:
+            speak_txt(conn, "这次动力学结果还不完整，我还没拿到 35 个时间点，请稍后再试。")
+            return True
+
+        fields = dict(record_fields)
+        extracted_optional = _collect_payload_named_values(
+            payload,
+            ("induction_period", "reaction_end_time", "bubble_observed"),
+        )
+        for key, value in extracted_optional.items():
+            if key == "bubble_observed":
+                fields[key] = bool(value)
+            else:
+                numeric = _extract_float_value(value)
+                if numeric is not None:
+                    fields[key] = numeric
+        fields["observations"] = (
+            f"{sample_position}号样品400纳米动力学测量完成，"
+            f"共记录35个时间点。"
+        )
+
+        completed, reply = await _complete_experiment_step_with_fields(
+            conn,
+            fields=fields,
+            auto_advance=False,
+            fallback_reply="我记录好了，可以继续进行下一步了吗？",
+        )
+        if completed:
+            _set_uvvis_direct_state(
+                conn,
+                step_id=step_id,
+                run_name=run_name,
+                sample_position=sample_position,
+                phase="done",
+                session_key=session_key,
+            )
+            speak_txt(conn, "我记录好了，可以继续进行下一步了吗？")
+        elif reply:
+            speak_txt(conn, reply)
+        else:
+            speak_txt(conn, "这次动力学结果还没有完整写回，请稍后再试。")
+        return True
+
+    if state.get("phase") in {"start_pending", ""}:
+        if is_negative:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，你准备好再告诉我。")
+            return True
+
+        if not (
+            is_affirmative
+            or _contains_any(
+                _normalize_text_for_match(filtered_text),
+                ("暗电流", "空气", "空白", "动力学", "开始", "测量", "调mcp", "调用mcp"),
+            )
+        ):
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, "先保持样品位为空，我先做暗电流和 400 纳米空气基线准备。")
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_measure_kinetics",
+            {
+                "session_key": session_key,
+                "wavelength_nm": 400,
+                "duration_minutes": 34,
+                "interval_seconds": 60,
+                "run_name": run_name,
+                "ready_for_samples": False,
+                "sample_positions": [sample_position],
+            },
+        )
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        if _payload_mentions_missing_blank(payload):
+            _set_uvvis_direct_state(
+                conn,
+                step_id=step_id,
+                run_name=run_name,
+                sample_position=sample_position,
+                phase="await_liquid_blank",
+                session_key=session_key,
+            )
+            speak_txt(
+                conn,
+                "这一步指定的参比液/化学空白液还没放好，请把样品位和参比位同时放入该步骤指定的空白液，不是纯水。放好了告诉我。",
+            )
+            return True
+
+        _set_uvvis_direct_state(
+            conn,
+            step_id=step_id,
+            run_name=run_name,
+            sample_position=sample_position,
+            phase="await_reaction_sample",
+            session_key=session_key,
+        )
+        speak_txt(
+            conn,
+            f"共享暗电流和 400 纳米空气基线准备好了。请把参比位保持为该步骤指定的参比液，把{sample_position}号样品位换成真实反应液，放好了告诉我。",
+        )
+        return True
+
+    return False
+
+
+async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: str) -> bool:
+    step_id = _get_current_experiment_step_id(conn)
+    if not _is_uvvis_step(step_id):
+        return False
+
+    if step_id == _UVVIS_ANALYSIS_STEP_ID:
+        await _release_uvvis_session_for_analysis(conn)
+        return False
+
+    state = _get_uvvis_direct_state(conn, step_id)
+
+    if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
+        return await _handle_uvvis_shared_blank_prep(conn, original_text, filtered_text, state)
+
+    if step_id == _UVVIS_SAMPLE_RECORD_STEP_ID:
+        return await _handle_uvvis_spectra_measurement(conn, original_text, filtered_text)
+
+    if step_id in {
+        _UVVIS_KINETICS_SAMPLE2_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE4_STEP_ID,
+    }:
+        return await _handle_uvvis_kinetics_measurement(
+            conn,
+            original_text,
+            filtered_text,
+            step_id,
+        )
+
+    if step_id == _UVVIS_SAMPLE_LOAD_STEP_ID:
+        return False
+
+    if step_id == _UVVIS_SAMPLE_CLEAN_STEP_ID:
+        return False
+
+    return False
 
 
 async def _advance_experiment_step_fast(conn, session_id: str) -> str:

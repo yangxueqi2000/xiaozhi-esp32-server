@@ -44,6 +44,73 @@ def _resolve_tts_stop_buffer_ms(conn, frame_duration_ms):
     return requested_extra_ms, min_buffer_ms, protocol_floor_ms, effective_extra_ms
 
 
+def _estimate_sent_audio_remaining_ms(flow_control, *, now_monotonic=None):
+    current_flow_control = flow_control or {}
+    packet_count = int(current_flow_control.get("packet_count", 0) or 0)
+    first_send_monotonic = current_flow_control.get("first_send_monotonic")
+    if first_send_monotonic is None or packet_count <= 0:
+        return 0
+
+    frame_duration_ms = int(
+        current_flow_control.get("frame_duration_ms", AUDIO_FRAME_DURATION)
+        or AUDIO_FRAME_DURATION
+    )
+    if frame_duration_ms <= 0:
+        frame_duration_ms = AUDIO_FRAME_DURATION
+
+    current_monotonic = (
+        time.monotonic() if now_monotonic is None else float(now_monotonic)
+    )
+    elapsed_ms = max((current_monotonic - first_send_monotonic) * 1000, 0)
+    scheduled_audio_ms = packet_count * frame_duration_ms
+    return max(scheduled_audio_ms - elapsed_ms, 0)
+
+
+def _resolve_tts_sentence_bridge_guard_ms(conn, frame_duration_ms):
+    default_guard_ms = max(int(frame_duration_ms or AUDIO_FRAME_DURATION), 40)
+    raw_guard_ms = conn.config.get(
+        "tts_sentence_bridge_guard_ms",
+        default_guard_ms,
+    )
+    try:
+        return max(0, int(raw_guard_ms))
+    except (TypeError, ValueError):
+        return default_guard_ms
+
+
+def _resolve_tts_sentence_bridge_delay_ms(conn):
+    rate_controller = getattr(conn, "audio_rate_controller", None)
+    if rate_controller is None:
+        return 0
+
+    flow_control = getattr(conn, "audio_flow_control", {}) or {}
+    active_sentence_id = str(getattr(conn, "sentence_id", "") or "").strip()
+    flow_sentence_id = str(flow_control.get("sentence_id", "") or "").strip()
+    if not active_sentence_id or flow_sentence_id != active_sentence_id:
+        return 0
+
+    try:
+        queued_items = len(getattr(rate_controller, "queue", ()) or ())
+    except Exception:
+        queued_items = 1
+    if queued_items > 0:
+        return 0
+
+    frame_duration_ms = int(
+        flow_control.get(
+            "frame_duration_ms",
+            getattr(rate_controller, "frame_duration", AUDIO_FRAME_DURATION),
+        )
+        or AUDIO_FRAME_DURATION
+    )
+    remaining_ms = _estimate_sent_audio_remaining_ms(flow_control)
+    if remaining_ms <= 0:
+        return 0
+
+    guard_ms = _resolve_tts_sentence_bridge_guard_ms(conn, frame_duration_ms)
+    return int(round(remaining_ms + guard_ms))
+
+
 def _get_open_websocket(conn):
     ws = getattr(conn, "websocket", None)
     if ws is None:
@@ -111,6 +178,14 @@ async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
     force_independent_cycle = _should_force_independent_tts_cycle(
         conn, active_sentence_id
     )
+    sentence_bridge_delay_ms = _resolve_tts_sentence_bridge_delay_ms(conn)
+    if sentence_bridge_delay_ms > 0:
+        conn.logger.bind(tag=TAG).info(
+            "tts sentence bridge wait: "
+            f"delay_ms={sentence_bridge_delay_ms}, "
+            f"sentence_id={active_sentence_id or 'unknown'}"
+        )
+        await asyncio.sleep(sentence_bridge_delay_ms / 1000.0)
     if conn.tts.tts_audio_first_sentence:
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
         conn.tts.tts_audio_first_sentence = False
@@ -153,6 +228,7 @@ async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
             and conn.audio_rate_controller
             and getattr(conn, "audio_flow_control", {}).get("sentence_id")
             == conn.sentence_id
+            and sentence_bridge_delay_ms <= 0
         ):
             conn.audio_rate_controller.add_message(
                 lambda: send_tts_message(conn, "sentence_start", text)
@@ -209,13 +285,10 @@ async def _wait_for_audio_completion(conn):
         flow_control.get("frame_duration_ms", rate_controller.frame_duration)
     )
     packet_count = int(flow_control.get("packet_count", 0))
-    first_send_monotonic = flow_control.get("first_send_monotonic")
-
-    remaining_ms = 0
-    if first_send_monotonic is not None and packet_count > 0:
-        elapsed_ms = max((time.monotonic() - first_send_monotonic) * 1000, 0)
-        scheduled_audio_ms = packet_count * frame_duration_ms
-        remaining_ms = max(scheduled_audio_ms - elapsed_ms, 0)
+    remaining_ms = _estimate_sent_audio_remaining_ms(
+        flow_control,
+        now_monotonic=time.monotonic(),
+    )
 
     requested_extra_ms, min_buffer_ms, protocol_floor_ms, effective_extra_ms = (
         _resolve_tts_stop_buffer_ms(conn, frame_duration_ms)

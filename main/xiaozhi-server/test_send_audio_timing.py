@@ -3,8 +3,10 @@ import types
 import unittest
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -72,6 +74,8 @@ sys.modules.setdefault("config.logger", fake_logger_module)
 
 
 from core.handle.sendAudioHandle import (
+    _estimate_sent_audio_remaining_ms,
+    _resolve_tts_sentence_bridge_delay_ms,
     _resolve_tts_stop_buffer_ms,
     _resolve_tts_stop_drain_guard_ms,
     send_tts_message,
@@ -135,6 +139,58 @@ class SendAudioTimingTest(unittest.TestCase):
         guard_ms = _resolve_tts_stop_drain_guard_ms(conn)
 
         self.assertEqual(600, guard_ms)
+
+    def test_estimate_sent_audio_remaining_ms_uses_elapsed_playback_time(self):
+        flow_control = {
+            "packet_count": 4,
+            "frame_duration_ms": 60,
+            "first_send_monotonic": 100.0,
+        }
+
+        remaining_ms = _estimate_sent_audio_remaining_ms(
+            flow_control,
+            now_monotonic=100.12,
+        )
+
+        self.assertAlmostEqual(120.0, remaining_ms, delta=1.0)
+
+    def test_sentence_bridge_delay_waits_for_inflight_audio_when_queue_is_empty(self):
+        conn = SimpleNamespace(
+            sentence_id="turn-bridge-1",
+            config={"tts_sentence_bridge_guard_ms": 0},
+            audio_rate_controller=SimpleNamespace(queue=[], frame_duration=60),
+            audio_flow_control={
+                "sentence_id": "turn-bridge-1",
+                "packet_count": 4,
+                "frame_duration_ms": 60,
+                "first_send_monotonic": 100.0,
+            },
+        )
+
+        with patch("core.handle.sendAudioHandle.time.monotonic", return_value=100.0):
+            delay_ms = _resolve_tts_sentence_bridge_delay_ms(conn)
+
+        self.assertEqual(240, delay_ms)
+
+    def test_sentence_bridge_delay_is_skipped_when_queue_still_has_backlog(self):
+        conn = SimpleNamespace(
+            sentence_id="turn-bridge-2",
+            config={"tts_sentence_bridge_guard_ms": 0},
+            audio_rate_controller=SimpleNamespace(
+                queue=[("audio", b"one")],
+                frame_duration=60,
+            ),
+            audio_flow_control={
+                "sentence_id": "turn-bridge-2",
+                "packet_count": 4,
+                "frame_duration_ms": 60,
+                "first_send_monotonic": time.monotonic(),
+            },
+        )
+
+        delay_ms = _resolve_tts_sentence_bridge_delay_ms(conn)
+
+        self.assertEqual(0, delay_ms)
 
     def test_stream_split_holds_terminal_sentence_until_more_context_arrives(self):
         provider = _DummyTTSProvider(
@@ -258,6 +314,49 @@ class SendAudioTimingTest(unittest.TestCase):
         self.assertEqual("sentence_start", sentence_payload["state"])
         self.assertEqual("接下来做这一步", sentence_payload["text"])
 
+
+    def test_first_audio_message_waits_for_inflight_audio_before_next_sentence(self):
+        ws = _DummyWebSocket()
+        sleep_calls = []
+
+        async def _fake_sleep(delay_seconds):
+            sleep_calls.append(delay_seconds)
+
+        conn = SimpleNamespace(
+            session_id="sess-3b",
+            sentence_id="turn-bridge-3",
+            websocket=ws,
+            config={"tts_sentence_bridge_guard_ms": 0},
+            logger=_DummyLogger(),
+            tts=SimpleNamespace(tts_audio_first_sentence=False),
+            client_is_speaking=True,
+            close_after_chat=False,
+            audio_rate_controller=SimpleNamespace(queue=[], frame_duration=60),
+            audio_flow_control={
+                "sentence_id": "turn-bridge-3",
+                "packet_count": 4,
+                "frame_duration_ms": 60,
+                "first_send_monotonic": 100.0,
+            },
+        )
+
+        with patch("core.handle.sendAudioHandle.time.monotonic", return_value=100.0):
+            with patch("core.handle.sendAudioHandle.asyncio.sleep", new=_fake_sleep):
+                asyncio.run(
+                    sendAudioMessage(
+                        conn,
+                        SentenceType.FIRST,
+                        [],
+                        "bridged subtitle",
+                        sentence_id="turn-bridge-3",
+                    )
+                )
+
+        self.assertEqual([0.24], sleep_calls)
+        self.assertEqual(1, len(ws.messages))
+        sentence_payload = json.loads(ws.messages[0])
+        self.assertEqual("sentence_start", sentence_payload["state"])
+        self.assertEqual("bridged subtitle", sentence_payload["text"])
 
     def test_middle_audio_message_with_text_still_emits_sentence_start(self):
         ws = _DummyWebSocket()

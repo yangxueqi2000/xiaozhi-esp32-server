@@ -1896,6 +1896,108 @@ def _apply_export_artifact_guard(conn, text: str) -> str:
     return normalized
 
 
+def _get_current_turn_server_mcp_payload(conn):
+    if conn is None:
+        return None
+
+    current_sentence_id = str(getattr(conn, "sentence_id", "") or "").strip()
+    payload_sentence_id = str(
+        getattr(conn, "_last_server_mcp_sentence_id", "") or ""
+    ).strip()
+    if not current_sentence_id or current_sentence_id != payload_sentence_id:
+        return None
+    return getattr(conn, "_last_server_mcp_payload", None)
+
+
+def _payload_text_for_tool_failure_guard(payload) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload.strip().lower()
+    try:
+        return json.dumps(payload, ensure_ascii=False).lower()
+    except TypeError:
+        return str(payload).strip().lower()
+
+
+def _payload_text_looks_like_tool_failure(payload_text: str) -> bool:
+    text = str(payload_text or "").strip().lower()
+    if not text:
+        return False
+
+    failure_tokens = (
+        '"success": false',
+        '"ok": false',
+        "error",
+        "failed",
+        "timeout",
+        "busy",
+        "occupied",
+        "inaccessible",
+        "not found",
+        "missing",
+        "exception",
+        "disconnect",
+        "占用",
+        "超时",
+        "失败",
+        "未找到",
+        "缺少",
+        "没接通",
+        "没连上",
+    )
+    return any(token in text for token in failure_tokens)
+
+
+def _apply_tool_failure_narration_guard(conn, text: str) -> str:
+    if not text or conn is None:
+        return text
+
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return normalized
+
+    current_turn_payload = _get_current_turn_server_mcp_payload(conn)
+    current_turn_payload_text = _payload_text_for_tool_failure_guard(current_turn_payload)
+    has_current_turn_tool_failure = _payload_text_looks_like_tool_failure(
+        current_turn_payload_text
+    )
+    has_current_turn_busy_failure = has_current_turn_tool_failure and any(
+        token in current_turn_payload_text
+        for token in ("busy", "occupied", "inaccessible", "lease", "占用", "忙")
+    )
+
+    if not has_current_turn_tool_failure and any(
+        token in normalized
+        for token in (
+            "实验图谱接口这轮没接通",
+            "实验图谱接口没接通",
+            "接口这轮没接通",
+        )
+    ):
+        normalized = normalized.replace("实验图谱接口这轮没接通，", "")
+        normalized = normalized.replace("实验图谱接口这轮没接通", "")
+        normalized = normalized.replace("实验图谱接口没接通，", "")
+        normalized = normalized.replace("实验图谱接口没接通", "")
+        normalized = normalized.replace("接口这轮没接通，", "")
+        normalized = normalized.replace("接口这轮没接通", "")
+        normalized = normalize_spoken_text(normalized).strip("，,。；; ")
+
+    uvvis_occupation_claim = any(
+        token in normalized
+        for token in (
+            "被别的程序占用",
+            "被其他程序占用",
+            "暂时不能直接启动校正",
+            "还没能直接启动校正",
+        )
+    )
+    if uvvis_occupation_claim and not has_current_turn_busy_failure:
+        return "UV-Vis 这边还没准备好，请稍后再试。"
+
+    return normalize_spoken_text(normalized)
+
+
 def _strip_backstage_leading_clauses(text: str) -> str:
     cleaned = (text or "").strip()
     while cleaned:
@@ -2085,4 +2187,5 @@ def prepare_runtime_spoken_text_for_conn(conn, text):
         return ""
     prepared = _apply_experiment_ready_guard(conn, prepared)
     prepared = _apply_export_artifact_guard(conn, prepared)
+    prepared = _apply_tool_failure_narration_guard(conn, prepared)
     return normalize_spoken_text(prepared)

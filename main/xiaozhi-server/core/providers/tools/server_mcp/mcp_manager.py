@@ -11,7 +11,7 @@ from mcp.types import LoggingMessageNotificationParams
 
 from config.config_loader import get_project_dir
 from config.logger import setup_logging
-from .mcp_client import ServerMCPClient
+from .mcp_client import ServerMCPClient, _coerce_timeout_value
 
 TAG = __name__
 logger = setup_logging()
@@ -67,6 +67,25 @@ class ServerMCPManager:
             )
             return {}
 
+    @staticmethod
+    def _resolve_client_initialize_timeout(srv_config: Dict[str, Any]) -> float:
+        transport_type = str(srv_config.get("transport", "") or "").strip().lower()
+        default_timeout = 20.0 if transport_type in {"streamable-http", "http", "sse"} else 10.0
+        raw_timeout = srv_config.get(
+            "initialize_timeout",
+            srv_config.get("init_timeout", srv_config.get("timeout", default_timeout)),
+        )
+        timeout_value = _coerce_timeout_value(
+            raw_timeout,
+            default=default_timeout,
+            allow_unbounded=False,
+        )
+        try:
+            resolved = float(timeout_value or default_timeout)
+        except (TypeError, ValueError):
+            resolved = default_timeout
+        return max(5.0, resolved)
+
     async def _build_client(
         self, name: str, srv_config: Dict[str, Any]
     ) -> Optional[tuple[str, ServerMCPClient, List[Dict[str, Any]]]]:
@@ -74,14 +93,15 @@ class ServerMCPManager:
         try:
             logger.bind(tag=TAG).info(f"Initializing server MCP client: {name}")
             client = ServerMCPClient(srv_config)
+            init_timeout = self._resolve_client_initialize_timeout(srv_config)
             await asyncio.wait_for(
                 client.initialize(logging_callback=self.logging_callback),
-                timeout=10,
+                timeout=init_timeout,
             )
             return name, client, client.get_available_tools()
         except asyncio.TimeoutError:
             logger.bind(tag=TAG).error(
-                f"Failed to initialize MCP server {name}: timeout"
+                f"Failed to initialize MCP server {name}: timeout after {init_timeout:.1f}s"
             )
             if client:
                 await client.cleanup()
@@ -207,6 +227,47 @@ class ServerMCPManager:
     def is_mcp_tool(self, tool_name: str) -> bool:
         """Check whether a tool exists in the shared pool."""
         return tool_name in type(self)._shared_tool_to_client
+
+    async def ensure_client_initialized(self, client_name: str) -> bool:
+        """Best-effort targeted recovery for a missing or disconnected shared client."""
+        current = type(self)._shared_clients.get(client_name)
+        if current is not None and current.is_connected():
+            return True
+
+        reconnect_lock = self._get_reconnect_lock(client_name)
+        async with reconnect_lock:
+            current = type(self)._shared_clients.get(client_name)
+            if current is not None and current.is_connected():
+                return True
+
+            if current is not None:
+                try:
+                    await current.cleanup()
+                except Exception as exc:
+                    logger.bind(tag=TAG).warning(
+                        f"Error cleaning stale MCP client {client_name}: {exc}"
+                    )
+
+            config = self.load_config()
+            srv_config = config.get(client_name)
+            if not isinstance(srv_config, dict):
+                logger.bind(tag=TAG).warning(
+                    f"Cannot initialize MCP client {client_name}: config not found"
+                )
+                return False
+
+            rebuilt = await self._build_client(client_name, srv_config)
+            if not rebuilt:
+                return False
+
+            _, client, client_tools = rebuilt
+            type(self)._register_client_tools(client_name, client, client_tools)
+            logger.bind(tag=TAG).info(
+                f"Initialized missing shared MCP client successfully: {client_name}"
+            )
+
+        self._refresh_conn_tool_cache()
+        return True
 
     async def _reconnect_client(
         self, client_name: str, failed_client: ServerMCPClient
