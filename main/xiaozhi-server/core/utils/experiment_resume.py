@@ -32,6 +32,8 @@ TRANSCRIPT_SESSION_RE = re.compile(
     r"\[experiment_session_id=(?P<session_id>[^\]]+)\]"
 )
 TRANSCRIPT_YAML_RE = re.compile(r"\[yaml=(?P<yaml_path>[^\]]+)\]")
+TRANSCRIPT_ROLE_RE = re.compile(r"\[TRANSCRIPT\] \[(?P<role>USER|ASSISTANT)\]")
+TRANSCRIPT_SOURCE_RE = re.compile(r"\[source=(?P<source>[^\]]+)\]")
 
 
 class _PathFormatDict(dict):
@@ -527,6 +529,63 @@ def _extract_latest_transcript_snapshot(log_text: str) -> Dict[str, str]:
         "latest_current_step_id": latest_current_step_id,
         "latest_experiment_yaml_path": latest_experiment_yaml_path,
     }
+
+
+def read_transcript_entries(
+    log_path: str | Path,
+    *,
+    max_entries: int = 0,
+) -> List[Dict[str, str]]:
+    path = Path(log_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"transcript log read failed: {path} ({exc})"
+        )
+        return []
+
+    entries: List[Dict[str, str]] = []
+    for raw_line in lines:
+        line = str(raw_line or "").strip()
+        if not line or "[TRANSCRIPT]" not in line:
+            continue
+
+        role_match = TRANSCRIPT_ROLE_RE.search(line)
+        if not role_match:
+            continue
+
+        source_match = TRANSCRIPT_SOURCE_RE.search(line)
+        session_match = TRANSCRIPT_SESSION_RE.search(line)
+        step_match = TRANSCRIPT_STEP_RE.search(line)
+        yaml_match = TRANSCRIPT_YAML_RE.search(line)
+        text = line.rsplit("] ", 1)[-1].strip()
+        if not text or text == line:
+            continue
+
+        entries.append(
+            {
+                "role": str(role_match.group("role") or "").strip(),
+                "source": str(
+                    source_match.group("source") if source_match else ""
+                ).strip(),
+                "experiment_session_id": str(
+                    session_match.group("session_id") if session_match else ""
+                ).strip(),
+                "current_step_id": str(
+                    step_match.group("step_id") if step_match else ""
+                ).strip(),
+                "experiment_yaml_path": str(
+                    yaml_match.group("yaml_path") if yaml_match else ""
+                ).strip(),
+                "text": text,
+            }
+        )
+
+    limit = max(0, int(max_entries or 0))
+    if limit > 0:
+        return entries[-limit:]
+    return entries
 
 
 def _parse_turns(log_text: str) -> List[Dict[str, str]]:

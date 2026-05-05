@@ -31,7 +31,11 @@ fake_logger_module = types.ModuleType("config.logger")
 fake_logger_module.setup_logging = lambda: _FakeLogger()
 sys.modules.setdefault("config.logger", fake_logger_module)
 
-from core.providers.llm.codex.codex import _CodexSession
+from core.providers.llm.codex.codex import (
+    _CodexSession,
+    _recoverable_stderr_reason,
+    _should_suppress_stderr_warning,
+)
 
 
 class CodexPromptStateTest(unittest.TestCase):
@@ -108,6 +112,17 @@ class CodexPromptStateTest(unittest.TestCase):
 
         self.assertEqual("again", session._captured_prompts[1]["prompt_text"])
         self.assertEqual("again", session._captured_prompts[1]["user_text"])
+
+    def test_wham_transport_request_failure_is_suppressed_as_recoverable_noise(self):
+        warning_text = (
+            "2026-05-05T07:35:50.838000Z ERROR rmcp::transport::worker: "
+            "worker quit with fatal: Transport channel closed, when "
+            "Client(HttpRequest(HttpRequest(\"http/request failed: error sending "
+            "request for url (https://chatgpt.com/backend-api/wham/apps)\")))"
+        )
+
+        self.assertTrue(_should_suppress_stderr_warning(warning_text))
+        self.assertEqual("wham_transport_eof", _recoverable_stderr_reason(warning_text))
 
     def test_timeout_without_current_step_uses_operation_template(self):
         prompt_text = self._first_prompt_with_experiment_context(

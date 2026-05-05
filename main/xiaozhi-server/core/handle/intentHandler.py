@@ -766,10 +766,6 @@ def _is_explicit_ready_to_start_reply(filtered_text: str) -> bool:
     )
 
 
-def _compose_waiting_ready_reply() -> str:
-    return "你准备好后告诉我准备好了，我再带你开始第一步。"
-
-
 async def _reset_experiment_fresh_start_context(conn) -> None:
     old_chat_session_id = str(getattr(conn, "chat_session_id", "") or "").strip()
     old_model_session_key = str(getattr(conn, "model_session_key", "") or "").strip()
@@ -915,13 +911,13 @@ async def _handle_explicit_experiment_resume_request(
         speak_txt(conn, reply)
         return True
 
-    redirected = await _try_redirect_experiment_step_fast(
+    recovered, recovery_reply = await _replay_experiment_progress_from_resume_log(
         conn,
         target_step_id,
-        log_reason="experiment explicit resume redirect from device log",
+        log_path,
     )
-    if not redirected:
-        reply = (
+    if not recovered:
+        reply = recovery_reply or (
             "我找到了上次实验的日志，但当前图谱没法自动跳到那一步。"
             "你可以让我重新开始，或者明确告诉我要跳到哪一步。"
         )
@@ -1001,6 +997,22 @@ def _looks_like_generic_experiment_control_text(filtered_text: str) -> bool:
         "濂戒簡",
     )
     return _contains_any(norm, generic_fragments)
+
+
+def _should_attempt_future_step_context_inference(
+    original_text: str = "",
+    filtered_text: str = "",
+) -> bool:
+    norm = _normalize_text_for_match(filtered_text or original_text)
+    if not norm:
+        return False
+    if _is_explicit_ready_to_start_reply(filtered_text):
+        return False
+    if _looks_like_generic_experiment_control_text(filtered_text):
+        return False
+    if _looks_like_pure_short_completion_control(norm):
+        return False
+    return True
 
 
 def _grant_experiment_ready_guard_bypass(conn, count: int = 1) -> None:
@@ -1352,84 +1364,465 @@ def _build_experiment_autofill_fields(
     *,
     allow_confirmation_autofill: bool = False,
 ) -> dict:
-    autofill = {}
-    unsafe_tokens = (
-        "photo",
-        "图片",
-        "照片",
-        "拍照",
-        "颜色",
-        "现象",
-        "观察",
-        "observed",
-        "tyndall",
-        "吸光",
-        "absorbance",
-        "波长",
-        "wavelength",
-        "lambda",
-        "kinetics",
-        "rate",
-        "constant",
-        "csv",
-        "file",
-        "path",
-        "task",
-        "导出",
-        "报告",
-        "pdf",
-    )
-    safe_name_tokens = (
-        "added",
-        "loaded",
-        "cleaned",
-        "prepared",
-        "confirmed",
-        "mixed",
-        "started",
-        "ready",
-        "placed",
-        "labeled",
-        "stir",
-        "returned",
-        "completed",
-        "setup",
-    )
-    safe_desc_tokens = (
-        "已",
-        "完成",
-        "确认",
-        "准备好",
-        "就位",
-        "清洗",
-        "混合均匀",
-        "加入",
-        "启动",
-    )
+    return {}
 
+
+_RESUME_LOG_NEGATIVE_TOKENS = (
+    "没做",
+    "还没做",
+    "还没有做",
+    "没做好",
+    "还没做好",
+    "没完成",
+    "还没完成",
+    "先别",
+    "不要",
+    "不行",
+    "没加",
+    "还没加",
+)
+
+_RESUME_LOG_GLOBAL_COMPLETION_TOKENS = (
+    "全部完成",
+    "都完成",
+    "全都完成",
+    "全部做好",
+    "都做好",
+    "全都做好",
+    "全部放好",
+    "都放好",
+    "全都放好",
+    "全部加好",
+    "都加好了",
+    "全都加好了",
+    "已经全部",
+    "都已经",
+)
+
+
+def _resume_log_has_global_completion_signal(user_texts) -> bool:
+    for text in user_texts or []:
+        norm = _normalize_confirmation_signature(text)
+        if not norm:
+            continue
+        if _contains_any(norm, _RESUME_LOG_NEGATIVE_TOKENS):
+            continue
+        if _contains_any(norm, _RESUME_LOG_GLOBAL_COMPLETION_TOKENS):
+            return True
+    return False
+
+
+def _build_experiment_resume_log_autofill_fields(
+    user_texts,
+    schema_by_name: dict,
+    missing_fields,
+    *,
+    allow_confirmation_autofill: bool = False,
+) -> dict:
+    if not allow_confirmation_autofill:
+        return {}
+
+    signatures = []
+    for text in user_texts or []:
+        norm = _normalize_confirmation_signature(text)
+        if not norm or _contains_any(norm, _RESUME_LOG_NEGATIVE_TOKENS):
+            continue
+        signatures.append(norm)
+
+    if not signatures:
+        return {}
+
+    global_completion = _resume_log_has_global_completion_signal(user_texts)
+    result = {}
     for field_name in missing_fields or []:
         field = schema_by_name.get(field_name, {})
         type_text = str(field.get("type", "")).strip().lower()
         if type_text not in {"bool", "boolean"}:
             continue
-
-        description = str(field.get("description", "")).strip()
-        haystack = f"{field_name} {description}".lower()
-        if _contains_match_token(haystack, unsafe_tokens):
+        description = _normalize_confirmation_signature(
+            _clean_field_description(field.get("description", ""))
+        )
+        if not description:
             continue
-
-        if allow_confirmation_autofill:
-            autofill[field_name] = True
-            continue
-
-        if not _contains_match_token(haystack, safe_name_tokens) and not _contains_match_token(
-            description,
-            safe_desc_tokens,
+        if global_completion or any(
+            _looks_like_confirmation_signature_match(signature, description)
+            for signature in signatures
         ):
-            continue
+            result[field_name] = True
+    return result
 
-        autofill[field_name] = True
-    return autofill
+
+def _looks_like_explicit_completion_report(filtered_text: str) -> bool:
+    norm = _normalize_confirmation_signature(filtered_text)
+    if not norm:
+        return False
+    if _contains_any(norm, _RESUME_LOG_NEGATIVE_TOKENS):
+        return False
+    if _looks_like_pure_short_completion_control(norm):
+        return True
+    completion_tokens = (
+        "全部完成",
+        "都完成",
+        "全都完成",
+        "已经完成",
+        "已完成",
+        "完成了",
+        "全部做好",
+        "都做好",
+        "全都做好",
+        "做好了",
+        "做完了",
+    )
+    return _contains_any(norm, completion_tokens)
+
+
+def _build_experiment_current_step_confirmation_fields(
+    filtered_text: str,
+    schema_by_name: dict,
+    missing_fields,
+    *,
+    allow_confirmation_autofill: bool = False,
+) -> dict:
+    norm = _normalize_confirmation_signature(filtered_text)
+    if not norm:
+        return {}
+    if _looks_like_question_reply(filtered_text):
+        return {}
+    if _contains_any(norm, _RESUME_LOG_NEGATIVE_TOKENS):
+        return {}
+
+    global_completion = _looks_like_explicit_completion_report(filtered_text)
+    result = {}
+    for field_name in missing_fields or []:
+        field = schema_by_name.get(field_name, {})
+        type_text = str(field.get("type", "")).strip().lower()
+        if type_text not in {"bool", "boolean"}:
+            continue
+        description = _normalize_confirmation_signature(
+            _clean_field_description(field.get("description", ""))
+        )
+        if not description:
+            continue
+        if global_completion or _looks_like_confirmation_signature_match(
+            norm,
+            description,
+        ):
+            result[field_name] = True
+    return result
+
+
+async def _try_apply_current_confirmation_report(
+    conn,
+    filtered_text: str,
+) -> str | None:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return None
+
+    try:
+        step_payload, progress_payload, schema_payload = await asyncio.gather(
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_step",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_current_progress",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_schema",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+        )
+    except Exception:
+        return None
+
+    current_progress = _extract_experiment_current_progress(progress_payload)
+    if current_progress is None:
+        try:
+            start_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "start_trial",
+                {"session_id": session_id},
+                priority="foreground",
+            )
+        except Exception:
+            return None
+        current_progress = _extract_experiment_current_progress(start_payload)
+
+    missing_fields = list((current_progress or {}).get("missing_fields") or [])
+    if not missing_fields:
+        return None
+
+    schema_by_name = _extract_experiment_schema_view(schema_payload)
+    write_fields = _build_experiment_current_step_confirmation_fields(
+        filtered_text,
+        schema_by_name,
+        missing_fields,
+        allow_confirmation_autofill=True,
+    )
+    if not write_fields:
+        return None
+
+    conn.logger.bind(tag=TAG).info(
+        "experiment confirmation writeback fast path hit: "
+        f"text={filtered_text}, write_fields={sorted(write_fields.keys())}"
+    )
+
+    completed, reply = await _complete_experiment_step_with_fields(
+        conn,
+        fields=write_fields,
+        auto_advance=True,
+        fallback_reply="我先记下了当前这一步的确认结果。",
+    )
+    if completed or reply:
+        return reply
+    return None
+
+
+def _collect_resume_log_user_texts_by_step(log_path: str) -> dict[str, list[str]]:
+    if not log_path:
+        return {}
+
+    grouped: dict[str, list[str]] = {}
+    for entry in experiment_resume.read_transcript_entries(log_path):
+        if str(entry.get("role", "")).strip().upper() != "USER":
+            continue
+        step_id = str(entry.get("current_step_id", "")).strip()
+        text = str(entry.get("text", "")).strip()
+        if not step_id or not text:
+            continue
+        grouped.setdefault(step_id, []).append(text)
+    return grouped
+
+
+def _resolve_experiment_yaml_step_order(conn) -> list[str]:
+    step_ids = []
+    for step in _resolve_experiment_yaml_steps(conn):
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("id", "") or "").strip()
+        if step_id:
+            step_ids.append(step_id)
+    return step_ids
+
+
+def _compose_resume_log_recovery_blocked_reply(
+    step_meta: dict,
+    missing_fields,
+    schema_by_name: dict,
+    *,
+    has_log_evidence: bool,
+) -> str:
+    title = str(step_meta.get("title", "") or step_meta.get("step_id", "") or "").strip()
+    missing_reply = _compose_missing_field_reply(missing_fields, schema_by_name)
+    if title:
+        if has_log_evidence:
+            return (
+                f"我找到上次实验日志了，但在“{title}”这一步，日志里的汇报还不够我自动补齐。"
+                f"{missing_reply}"
+            )
+        return (
+            f"我找到上次实验日志了，但日志里还没有足够内容证明“{title}”这一步已经做完。"
+            f"{missing_reply}"
+        )
+    if has_log_evidence:
+        return (
+            "我找到上次实验日志了，但日志里的汇报还不够我自动补齐当前这一步。"
+            f"{missing_reply}"
+        )
+    return (
+        "我找到上次实验日志了，但日志里还没有足够内容证明当前这一步已经做完。"
+        f"{missing_reply}"
+    )
+
+
+async def _replay_experiment_progress_from_resume_log(
+    conn,
+    target_step_id: str,
+    log_path: str,
+) -> tuple[bool, str]:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    target_step_id = str(target_step_id or "").strip()
+    log_path = str(log_path or "").strip()
+    if not session_id or not target_step_id or not log_path:
+        return False, ""
+
+    step_order = _resolve_experiment_yaml_step_order(conn)
+    if not step_order or target_step_id not in step_order:
+        return False, (
+            "我找到了上次实验日志，但当前实验 YAML 里没法可靠解析出恢复顺序，"
+            "现在还不能安全地自动续做。"
+        )
+
+    current_step_id = _get_current_experiment_step_id(conn)
+    if not current_step_id:
+        step_meta = await _safe_refresh_experiment_step_cache(
+            conn,
+            session_id,
+            reason="explicit_resume_recovery_bootstrap",
+        )
+        current_step_id = str(step_meta.get("step_id", "") or "").strip()
+
+    if not current_step_id:
+        return False, ""
+    if current_step_id not in step_order:
+        return False, ""
+
+    target_index = step_order.index(target_step_id)
+    current_index = step_order.index(current_step_id)
+    if current_index > target_index:
+        return False, ""
+    if current_step_id == target_step_id:
+        return True, ""
+
+    step_user_texts = _collect_resume_log_user_texts_by_step(log_path)
+
+    while current_step_id and current_step_id != target_step_id:
+        try:
+            step_payload, progress_payload, schema_payload = await asyncio.gather(
+                _call_experiment_graph_tool_fast(
+                    conn,
+                    "get_step",
+                    {"session_id": session_id},
+                    priority="foreground",
+                ),
+                _call_experiment_graph_tool_fast(
+                    conn,
+                    "get_current_progress",
+                    {"session_id": session_id},
+                    priority="foreground",
+                ),
+                _call_experiment_graph_tool_fast(
+                    conn,
+                    "get_schema",
+                    {"session_id": session_id},
+                    priority="foreground",
+                ),
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"experiment explicit resume replay load failed: {exc}"
+            )
+            return False, ""
+
+        step_meta = _merge_experiment_step_meta(
+            _extract_experiment_step_meta(step_payload),
+            _extract_experiment_step_meta(getattr(conn, "experiment_progress_summary", None)),
+        )
+        current_progress = _extract_experiment_current_progress(progress_payload)
+        if current_progress is None:
+            try:
+                start_payload = await _call_experiment_graph_tool_fast(
+                    conn,
+                    "start_trial",
+                    {"session_id": session_id},
+                    priority="foreground",
+                )
+            except Exception as exc:
+                conn.logger.bind(tag=TAG).warning(
+                    f"experiment explicit resume start_trial failed: {exc}"
+                )
+                return False, ""
+            current_progress = _extract_experiment_current_progress(start_payload)
+
+        schema_by_name = _extract_experiment_schema_view(schema_payload)
+        missing_fields = list((current_progress or {}).get("missing_fields") or [])
+        current_user_texts = step_user_texts.get(current_step_id, [])
+
+        autofill_fields = _build_experiment_resume_log_autofill_fields(
+            current_user_texts,
+            schema_by_name,
+            missing_fields,
+            allow_confirmation_autofill=_step_supports_confirmation_autofill(
+                step_payload
+            ),
+        )
+        if autofill_fields:
+            add_fields_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "add_fields",
+                {"session_id": session_id, "data": autofill_fields},
+                priority="foreground",
+            )
+            updated_progress = _extract_experiment_current_progress(add_fields_payload)
+            if isinstance(updated_progress, dict):
+                current_progress = updated_progress
+            missing_fields = list((current_progress or {}).get("missing_fields") or [])
+
+        if missing_fields:
+            return False, _compose_resume_log_recovery_blocked_reply(
+                step_meta,
+                missing_fields,
+                schema_by_name,
+                has_log_evidence=bool(current_user_texts),
+            )
+
+        finish_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "finish_trial",
+            {"session_id": session_id, "validate": True},
+            priority="foreground",
+        )
+        if not bool(_experiment_result_body(finish_payload).get("ok")):
+            message = _extract_experiment_result_message(finish_payload)
+            return False, message or _compose_resume_log_recovery_blocked_reply(
+                step_meta,
+                [],
+                schema_by_name,
+                has_log_evidence=bool(current_user_texts),
+            )
+
+        can_proceed_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "can_proceed",
+            {"session_id": session_id},
+            priority="foreground",
+        )
+        if not bool(_experiment_result_body(can_proceed_payload).get("ok")):
+            message = _extract_experiment_result_message(can_proceed_payload)
+            return False, message or _compose_resume_log_recovery_blocked_reply(
+                step_meta,
+                [],
+                schema_by_name,
+                has_log_evidence=bool(current_user_texts),
+            )
+
+        proceed_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "proceed_to_next_step",
+            {"session_id": session_id},
+            priority="foreground",
+        )
+        if not bool(_experiment_result_body(proceed_payload).get("ok")):
+            message = _extract_experiment_result_message(proceed_payload)
+            return False, message or _compose_resume_log_recovery_blocked_reply(
+                step_meta,
+                [],
+                schema_by_name,
+                has_log_evidence=bool(current_user_texts),
+            )
+
+        next_meta = await _safe_refresh_experiment_step_cache(
+            conn,
+            session_id,
+            reason="explicit_resume_replay_proceed",
+        )
+        current_step_id = str(next_meta.get("step_id", "") or "").strip()
+        if not current_step_id:
+            current_step_id = _get_current_experiment_step_id(conn)
+        if not current_step_id:
+            return False, ""
+        if current_step_id not in step_order:
+            return False, ""
+
+    return current_step_id == target_step_id, ""
 
 
 def _looks_like_confirmation_field_statement(
@@ -1527,25 +1920,15 @@ async def _handle_confirmation_step_semantic_fast_intent(
     if not missing_fields:
         return False
 
-    schema_by_name = _extract_experiment_schema_view(schema_payload)
-    if not _looks_like_confirmation_field_statement(
-        filtered_text,
-        missing_fields,
-        schema_by_name,
-    ):
-        return False
-
-    conn.logger.bind(tag=TAG).info(
-        "experiment confirmation semantic fast path hit: "
-        f"text={filtered_text}, missing_fields={missing_fields}"
-    )
-
     try:
-        reply = await _advance_experiment_step_fast(conn, session_id)
+        reply = await _try_apply_current_confirmation_report(conn, filtered_text)
     except Exception as exc:
         conn.logger.bind(tag=TAG).warning(
-            f"experiment confirmation semantic fast advance failed: {exc}"
+            f"experiment confirmation semantic fast writeback failed: {exc}"
         )
+        return False
+
+    if not reply:
         return False
 
     next_step_meta = _get_cached_experiment_step_meta(conn)
@@ -1925,6 +2308,12 @@ def _infer_experiment_step_id_from_context(
     original_text: str = "",
     filtered_text: str = "",
 ) -> str:
+    if not _should_attempt_future_step_context_inference(
+        original_text,
+        filtered_text,
+    ):
+        return ""
+
     order = _resolve_experiment_step_id_order(conn)
     if not order:
         return ""
@@ -1937,15 +2326,10 @@ def _infer_experiment_step_id_from_context(
     candidates = [
         ("assistant_last", _get_last_assistant_text_raw(conn), 0.08),
         ("assistant_recent", _get_recent_assistant_text(conn, limit=4), 0.06),
+        ("user_now", original_text, 0.04),
+        ("user_filtered", filtered_text, 0.02),
+        ("user_recent", _get_recent_user_text(conn, limit=4), 0.0),
     ]
-    if not _looks_like_generic_experiment_control_text(filtered_text):
-        candidates.extend(
-            [
-                ("user_now", original_text, 0.04),
-                ("user_filtered", filtered_text, 0.02),
-                ("user_recent", _get_recent_user_text(conn, limit=4), 0.0),
-            ]
-        )
 
     best_step_id = ""
     best_score = 0.0
@@ -2022,6 +2406,10 @@ async def _sync_experiment_graph_forward_to_recent_context(
     original_text: str = "",
     filtered_text: str = "",
 ) -> bool:
+    # Strict no-skip mode: normal device-side fast path may not infer or catch up
+    # future steps from recent conversational context.
+    return False
+
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     if not session_id:
         return False
@@ -4724,7 +5112,6 @@ async def _advance_experiment_step_fast(conn, session_id: str) -> str:
         _extract_experiment_step_meta(getattr(conn, "experiment_progress_summary", None)),
     )
     schema_by_name = _extract_experiment_schema_view(schema_payload)
-    allow_confirmation_autofill = _step_supports_confirmation_autofill(step_payload)
 
     if bool(_experiment_result_body(can_proceed_payload).get("ok")):
         proceed_payload = await _call_experiment_graph_tool_fast(
@@ -4751,23 +5138,6 @@ async def _advance_experiment_step_fast(conn, session_id: str) -> str:
         current_progress = _extract_experiment_current_progress(start_payload)
 
     missing_fields = list((current_progress or {}).get("missing_fields") or [])
-    autofill_fields = _build_experiment_autofill_fields(
-        schema_by_name,
-        missing_fields,
-        allow_confirmation_autofill=allow_confirmation_autofill,
-    )
-    if autofill_fields:
-        add_fields_payload = await _call_experiment_graph_tool_fast(
-            conn,
-            "add_fields",
-            {"session_id": session_id, "data": autofill_fields},
-            priority="foreground",
-        )
-        updated_progress = _extract_experiment_current_progress(add_fields_payload)
-        if isinstance(updated_progress, dict):
-            current_progress = updated_progress
-        missing_fields = list((current_progress or {}).get("missing_fields") or [])
-
     if missing_fields:
         return _compose_missing_field_reply(missing_fields, schema_by_name)
 
@@ -4848,18 +5218,6 @@ async def handle_experiment_control_fast_intent(
     explicitly_ready_to_start = _is_explicit_ready_to_start_reply(filtered_text)
     action = _classify_short_experiment_control(conn, filtered_text)
 
-    if not waiting_for_step_start and action == "advance":
-        try:
-            await _sync_experiment_graph_forward_to_recent_context(
-                conn,
-                original_text=original_text,
-                filtered_text=filtered_text,
-            )
-        except Exception as exc:
-            conn.logger.bind(tag=TAG).warning(
-                f"experiment fast path graph sync failed: {exc}"
-            )
-
     if not action:
         if not _is_experiment_fast_path_action_enabled(conn, "confirm"):
             return False
@@ -4887,14 +5245,6 @@ async def handle_experiment_control_fast_intent(
         reply = _prepare_fastpath_spoken_reply(
             _compose_experiment_start_reply(experiment_title, "")
         )
-        if not reply:
-            return False
-        await _start_direct_intent_turn(conn, original_text)
-        speak_txt(conn, reply)
-        return True
-
-    if waiting_for_step_start and action in {"guide", "advance"} and not explicitly_ready_to_start:
-        reply = _prepare_fastpath_spoken_reply(_compose_waiting_ready_reply())
         if not reply:
             return False
         await _start_direct_intent_turn(conn, original_text)
@@ -4939,7 +5289,9 @@ async def handle_experiment_control_fast_intent(
             return True
 
         try:
-            reply = await _advance_experiment_step_fast(conn, session_id)
+            reply = await _try_apply_current_confirmation_report(conn, filtered_text)
+            if not reply:
+                reply = await _advance_experiment_step_fast(conn, session_id)
         except Exception as exc:
             conn.logger.bind(tag=TAG).warning(
                 f"experiment control fast advance failed: {exc}"

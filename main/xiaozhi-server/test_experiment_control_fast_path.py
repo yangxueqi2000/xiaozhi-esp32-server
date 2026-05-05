@@ -224,6 +224,36 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 context.get("latest_experiment_session_id", ""),
             )
 
+    def test_read_transcript_entries_keeps_step_and_role_metadata(self):
+        with TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "94_a9_90_27_3c_84.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "[2026-05-05T14:34:44.431+08:00] [TRANSCRIPT] [USER] [source=asr] "
+                        "[experiment_session_id=exp-1] [current_step_id=step_prepare_setup_all] "
+                        "[yaml=C:\\demo\\experiments.yaml] 全部完成。",
+                        "[2026-05-05T14:34:57.063+08:00] [TRANSCRIPT] [ASSISTANT] [source=speak_txt] "
+                        "[experiment_session_id=exp-1] [current_step_id=step_add_sodium_citrate_all] "
+                        "[yaml=C:\\demo\\experiments.yaml] 现在做这一步。",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            entries = experiment_resume.read_transcript_entries(log_path)
+
+            self.assertEqual(2, len(entries))
+            self.assertEqual("USER", entries[0]["role"])
+            self.assertEqual("step_prepare_setup_all", entries[0]["current_step_id"])
+            self.assertEqual("全部完成。", entries[0]["text"])
+            self.assertEqual("ASSISTANT", entries[1]["role"])
+            self.assertEqual(
+                "step_add_sodium_citrate_all",
+                entries[1]["current_step_id"],
+            )
+
     def test_runtime_spoken_text_strips_technical_details(self):
         text = (
             "实验报告已经生成，pdf_path=C:\\demo\\report.pdf，"
@@ -301,10 +331,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         conn.sentence_id = "turn-2"
         third = textUtils.prepare_runtime_spoken_text_for_conn(conn, guidance)
-        self.assertEqual(
-            "你准备好后告诉我准备好了，我再带你开始第一步。",
-            third,
-        )
+        self.assertEqual(first, third)
 
     def test_activate_ready_guard_bypass_binds_pending_turn_to_current_sentence(self):
         conn = _FakeConn()
@@ -564,13 +591,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             ["beakers_labeled", "stir_bars_added_to_all"],
         )
 
-        self.assertEqual(
-            {
-                "beakers_labeled": True,
-                "stir_bars_added_to_all": True,
-            },
-            result,
-        )
+        self.assertEqual({}, result)
 
     def test_autofill_blocks_photo_confirmation_fields(self):
         schema = {
@@ -630,7 +651,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             allow_confirmation_autofill=True,
         )
 
-        self.assertEqual({"shared_round_confirmed": True}, result)
+        self.assertEqual({}, result)
 
     def test_default_autofill_does_not_false_match_citrate_as_rate(self):
         schema = {
@@ -646,7 +667,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             ["sodium_citrate_added_to_all"],
         )
 
-        self.assertEqual({"sodium_citrate_added_to_all": True}, result)
+        self.assertEqual({}, result)
 
     def test_photo_confirm_delay_defaults_to_three_seconds(self):
         conn = _FakeConn()
@@ -1179,7 +1200,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("\u6ca1\u6709\u627e\u5230", spoken[0])
         self.assertIn("\u91cd\u65b0\u5f00\u59cb", spoken[0])
 
-    async def test_explicit_resume_request_redirects_to_logged_step(self):
+    async def test_explicit_resume_request_replays_logged_confirmation_steps(self):
         conn = _FakeConn()
         spoken = []
         sent = []
@@ -1193,45 +1214,224 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         async def fake_reset(_conn):
             _conn.experiment_session_id = "exp-new"
             _conn.experiment_current_step_id = "step_prepare_setup_all"
+            _conn.experiment_current_step = None
+            _conn.experiment_progress_summary = None
 
-        def fake_prepare_resume_context(*, previous_session_id="", reason=""):
-            conn.experiment_resume_log_path = "C:/demo/device.log"
-            conn.experiment_resume_latest_current_step_id = "step_add_agno3_all"
+        with TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "device.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "[2026-05-05T14:35:16.192+08:00] [TRANSCRIPT] [USER] [source=asr] "
+                        "[experiment_session_id=exp-old] [current_step_id=step_prepare_setup_all] "
+                        "[yaml=C:\\demo\\experiments.yaml] 全部完成。",
+                        "[2026-05-05T14:36:16.192+08:00] [TRANSCRIPT] [USER] [source=asr] "
+                        "[experiment_session_id=exp-old] [current_step_id=step_add_sodium_citrate_all] "
+                        "[yaml=C:\\demo\\experiments.yaml] 柠檬酸钠都加好了。",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
-        conn._prepare_experiment_resume_recovery_context = fake_prepare_resume_context
+            def fake_prepare_resume_context(*, previous_session_id="", reason=""):
+                conn.experiment_resume_log_path = str(log_path)
+                conn.experiment_resume_latest_current_step_id = "step_add_agno3_all"
 
-        with patch.object(
-            intentHandler,
-            "_reset_experiment_fresh_start_context",
-            fake_reset,
-        ):
+            conn._prepare_experiment_resume_recovery_context = fake_prepare_resume_context
+            conn._experiment_yaml_steps_cache = [
+                {"id": "step_prepare_setup_all"},
+                {"id": "step_add_sodium_citrate_all"},
+                {"id": "step_add_agno3_all"},
+            ]
+
+            step_titles = {
+                "step_prepare_setup_all": "1-5号样品：准备烧杯与磁转子",
+                "step_add_sodium_citrate_all": "1-5号样品：统一加入柠檬酸钠",
+                "step_add_agno3_all": "1-5号样品：统一加入AgNO3",
+            }
+            step_instructions = {
+                "step_prepare_setup_all": "完成 1-5 号烧杯编号和磁转子放置。",
+                "step_add_sodium_citrate_all": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                "step_add_agno3_all": "按 1 到 5 号顺序统一完成 AgNO3 加入。",
+            }
+            required_fields = {
+                "step_prepare_setup_all": [
+                    "magnetic_stirrers_placed",
+                    "beakers_labeled",
+                ],
+                "step_add_sodium_citrate_all": ["sodium_citrate_added"],
+                "step_add_agno3_all": [],
+            }
+            schema_view = {
+                "step_prepare_setup_all": [
+                    {
+                        "name": "magnetic_stirrers_placed",
+                        "type": "bool",
+                        "description": "为 1-5 号烧杯全部放入磁转子",
+                        "required": True,
+                    },
+                    {
+                        "name": "beakers_labeled",
+                        "type": "bool",
+                        "description": "完成 1-5 号烧杯编号",
+                        "required": True,
+                    },
+                ],
+                "step_add_sodium_citrate_all": [
+                    {
+                        "name": "sodium_citrate_added",
+                        "type": "bool",
+                        "description": "1-5 号样品统一加入柠檬酸钠",
+                        "required": True,
+                    }
+                ],
+                "step_add_agno3_all": [],
+            }
+            state = {
+                "current_index": 0,
+                "filled": {
+                    "step_prepare_setup_all": set(),
+                    "step_add_sodium_citrate_all": set(),
+                    "step_add_agno3_all": set(),
+                },
+                "add_fields_calls": [],
+            }
+
+            def current_step_id():
+                return conn._experiment_yaml_steps_cache[state["current_index"]]["id"]
+
+            def build_step_payload(step_id):
+                interaction = {}
+                if step_id != "step_add_agno3_all":
+                    interaction = {"fast_path_mode": "confirmation_step"}
+                return {
+                    "result": {
+                        "step": {
+                            "id": step_id,
+                            "title": step_titles[step_id],
+                            "prompts": {
+                                "instruction": step_instructions[step_id],
+                                "safety": [],
+                            },
+                            "interaction": interaction,
+                        }
+                    }
+                }
+
+            def build_progress_payload(step_id):
+                missing = [
+                    field
+                    for field in required_fields[step_id]
+                    if field not in state["filled"][step_id]
+                ]
+                return {"result": {"current_progress": {"missing_fields": missing}}}
+
+            def build_summary_payload(step_id):
+                return {
+                    "result": {
+                        "summary": {
+                            "current_step": {
+                                "step_id": step_id,
+                                "title": step_titles[step_id],
+                            },
+                            "current_step_details": {
+                                "title": step_titles[step_id],
+                                "instruction": step_instructions[step_id],
+                            },
+                        }
+                    }
+                }
+
+            async def fake_graph_tool(_conn, tool_name, payload, priority="foreground"):
+                step_id = current_step_id()
+                if tool_name == "get_step":
+                    return build_step_payload(step_id)
+                if tool_name == "get_current_progress":
+                    return build_progress_payload(step_id)
+                if tool_name == "get_schema":
+                    return {"result": {"schema_view": schema_view[step_id]}}
+                if tool_name == "add_fields":
+                    state["add_fields_calls"].append((step_id, dict(payload["data"])))
+                    state["filled"][step_id].update(payload["data"].keys())
+                    return build_progress_payload(step_id)
+                if tool_name == "finish_trial":
+                    return {
+                        "result": {
+                            "ok": not build_progress_payload(step_id)["result"][
+                                "current_progress"
+                            ]["missing_fields"]
+                        }
+                    }
+                if tool_name == "can_proceed":
+                    return {
+                        "result": {
+                            "ok": not build_progress_payload(step_id)["result"][
+                                "current_progress"
+                            ]["missing_fields"]
+                        }
+                    }
+                if tool_name == "proceed_to_next_step":
+                    missing = build_progress_payload(step_id)["result"]["current_progress"][
+                        "missing_fields"
+                    ]
+                    if missing or state["current_index"] >= 2:
+                        return {"result": {"ok": False, "message": "cannot proceed"}}
+                    state["current_index"] += 1
+                    conn.experiment_current_step_id = current_step_id()
+                    return {"result": {"ok": True}}
+                if tool_name == "get_progress_summary":
+                    return build_summary_payload(step_id)
+                raise AssertionError(f"unexpected tool call: {tool_name}")
+
             with patch.object(
                 intentHandler,
-                "_try_redirect_experiment_step_fast",
-                AsyncMock(return_value=True),
-            ) as redirect_mock:
+                "_reset_experiment_fresh_start_context",
+                fake_reset,
+            ):
                 with patch.object(
                     intentHandler,
-                    "_safe_refresh_experiment_step_cache",
+                    "_try_redirect_experiment_step_fast",
                     AsyncMock(
-                        return_value={
-                            "step_id": "step_add_agno3_all",
-                            "title": "1-5\u53f7\u6837\u54c1\uff1a\u7edf\u4e00\u52a0\u5165AgNO3",
-                            "instruction": "\u6309 1 \u5230 5 \u53f7\u987a\u5e8f\u7edf\u4e00\u5b8c\u6210 AgNO3 \u52a0\u5165\u3002",
-                        }
+                        side_effect=AssertionError(
+                            "explicit resume should rebuild from log instead of redirect"
+                        )
                     ),
                 ):
-                    with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
-                        with patch.object(intentHandler, "speak_txt", fake_speak_txt):
-                            handled = await intentHandler.handle_experiment_control_fast_intent(
-                                conn,
-                                "\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c",
-                                "\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c",
-                            )
+                    with patch.object(
+                        intentHandler,
+                        "_call_experiment_graph_tool_fast",
+                        AsyncMock(side_effect=fake_graph_tool),
+                    ):
+                        with patch.object(
+                            intentHandler, "send_stt_message", fake_send_stt_message
+                        ):
+                            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                                handled = await intentHandler.handle_experiment_control_fast_intent(
+                                    conn,
+                                    "\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c",
+                                    "\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c",
+                                )
 
         self.assertTrue(handled)
-        redirect_mock.assert_awaited_once()
         self.assertEqual(["\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c"], sent)
+        self.assertEqual(
+            [
+                (
+                    "step_prepare_setup_all",
+                    {
+                        "magnetic_stirrers_placed": True,
+                        "beakers_labeled": True,
+                    },
+                ),
+                (
+                    "step_add_sodium_citrate_all",
+                    {"sodium_citrate_added": True},
+                ),
+            ],
+            state["add_fields_calls"],
+        )
+        self.assertEqual("step_add_agno3_all", conn.experiment_current_step_id)
         self.assertEqual(1, len(spoken))
         self.assertIn("AgNO3", spoken[0])
 
@@ -1393,7 +1593,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             getattr(conn, "_experiment_ready_guard_bypass_sentence_id", ""),
         )
 
-    async def test_continue_before_ready_does_not_broadcast_step(self):
+    async def test_continue_after_start_prompt_returns_current_step(self):
         conn = _FakeConn()
         conn.dialogue.put(
             Message(
@@ -1432,10 +1632,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(["继续"], sent)
-        self.assertEqual(
-            ["你准备好后告诉我准备好了，我再带你开始第一步。"],
-            spoken,
-        )
+        self.assertEqual(1, len(spoken))
+        self.assertIn("现在做这一步", spoken[0])
+        self.assertIn("烧杯编号和磁转子放置", spoken[0])
 
     async def test_repeat_current_step_does_not_sync_graph(self):
         conn = _FakeConn()
@@ -1489,6 +1688,65 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(spoken))
         self.assertIn("当前这一步", spoken[0])
         self.assertIn("烧杯编号", spoken[0])
+
+    async def test_generic_done_after_current_step_advances_one_step_without_context_sync(self):
+        conn = _FakeConn()
+        conn.experiment_session_id = "exp-generic-done-1"
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_prepare_setup_all",
+                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "prompts": {
+                        "instruction": "先完成 1-5 号样品的烧杯编号和磁转子放置，做好后告诉我。",
+                    },
+                }
+            }
+        }
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="现在做这一步：1-5号样品：准备烧杯与磁转子。先完成 1-5 号样品的烧杯编号和磁转子放置，做好后告诉我。",
+            )
+        )
+        spoken = []
+        sent = []
+        advanced = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_advance(_conn, session_id):
+            advanced.append(session_id)
+            return "现在做这一步：1-5号样品：统一加入枸橼酸钠。按 1 到 5 号顺序加入 0.50 mL 0.05 mol/L 枸橼酸钠，做好后告诉我。"
+
+        with patch.object(
+            intentHandler,
+            "_sync_experiment_graph_forward_to_recent_context",
+            side_effect=AssertionError("generic done should not sync future context"),
+        ):
+            with patch.object(
+                intentHandler,
+                "_advance_experiment_step_fast",
+                fake_advance,
+            ):
+                with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_experiment_control_fast_intent(
+                            conn,
+                            "做好了",
+                            "做好了",
+                        )
+
+        self.assertTrue(handled)
+        self.assertEqual(["做好了"], sent)
+        self.assertEqual(["exp-generic-done-1"], advanced)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("统一加入枸橼酸钠", spoken[0])
 
     async def test_advance_fast_path_records_and_moves_to_next_step(self):
         conn = _FakeConn()
@@ -1554,9 +1812,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 }
             if tool_name == "can_proceed":
                 state["can_proceed_calls"] += 1
-                if state["can_proceed_calls"] == 1:
-                    return {"result": {"ok": False, "message": "尚未完成"}}
-                return {"result": {"ok": True, "message": None}}
+                return {"result": {"ok": False, "message": "尚未完成"}}
             if tool_name == "start_trial":
                 return {
                     "result": {
@@ -1570,28 +1826,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     }
                 }
             if tool_name == "add_fields":
-                self.assertEqual(
-                    {
-                        "beakers_labeled": True,
-                        "stir_bars_added_to_all": True,
-                    },
-                    arguments["data"],
-                )
-                return {
-                    "result": {
-                        "ok": True,
-                        "current_progress": {"missing_fields": []},
-                    }
-                }
+                raise AssertionError("strict mode should not autofill current-step confirmations")
             if tool_name == "finish_trial":
-                return {"result": {"ok": True}}
+                raise AssertionError("strict mode should not finish while current-step fields are missing")
             if tool_name == "proceed_to_next_step":
-                return {
-                    "result": {
-                        "ok": True,
-                        "current_step_id": "step_add_sodium_citrate_all",
-                    }
-                }
+                raise AssertionError("strict mode should not advance while current-step fields are missing")
             if tool_name == "get_progress_summary":
                 return {
                     "result": {
@@ -1622,21 +1861,22 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(["当前步骤已完成"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("接下来做这一步", spoken[0])
-        self.assertIn("柠檬酸钠", spoken[0])
+        self.assertIn("这几个确认", spoken[0])
+        self.assertIn("烧杯编号", spoken[0])
+        self.assertIn("磁转子", spoken[0])
         self.assertTrue(conn.enriched)
-        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
-        self.assertIn(
+        self.assertNotIn("add_fields", [name for name, _args, _priority in tool_calls])
+        self.assertNotIn(
             "proceed_to_next_step",
             [name for name, _args, _priority in tool_calls],
         )
 
-    async def test_confirmation_statement_advances_confirmation_step_locally(self):
+    async def test_confirmation_statement_reports_missing_confirmation_field_instead_of_advancing(self):
         conn = _FakeConn()
         spoken = []
         sent = []
         tool_calls = []
-        state = {"get_step_calls": 0, "can_proceed_calls": 0}
+        state = {"get_step_calls": 0, "can_proceed_calls": 0, "reported": False}
 
         async def fake_send_stt_message(_conn, text):
             sent.append(text)
@@ -1682,7 +1922,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "result": {
                         "ok": True,
                         "current_progress": {
-                            "missing_fields": ["sodium_citrate_added_to_all"]
+                            "missing_fields": (
+                                [] if state["reported"] else ["sodium_citrate_added_to_all"]
+                            )
                         },
                     }
                 }
@@ -1701,14 +1943,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 }
             if tool_name == "can_proceed":
                 state["can_proceed_calls"] += 1
-                if state["can_proceed_calls"] == 1:
-                    return {"result": {"ok": False, "message": "尚未完成"}}
-                return {"result": {"ok": True}}
+                return {
+                    "result": {
+                        "ok": state["reported"],
+                        "message": None if state["reported"] else "尚未完成",
+                    }
+                }
             if tool_name == "add_fields":
-                self.assertEqual(
-                    {"sodium_citrate_added_to_all": True},
-                    arguments["data"],
-                )
+                state["reported"] = True
                 return {
                     "result": {
                         "ok": True,
@@ -1716,9 +1958,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     }
                 }
             if tool_name == "finish_trial":
-                return {"result": {"ok": True}}
+                return {"result": {"ok": state["reported"]}}
             if tool_name == "proceed_to_next_step":
-                return {"result": {"ok": True}}
+                return {"result": {"ok": state["reported"]}}
             if tool_name == "get_progress_summary":
                 return {
                     "result": {
@@ -1749,15 +1991,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(["按一到五号顺序完成全部柠檬酸钠加入"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("接下来做这一步", spoken[0])
-        self.assertIn("AgNO3", spoken[0])
-        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
-        self.assertIn(
+        self.assertIn("一个确认", spoken[0])
+        self.assertIn("柠檬酸钠加入", spoken[0])
+        self.assertNotIn("add_fields", [name for name, _args, _priority in tool_calls])
+        self.assertNotIn(
             "proceed_to_next_step",
             [name for name, _args, _priority in tool_calls],
         )
 
-    async def test_confirmation_statement_advances_without_interaction_metadata(self):
+    async def test_confirmation_statement_without_interaction_metadata_reports_missing_field(self):
         conn = _FakeConn()
         spoken = []
         sent = []
@@ -1823,24 +2065,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 }
             if tool_name == "can_proceed":
                 state["can_proceed_calls"] += 1
-                if state["can_proceed_calls"] == 1:
-                    return {"result": {"ok": False, "message": "尚未完成"}}
-                return {"result": {"ok": True}}
+                return {"result": {"ok": False, "message": "尚未完成"}}
             if tool_name == "add_fields":
-                self.assertEqual(
-                    {"sodium_citrate_added_to_all": True},
-                    arguments["data"],
-                )
-                return {
-                    "result": {
-                        "ok": True,
-                        "current_progress": {"missing_fields": []},
-                    }
-                }
+                raise AssertionError("missing confirmation field should not be autofilled")
             if tool_name == "finish_trial":
-                return {"result": {"ok": True}}
+                raise AssertionError("missing confirmation field should block finish_trial")
             if tool_name == "proceed_to_next_step":
-                return {"result": {"ok": True}}
+                raise AssertionError("missing confirmation field should block next step")
             if tool_name == "get_progress_summary":
                 return {
                     "result": {
@@ -1871,9 +2102,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(["按一到五号顺序全部加入柠檬酸钠"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("接下来做这一步", spoken[0])
-        self.assertIn("AgNO3", spoken[0])
-        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+        self.assertIn("一个确认", spoken[0])
+        self.assertIn("柠檬酸钠加入", spoken[0])
+        self.assertNotIn("add_fields", [name for name, _args, _priority in tool_calls])
 
     def test_infer_experiment_step_id_from_natural_assistant_reagent_instruction(self):
         conn = _FakeConn()
@@ -1978,7 +2209,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("", inferred)
 
-    async def test_fast_path_syncs_stale_graph_through_safe_confirmation_steps(self):
+    async def test_fast_path_does_not_sync_stale_graph_from_future_context(self):
         conn = _FakeConn()
         spoken = []
         sent = []
@@ -2131,34 +2362,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     }
                 }
             if tool_name == "add_fields":
-                self.assertEqual(
-                    {
-                        name: True
-                        for name in step.get("record_schema", {})
-                    },
-                    arguments["data"],
-                )
-                state["ready_to_finish"].add(step["id"])
-                return {
-                    "result": {
-                        "ok": True,
-                        "current_progress": {"missing_fields": []},
-                    }
-                }
+                raise AssertionError("strict mode should not autofill stale confirmation steps")
             if tool_name == "finish_trial":
-                self.assertIn(step["id"], state["ready_to_finish"])
-                state["completed"].add(step["id"])
-                return {"result": {"ok": True}}
+                raise AssertionError("strict mode should not finish unresolved stale steps")
             if tool_name == "proceed_to_next_step":
-                self.assertIn(step["id"], state["completed"])
-                if state["current_idx"] < len(steps) - 1:
-                    state["current_idx"] += 1
-                return {
-                    "result": {
-                        "ok": True,
-                        "current_step_id": order[state["current_idx"]],
-                    }
-                }
+                raise AssertionError("strict mode should not sync to future steps")
             if tool_name == "get_progress_summary":
                 current = current_step()
                 return {
@@ -2192,27 +2400,23 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(["\u5168\u90e8\u52a0\u597d\u4e86"], sent)
-        self.assertEqual("step_add_h2o2_all", conn.experiment_current_step_id)
+        self.assertEqual("step_prepare_setup_all", conn.experiment_current_step_id)
         self.assertEqual(1, len(spoken))
-        self.assertTrue("H2O2" in spoken[0] or "过氧化氢" in spoken[0])
-        self.assertGreaterEqual(
-            len(
-                [
-                    name
-                    for name, _args, _priority in tool_calls
-                    if name == "proceed_to_next_step"
-                ]
-            ),
-            3,
+        self.assertIn("这几个确认", spoken[0])
+        self.assertIn("烧杯编号", spoken[0])
+        self.assertIn("磁转子", spoken[0])
+        self.assertNotIn(
+            "proceed_to_next_step",
+            [name for name, _args, _priority in tool_calls],
         )
 
-    async def test_fast_path_syncs_until_blocked_observation_step_and_then_asks_missing_fields(self):
+    async def test_observation_step_reports_missing_fields_without_autofill(self):
         conn = _FakeConn()
         spoken = []
         sent = []
         tool_calls = []
         state = {
-            "current_idx": 0,
+            "current_idx": 5,
             "ready_to_finish": set(),
             "completed": set(),
         }
@@ -2423,59 +2627,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     }
                 }
             if tool_name == "add_fields":
-                if step["id"] == "step_sample1_2_add_kbr_water_nabh4":
-                    self.assertEqual(
-                        {
-                            "KBr_volume": True,
-                            "H2O_volume": True,
-                            "mixed_uniformly": True,
-                            "nabh4_volume": True,
-                            "added_quickly": True,
-                        },
-                        arguments["data"],
-                    )
-                    state["ready_to_finish"].add(step["id"])
-                    return {
-                        "result": {
-                            "ok": True,
-                            "current_progress": {
-                                "missing_fields": [
-                                    "color",
-                                    "reaction_time",
-                                    "color_stable",
-                                ]
-                            },
-                        }
-                    }
-
-                self.assertEqual(
-                    {
-                        name: True
-                        for name in step.get("record_schema", {})
-                    },
-                    arguments["data"],
-                )
-                state["ready_to_finish"].add(step["id"])
-                return {
-                    "result": {
-                        "ok": True,
-                        "current_progress": {"missing_fields": []},
-                    }
-                }
+                raise AssertionError("observation step should not autofill missing fields")
             if tool_name == "finish_trial":
-                self.assertIn(step["id"], state["ready_to_finish"])
-                state["completed"].add(step["id"])
-                return {"result": {"ok": True}}
+                raise AssertionError("observation step should not finish while fields are missing")
             if tool_name == "proceed_to_next_step":
-                self.assertIn(step["id"], state["completed"])
-                if state["current_idx"] < len(steps) - 1:
-                    state["current_idx"] += 1
-                return {
-                    "result": {
-                        "ok": True,
-                        "current_step_id": order[state["current_idx"]],
-                    }
-                }
+                raise AssertionError("observation step should not advance while fields are missing")
             if tool_name == "get_progress_summary":
                 current = current_step()
                 return {
@@ -2511,17 +2667,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["已经做好了"], sent)
         self.assertEqual("step_sample1_2_add_kbr_water_nabh4", conn.experiment_current_step_id)
         self.assertEqual(1, len(spoken))
-        self.assertIn("颜色", spoken[0])
-        self.assertIn("颜色稳定所用时间", spoken[0])
-        self.assertGreaterEqual(
-            len(
-                [
-                    name
-                    for name, _args, _priority in tool_calls
-                    if name == "proceed_to_next_step"
-                ]
-            ),
-            5,
+        self.assertIn("一整组关键记录", spoken[0])
+        self.assertNotIn(
+            "proceed_to_next_step",
+            [name for name, _args, _priority in tool_calls],
         )
 
     async def test_local_photo_followup_writes_back_and_moves_to_next_step(self):
@@ -4014,6 +4163,466 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+
+    async def test_confirmation_statement_reports_missing_confirmation_field_instead_of_advancing(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {"reported": False, "advanced": False}
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                if not state["advanced"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_add_sodium_citrate_all",
+                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "interaction": {
+                                    "fast_path_mode": "confirmation_step",
+                                    "capabilities": ["procedural_guidance", "step_confirmation"],
+                                },
+                                "prompts": {
+                                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                                },
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_add_agno3_all",
+                            "title": "1-5号样品：统一加入AgNO3",
+                            "prompts": {
+                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": (
+                                [] if state["reported"] else ["sodium_citrate_added_to_all"]
+                            )
+                        },
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {
+                                "name": "sodium_citrate_added_to_all",
+                                "type": "bool",
+                                "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                            }
+                        ],
+                    }
+                }
+            if tool_name == "add_fields":
+                state["reported"] = True
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "can_proceed":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "proceed_to_next_step":
+                state["advanced"] = state["reported"]
+                conn.experiment_current_step_id = "step_add_agno3_all"
+                return {"result": {"ok": state["advanced"]}}
+            if tool_name == "get_progress_summary":
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_add_agno3_all",
+                                "title": "1-5号样品：统一加入AgNO3",
+                            },
+                            "current_step_details": {
+                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "按一到五号顺序完成全部柠檬酸钠加入",
+                    "按一到五号顺序完成全部柠檬酸钠加入",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["按一到五号顺序完成全部柠檬酸钠加入"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("AgNO3", spoken[0])
+        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+        self.assertIn(
+            "proceed_to_next_step",
+            [name for name, _args, _priority in tool_calls],
+        )
+
+    async def test_advance_fast_path_records_and_moves_to_next_step(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {"reported": False, "advanced": False}
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                if not state["advanced"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_prepare_setup_all",
+                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "prompts": {
+                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                },
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_add_sodium_citrate_all",
+                            "title": "1-5号样品：统一加入柠檬酸钠",
+                            "prompts": {
+                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {"result": {"ok": True, "progress": None}}
+            if tool_name == "start_trial":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": (
+                                []
+                                if state["reported"]
+                                else ["beakers_labeled", "stir_bars_added_to_all"]
+                            )
+                        },
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {
+                                "name": "beakers_labeled",
+                                "type": "bool",
+                                "description": "已完成 1-5 号烧杯编号",
+                            },
+                            {
+                                "name": "stir_bars_added_to_all",
+                                "type": "bool",
+                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                            },
+                        ],
+                    }
+                }
+            if tool_name == "add_fields":
+                state["reported"] = True
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "can_proceed":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "proceed_to_next_step":
+                state["advanced"] = state["reported"]
+                conn.experiment_current_step_id = "step_add_sodium_citrate_all"
+                return {"result": {"ok": state["advanced"]}}
+            if tool_name == "get_progress_summary":
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_add_sodium_citrate_all",
+                                "title": "1-5号样品：统一加入柠檬酸钠",
+                            },
+                            "current_step_details": {
+                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "当前步骤已完成",
+                    "当前步骤已完成",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["当前步骤已完成"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("柠檬酸钠", spoken[0])
+        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+
+    async def test_confirmation_statement_without_interaction_metadata_reports_missing_field(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {"reported": False, "advanced": False}
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                if not state["advanced"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_add_sodium_citrate_all",
+                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "prompts": {
+                                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                                },
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_add_agno3_all",
+                            "title": "1-5号样品：统一加入AgNO3",
+                            "prompts": {
+                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": (
+                                [] if state["reported"] else ["sodium_citrate_added_to_all"]
+                            )
+                        },
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {
+                                "name": "sodium_citrate_added_to_all",
+                                "type": "bool",
+                                "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                            }
+                        ],
+                    }
+                }
+            if tool_name == "add_fields":
+                state["reported"] = True
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "can_proceed":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "proceed_to_next_step":
+                state["advanced"] = state["reported"]
+                conn.experiment_current_step_id = "step_add_agno3_all"
+                return {"result": {"ok": state["advanced"]}}
+            if tool_name == "get_progress_summary":
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_add_agno3_all",
+                                "title": "1-5号样品：统一加入AgNO3",
+                            },
+                            "current_step_details": {
+                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "按一到五号顺序全部加入柠檬酸钠",
+                    "按一到五号顺序全部加入柠檬酸钠",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["按一到五号顺序全部加入柠檬酸钠"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("AgNO3", spoken[0])
+        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+
+    async def test_observation_step_reports_missing_fields_without_autofill(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {"bool_fields_written": False}
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_sample1_2_add_kbr_water_nabh4",
+                            "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                            "interaction": {
+                                "fast_path_mode": "observation_record_step",
+                                "capabilities": ["step_confirmation", "observation_capture"],
+                            },
+                            "prompts": {
+                                "instruction": "完成 1 号样品 KBr 和纯水加入并混匀后，快速加入 NaBH4 并保持搅拌，记录颜色稳定时间和收尾情况。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {"result": {"ok": True, "progress": None}}
+            if tool_name == "start_trial":
+                missing = ["color", "reaction_time", "color_stable"]
+                if not state["bool_fields_written"]:
+                    missing = [
+                        "KBr_volume",
+                        "H2O_volume",
+                        "mixed_uniformly",
+                        "nabh4_volume",
+                        "added_quickly",
+                    ] + missing
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": missing},
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {"name": "KBr_volume", "type": "bool", "description": "已按当前样品目标用量加入 KBr"},
+                            {"name": "H2O_volume", "type": "bool", "description": "已按当前样品目标用量加入纯水"},
+                            {"name": "mixed_uniformly", "type": "bool", "description": "加入 KBr 和纯水后已搅拌均匀"},
+                            {"name": "nabh4_volume", "type": "bool", "description": "已准确加入 2.50 mL NaBH4"},
+                            {"name": "added_quickly", "type": "bool", "description": "已快速完成 NaBH4 加入"},
+                            {"name": "color", "type": "string", "description": "当前样品最终颜色"},
+                            {"name": "reaction_time", "type": "float", "description": "当前样品颜色稳定所用时间"},
+                            {"name": "color_stable", "type": "bool", "description": "已确认颜色稳定"},
+                        ],
+                    }
+                }
+            if tool_name == "add_fields":
+                state["bool_fields_written"] = True
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": ["color", "reaction_time", "color_stable"]
+                        },
+                    }
+                }
+            if tool_name == "finish_trial":
+                raise AssertionError("observation step should still block finish_trial until data fields are reported")
+            if tool_name == "proceed_to_next_step":
+                raise AssertionError("observation step should not advance while data fields are missing")
+            if tool_name == "can_proceed":
+                raise AssertionError("observation step should not call can_proceed while data fields are missing")
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "已经做好了",
+                    "已经做好了",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["已经做好了"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("颜色", spoken[0])
+        self.assertIn("时间", spoken[0])
+        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
 
 if __name__ == "__main__":
     unittest.main()

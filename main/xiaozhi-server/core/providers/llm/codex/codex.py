@@ -258,14 +258,29 @@ def _should_suppress_stderr_warning(text: str) -> bool:
     # Codex app-server may emit this when its internal MCP/WHAM transport
     # hits a transient TLS/network handshake EOF. In practice the provider can
     # continue serving later turns, so keep it out of warning-level logs.
-    if (
-        "worker quit with fatal: Transport channel closed" in text
-        and "https://chatgpt.com/backend-api/wham/apps" in text
-        and "unexpected EOF during handshake" in text
-    ):
+    if _is_recoverable_wham_transport_warning(text):
         return True
 
     return False
+
+
+def _is_recoverable_wham_transport_warning(text: str) -> bool:
+    normalized = str(text or "")
+    if not normalized:
+        return False
+
+    if (
+        "worker quit with fatal: Transport channel closed" not in normalized
+        or "https://chatgpt.com/backend-api/wham/apps" not in normalized
+    ):
+        return False
+
+    recoverable_markers = (
+        "unexpected EOF during handshake",
+        "http/request failed: error sending request for url",
+        "error sending request for url (https://chatgpt.com/backend-api/wham/apps)",
+    )
+    return any(marker in normalized for marker in recoverable_markers)
 
 
 def _recoverable_stderr_reason(text: str) -> Optional[str]:
@@ -279,11 +294,7 @@ def _recoverable_stderr_reason(text: str) -> Optional[str]:
     ):
         return "models_refresh_timeout"
 
-    if (
-        "worker quit with fatal: Transport channel closed" in text
-        and "https://chatgpt.com/backend-api/wham/apps" in text
-        and "unexpected EOF during handshake" in text
-    ):
+    if _is_recoverable_wham_transport_warning(text):
         return "wham_transport_eof"
 
     return None

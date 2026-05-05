@@ -1881,17 +1881,7 @@ def _compact_spoken_step_guidance_text(text: str) -> str:
 
 
 def _apply_experiment_ready_guard(conn, text: str) -> str:
-    if not text or conn is None:
-        return text
-    if _conn_has_experiment_ready_guard_bypass(conn):
-        return text
-    if not _conn_is_waiting_for_experiment_ready(conn):
-        return text
-    if CANONICAL_OPENING_RE.search(text):
-        return text
-    if not _looks_like_step_guidance_text(text):
-        return text
-    return "你准备好后告诉我准备好了，我再带你开始第一步。"
+    return text
 
 
 def _apply_export_artifact_guard(conn, text: str) -> str:
