@@ -27,6 +27,11 @@ EXPORT_RECORD_PATTERNS = (
 TURN_SPLIT_RE = re.compile(r"(?=^\[[^\]]+\] \[TURN_START\])", re.MULTILINE)
 TURN_END_RE = re.compile(r"^\[[^\]]+\] \[TURN_END\] chars=.*$", re.MULTILINE)
 USER_LINE_RE = re.compile(r"^\[[^\]]+\] \[USER\] (?P<user>.*)$", re.MULTILINE)
+TRANSCRIPT_STEP_RE = re.compile(r"\[current_step_id=(?P<step_id>[^\]]+)\]")
+TRANSCRIPT_SESSION_RE = re.compile(
+    r"\[experiment_session_id=(?P<session_id>[^\]]+)\]"
+)
+TRANSCRIPT_YAML_RE = re.compile(r"\[yaml=(?P<yaml_path>[^\]]+)\]")
 
 
 class _PathFormatDict(dict):
@@ -485,6 +490,45 @@ def _extract_latest_user_utterance_snapshot(
     }
 
 
+def _extract_latest_transcript_snapshot(log_text: str) -> Dict[str, str]:
+    latest_experiment_session_id = ""
+    latest_current_step_id = ""
+    latest_experiment_yaml_path = ""
+
+    for raw_line in reversed((log_text or "").splitlines()):
+        line = str(raw_line or "").strip()
+        if "[TRANSCRIPT]" not in line:
+            continue
+        if not latest_current_step_id:
+            step_match = TRANSCRIPT_STEP_RE.search(line)
+            if step_match:
+                latest_current_step_id = str(step_match.group("step_id") or "").strip()
+        if not latest_experiment_session_id:
+            session_match = TRANSCRIPT_SESSION_RE.search(line)
+            if session_match:
+                latest_experiment_session_id = str(
+                    session_match.group("session_id") or ""
+                ).strip()
+        if not latest_experiment_yaml_path:
+            yaml_match = TRANSCRIPT_YAML_RE.search(line)
+            if yaml_match:
+                latest_experiment_yaml_path = str(
+                    yaml_match.group("yaml_path") or ""
+                ).strip()
+        if (
+            latest_current_step_id
+            and latest_experiment_session_id
+            and latest_experiment_yaml_path
+        ):
+            break
+
+    return {
+        "latest_experiment_session_id": latest_experiment_session_id,
+        "latest_current_step_id": latest_current_step_id,
+        "latest_experiment_yaml_path": latest_experiment_yaml_path,
+    }
+
+
 def _parse_turns(log_text: str) -> List[Dict[str, str]]:
     turns: List[Dict[str, str]] = []
     for chunk in TURN_SPLIT_RE.split(log_text or ""):
@@ -716,6 +760,7 @@ def build_resume_context(
         logger.bind(tag=TAG).warning(f"resume log read failed: {log_path} ({exc})")
         return None
 
+    transcript_snapshot = _extract_latest_transcript_snapshot(log_text)
     turns = _parse_turns(log_text)
     if not turns:
         partial_turn = _parse_latest_partial_turn(log_text)
@@ -726,6 +771,15 @@ def build_resume_context(
                     "log_path": str(log_path),
                     "context_text": context_text[:max_chars],
                     "turn_count": "0",
+                    "latest_experiment_session_id": transcript_snapshot.get(
+                        "latest_experiment_session_id", ""
+                    ),
+                    "latest_current_step_id": transcript_snapshot.get(
+                        "latest_current_step_id", ""
+                    ),
+                    "latest_experiment_yaml_path": transcript_snapshot.get(
+                        "latest_experiment_yaml_path", ""
+                    ),
                 }
 
         tail = _compact_text(_strip_codex_prompt_noise(log_text[-max_chars:]))
@@ -740,6 +794,15 @@ def build_resume_context(
                 "log_path": str(log_path),
                 "context_text": context_text[:max_chars],
                 "turn_count": "0",
+                "latest_experiment_session_id": transcript_snapshot.get(
+                    "latest_experiment_session_id", ""
+                ),
+                "latest_current_step_id": transcript_snapshot.get(
+                    "latest_current_step_id", ""
+                ),
+                "latest_experiment_yaml_path": transcript_snapshot.get(
+                    "latest_experiment_yaml_path", ""
+                ),
             }
         return None
 
@@ -751,6 +814,15 @@ def build_resume_context(
                 "log_path": str(log_path),
                 "context_text": context_text[:max_chars],
                 "turn_count": str(len(selected)),
+                "latest_experiment_session_id": transcript_snapshot.get(
+                    "latest_experiment_session_id", ""
+                ),
+                "latest_current_step_id": transcript_snapshot.get(
+                    "latest_current_step_id", ""
+                ),
+                "latest_experiment_yaml_path": transcript_snapshot.get(
+                    "latest_experiment_yaml_path", ""
+                ),
             }
         selected = selected[1:]
 

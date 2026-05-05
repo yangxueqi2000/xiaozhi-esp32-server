@@ -29,6 +29,66 @@ def _normalize_ids(device_id: str, user_id: str, config: Dict) -> Tuple[str, str
     return normalized_device, normalized_user
 
 
+def _binding_key(device_id: str) -> str:
+    return str(device_id or "").strip()
+
+
+def _entry_sort_key(entry: Dict) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    updated_at = str(entry.get("updated_at", "")).strip()
+    if updated_at:
+        return updated_at
+    return str(entry.get("created_at", "")).strip()
+
+
+def _migrate_legacy_binding(
+    bindings: Dict,
+    device_id: str,
+    fallback_user_id: str,
+):
+    if not isinstance(bindings, dict):
+        return None
+
+    normalized_device_id = _binding_key(device_id)
+    if not normalized_device_id:
+        return None
+
+    legacy_prefix = f"{normalized_device_id}::"
+    legacy_candidates = []
+    for key, entry in list(bindings.items()):
+        if key.startswith(legacy_prefix) and isinstance(entry, dict):
+            legacy_candidates.append((key, entry))
+
+    if not legacy_candidates:
+        return None
+
+    selected_key, selected_entry = max(
+        legacy_candidates,
+        key=lambda item: _entry_sort_key(item[1]),
+    )
+    for key, _entry in legacy_candidates:
+        bindings.pop(key, None)
+
+    migrated_entry = dict(selected_entry)
+    migrated_entry["device_id"] = normalized_device_id
+    migrated_entry["user_id"] = (
+        str(migrated_entry.get("user_id", "")).strip() or fallback_user_id
+    )
+    bindings[normalized_device_id] = migrated_entry
+    return migrated_entry
+
+
+def _get_binding_entry(bindings: Dict, device_id: str, fallback_user_id: str):
+    binding_key = _binding_key(device_id)
+    entry = bindings.get(binding_key)
+    if isinstance(entry, dict):
+        return binding_key, entry
+
+    migrated_entry = _migrate_legacy_binding(bindings, binding_key, fallback_user_id)
+    return binding_key, migrated_entry
+
+
 def _read_response_ids(resp_json: Dict) -> Tuple[str, str, bool]:
     body = resp_json.get("data") if isinstance(resp_json.get("data"), dict) else resp_json
     chat_session_id = (
@@ -122,13 +182,12 @@ def _save_local_store(store_path: str, store: Dict):
 
 async def _resolve_from_local(config: Dict, device_id: str, user_id: str):
     store_path = _resolve_local_store_path(config)
-    key = f"{device_id}::{user_id}"
     now = _utc_now()
 
     async with _local_store_lock:
         store = _load_local_store(store_path)
         bindings = store.setdefault("bindings", {})
-        entry = bindings.get(key)
+        key, entry = _get_binding_entry(bindings, device_id, user_id)
 
         created = False
         if not isinstance(entry, dict):
@@ -144,6 +203,8 @@ async def _resolve_from_local(config: Dict, device_id: str, user_id: str):
                 "updated_at": now,
             }
         else:
+            entry["device_id"] = device_id
+            entry["user_id"] = user_id
             entry["updated_at"] = now
 
         bindings[key] = entry
@@ -156,6 +217,72 @@ async def _resolve_from_local(config: Dict, device_id: str, user_id: str):
         "source": "local",
         "created": created,
     }
+
+
+async def save_session_binding(
+    config: Dict,
+    device_id: str,
+    user_id: str,
+    chat_session_id: str,
+    model_session_key: str,
+):
+    normalized_device_id, normalized_user_id = _normalize_ids(device_id, user_id, config)
+    normalized_chat_session_id = str(chat_session_id or "").strip()
+    normalized_model_session_key = str(model_session_key or "").strip()
+    if not normalized_device_id:
+        raise ValueError("device_id is required for session binding")
+    if not normalized_chat_session_id or not normalized_model_session_key:
+        raise ValueError("chat_session_id and model_session_key are required")
+
+    store_path = _resolve_local_store_path(config)
+    now = _utc_now()
+
+    async with _local_store_lock:
+        store = _load_local_store(store_path)
+        bindings = store.setdefault("bindings", {})
+        key, entry = _get_binding_entry(
+            bindings,
+            normalized_device_id,
+            normalized_user_id,
+        )
+        created = not isinstance(entry, dict)
+        created_at = now
+        if isinstance(entry, dict):
+            created_at = str(entry.get("created_at", "")).strip() or now
+        entry = {
+            "chat_session_id": normalized_chat_session_id,
+            "model_session_key": normalized_model_session_key,
+            "device_id": normalized_device_id,
+            "user_id": normalized_user_id,
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        bindings[key] = entry
+        _save_local_store(store_path, store)
+
+    return {
+        "chat_session_id": normalized_chat_session_id,
+        "model_session_key": normalized_model_session_key,
+        "user_id": normalized_user_id,
+        "source": "local",
+        "created": created,
+    }
+
+
+async def rotate_session_binding(config: Dict, device_id: str, user_id: str):
+    normalized_device_id, normalized_user_id = _normalize_ids(device_id, user_id, config)
+    if not normalized_device_id:
+        raise ValueError("device_id is required for session binding")
+
+    chat_session_id = str(uuid.uuid4())
+    model_session_key = f"codex:{chat_session_id}"
+    return await save_session_binding(
+        config,
+        normalized_device_id,
+        normalized_user_id,
+        chat_session_id,
+        model_session_key,
+    )
 
 
 async def resolve_or_create_session_binding(config: Dict, device_id: str, user_id: str):

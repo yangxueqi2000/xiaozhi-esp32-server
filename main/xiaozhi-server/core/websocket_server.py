@@ -114,6 +114,39 @@ class WebSocketServer:
                 return self.connections_by_device.get(device_id)
             return None
 
+    async def _resolve_existing_device_handler(self, websocket, device_id: str):
+        normalized_device_id = str(device_id or "").strip()
+        if not normalized_device_id:
+            return None, False
+
+        existing_handler = await self.get_connection(device_id=normalized_device_id)
+        if existing_handler is None:
+            return None, False
+
+        ready_for_reconnect = await existing_handler.wait_until_transport_detached(
+            timeout=2.0
+        )
+        if ready_for_reconnect:
+            self.logger.bind(tag=TAG).info(
+                "同设备重连，复用现有连接资源: "
+                f"device_id={normalized_device_id}, session_id={existing_handler.session_id}"
+            )
+            return existing_handler, False
+
+        self.logger.bind(tag=TAG).warning(
+            "duplicate live device connection rejected: "
+            f"device_id={normalized_device_id}, session_id={existing_handler.session_id}"
+        )
+        try:
+            await websocket.send("same device-id is already connected")
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=1008, reason="device already connected")
+        except Exception:
+            pass
+        return None, True
+
     async def list_connections(self) -> list:
         async with self.connections_lock:
             items = []
@@ -214,6 +247,13 @@ class WebSocketServer:
         device_id = websocket.request.headers.get("device-id", None)
         handler = None
         if device_id:
+            handler, rejected = await self._resolve_existing_device_handler(
+                websocket,
+                device_id,
+            )
+            if rejected:
+                return
+        if device_id and handler is None:
             existing_handler = await self.get_connection(device_id=device_id)
             if existing_handler is not None:
                 ready_for_reconnect = await existing_handler.wait_until_transport_detached(

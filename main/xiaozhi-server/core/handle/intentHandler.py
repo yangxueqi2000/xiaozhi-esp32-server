@@ -11,9 +11,10 @@ import yaml
 from core.utils.dialogue import Message
 from core.providers.tts.dto.dto import ContentType
 from core.handle.helloHandle import checkWakeupWords
+from core.session import rotate_session_binding
 from plugins_func.register import Action, ActionResponse
 from core.handle.sendAudioHandle import send_stt_message
-from core.utils import textUtils
+from core.utils import experiment_resume, textUtils
 from core.utils.util import remove_punctuation_and_length, sanitize_tool_name
 from core.providers.tts.dto.dto import TTSMessageDTO, SentenceType
 from core.providers.tools.device_mcp import call_mcp_tool
@@ -619,6 +620,13 @@ def _is_explicit_experiment_start_request(filtered_text: str) -> bool:
     return _contains_any(norm, explicit_tokens)
 
 
+def _is_explicit_experiment_resume_request(filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    if not norm:
+        return False
+    return experiment_resume.is_resume_experiment_request(norm)
+
+
 def _load_experiment_title_from_yaml_path(yaml_path: str) -> str:
     path_text = str(yaml_path or "").strip()
     if not path_text:
@@ -718,7 +726,7 @@ def _assistant_waiting_for_step_completion(conn) -> bool:
 
 
 def _assistant_waiting_for_step_start(conn) -> bool:
-    last_text = _normalize_text_for_match(_get_recent_assistant_text(conn, limit=3))
+    last_text = _normalize_text_for_match(_get_last_assistant_text_raw(conn))
     if not last_text:
         return False
     tokens = (
@@ -760,6 +768,239 @@ def _is_explicit_ready_to_start_reply(filtered_text: str) -> bool:
 
 def _compose_waiting_ready_reply() -> str:
     return "你准备好后告诉我准备好了，我再带你开始第一步。"
+
+
+async def _reset_experiment_fresh_start_context(conn) -> None:
+    old_chat_session_id = str(getattr(conn, "chat_session_id", "") or "").strip()
+    old_model_session_key = str(getattr(conn, "model_session_key", "") or "").strip()
+    device_id = str(getattr(conn, "device_id", "") or "").strip()
+    user_id = str(getattr(conn, "user_id", "") or "").strip()
+    if not user_id:
+        user_id = str(
+            getattr(conn, "config", {}).get("session_registry", {}).get(
+                "default_user_id",
+                "test",
+            )
+        ).strip() or "test"
+        conn.user_id = user_id
+
+    binding = None
+    if device_id:
+        try:
+            binding = await rotate_session_binding(
+                getattr(conn, "config", {}) or {},
+                device_id,
+                user_id,
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                "experiment fresh start session rotation failed, falling back to in-memory reset: "
+                f"device_id={device_id}, error={exc}"
+            )
+
+    if isinstance(binding, dict):
+        conn.chat_session_id = str(binding.get("chat_session_id", "")).strip()
+        conn.model_session_key = str(binding.get("model_session_key", "")).strip()
+    else:
+        fresh_chat_session_id = str(uuid.uuid4())
+        conn.chat_session_id = fresh_chat_session_id
+        conn.model_session_key = f"codex:{fresh_chat_session_id}"
+
+    llm_provider = getattr(conn, "llm", None)
+    llm_sessions = getattr(llm_provider, "_sessions", None)
+    if old_model_session_key and isinstance(llm_sessions, dict):
+        stale_session = llm_sessions.pop(old_model_session_key, None)
+        if stale_session is not None and hasattr(stale_session, "close"):
+            try:
+                stale_session.close()
+            except Exception:
+                pass
+
+    dialogue = getattr(conn, "dialogue", None)
+    if dialogue is not None and hasattr(dialogue, "dialogue"):
+        dialogue.dialogue = []
+        prompt = str(getattr(conn, "prompt", "") or "").strip()
+        if prompt and hasattr(dialogue, "update_system_message"):
+            dialogue.update_system_message(prompt)
+
+    for attr_name, reset_value in (
+        ("experiment_session_id", ""),
+        ("experiment_current_step_id", ""),
+        ("experiment_overview", None),
+        ("experiment_current_step", None),
+        ("experiment_progress_summary", None),
+        ("experiment_list_steps", None),
+        ("experiment_schema", None),
+        ("experiment_reference", None),
+        ("experiment_reference_query", ""),
+        ("experiment_resume_recovery_required", False),
+        ("experiment_resume_latest_current_step_id", ""),
+        ("experiment_resume_latest_session_id", ""),
+        ("experiment_resume_log_path", ""),
+        ("experiment_resume_turn_count", 0),
+    ):
+        if hasattr(conn, attr_name):
+            setattr(conn, attr_name, reset_value)
+
+    if hasattr(conn, "_reset_experiment_resume_recovery_state"):
+        try:
+            conn._reset_experiment_resume_recovery_state()
+        except Exception:
+            pass
+
+    if hasattr(conn, "prewarm_experiment_session"):
+        await conn.prewarm_experiment_session(
+            trigger="explicit_fresh_start",
+            force=True,
+        )
+
+    conn.logger.bind(tag=TAG).info(
+        "experiment fresh start context reset: "
+        f"device_id={device_id}, "
+        f"old_chat_session_id={old_chat_session_id}, "
+        f"new_chat_session_id={getattr(conn, 'chat_session_id', '')}, "
+        f"old_model_session_key={old_model_session_key}, "
+        f"new_model_session_key={getattr(conn, 'model_session_key', '')}, "
+        f"experiment_session_id={getattr(conn, 'experiment_session_id', '')}"
+    )
+
+
+async def _handle_explicit_experiment_resume_request(
+    conn,
+    original_text: str,
+) -> bool:
+    previous_session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    try:
+        await _reset_experiment_fresh_start_context(conn)
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"experiment explicit resume reset failed: {exc}"
+        )
+        return False
+
+    resume_context_prepared = False
+    if hasattr(conn, "_prepare_experiment_resume_recovery_context"):
+        try:
+            conn._prepare_experiment_resume_recovery_context(
+                previous_session_id=previous_session_id,
+                reason="explicit_resume_request",
+            )
+            resume_context_prepared = True
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"experiment explicit resume context prepare failed: {exc}"
+            )
+
+    target_step_id = str(
+        getattr(conn, "experiment_resume_latest_current_step_id", "") or ""
+    ).strip()
+    log_path = str(getattr(conn, "experiment_resume_log_path", "") or "").strip()
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+
+    if not log_path:
+        reply = (
+            "这个设备当前没有找到可用于续接的实验记录，只能重新开始。"
+            "你说开始今天的实验，我就从第一步带你做。"
+        )
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
+
+    if not target_step_id:
+        reply = (
+            "我找到了这个设备之前的实验日志，但里面没有可靠的步骤定位，"
+            "现在只能重新开始。你说开始今天的实验，我就从第一步带你做。"
+        )
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
+
+    redirected = await _try_redirect_experiment_step_fast(
+        conn,
+        target_step_id,
+        log_reason="experiment explicit resume redirect from device log",
+    )
+    if not redirected:
+        reply = (
+            "我找到了上次实验的日志，但当前图谱没法自动跳到那一步。"
+            "你可以让我重新开始，或者明确告诉我要跳到哪一步。"
+        )
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
+
+    step_meta = await _safe_refresh_experiment_step_cache(
+        conn,
+        session_id,
+        reason="explicit_resume_from_device_log",
+    )
+    reply = _prepare_fastpath_spoken_reply(
+        _compose_experiment_step_reply(step_meta, mode="guide"),
+        fallback_step_meta=step_meta,
+        fallback_mode="guide",
+    )
+    if not reply:
+        if resume_context_prepared:
+            reply = "我已经按上次实验日志接回当前步骤了，你跟着这一步继续做。"
+        else:
+            reply = "我已经接回到上次实验记录对应的步骤了，你跟着这一步继续做。"
+
+    await _start_direct_intent_turn(conn, original_text)
+    speak_txt(conn, reply)
+    return True
+
+
+def _looks_like_generic_experiment_control_text(filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    if not norm:
+        return False
+
+    generic_tokens = {
+        "缁х画",
+        "缁х画鍚?",
+        "缁х画涓嬩竴姝?",
+        "涓嬩竴姝?",
+        "寰€涓嬭蛋",
+        "寰€鍚庤蛋",
+        "鍋氬ソ浜?",
+        "鍋氬畬浜?",
+        "瀹屾垚浜?",
+        "宸插畬鎴?",
+        "宸茬粡鍋氬ソ浜?",
+        "宸茬粡瀹屾垚浜?",
+        "閮藉仛濂戒簡",
+        "閮藉仛瀹屼簡",
+        "褰撳墠姝ラ宸插畬鎴?",
+        "杩欐瀹屾垚浜?",
+        "杩欎竴姝ュ畬鎴愪簡",
+        "濂戒簡",
+        "鍙互浜?",
+        "琛屼簡",
+        "濂藉暒",
+        "ok浜?",
+    }
+    if norm in generic_tokens:
+        return True
+
+    if len(norm) > 18:
+        return False
+
+    if _contains_any(norm, ("鏍峰搧", "agno3", "h2o2", "nabh4", "kbr", "绾按")):
+        return False
+
+    if re.search(r"[0-9涓€浜屼笁鍥涗簲鍏竷鍏節鍗?]", norm):
+        return False
+
+    generic_fragments = (
+        "缁х画",
+        "涓嬩竴姝?",
+        "鍋氬ソ",
+        "鍋氬畬",
+        "瀹屾垚",
+        "宸插畬鎴?",
+        "濂戒簡",
+    )
+    return _contains_any(norm, generic_fragments)
 
 
 def _grant_experiment_ready_guard_bypass(conn, count: int = 1) -> None:
@@ -1696,10 +1937,15 @@ def _infer_experiment_step_id_from_context(
     candidates = [
         ("assistant_last", _get_last_assistant_text_raw(conn), 0.08),
         ("assistant_recent", _get_recent_assistant_text(conn, limit=4), 0.06),
-        ("user_now", original_text, 0.04),
-        ("user_filtered", filtered_text, 0.02),
-        ("user_recent", _get_recent_user_text(conn, limit=4), 0.0),
     ]
+    if not _looks_like_generic_experiment_control_text(filtered_text):
+        candidates.extend(
+            [
+                ("user_now", original_text, 0.04),
+                ("user_filtered", filtered_text, 0.02),
+                ("user_recent", _get_recent_user_text(conn, limit=4), 0.0),
+            ]
+        )
 
     best_step_id = ""
     best_score = 0.0
@@ -4574,9 +4820,21 @@ async def handle_experiment_control_fast_intent(
     if not _is_experiment_fast_path_available(conn):
         return False
 
+    if _is_explicit_experiment_resume_request(filtered_text):
+        return await _handle_explicit_experiment_resume_request(
+            conn,
+            original_text,
+        )
+
     if _is_explicit_experiment_start_request(filtered_text):
         if not _is_experiment_fast_path_action_enabled(conn, "start"):
             return False
+        try:
+            await _reset_experiment_fresh_start_context(conn)
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"experiment fresh start reset failed: {exc}"
+            )
         experiment_title = await _load_experiment_overview_title(conn)
         reply = _compose_experiment_start_reply(experiment_title, "")
         reply = _prepare_fastpath_spoken_reply(reply)
@@ -4586,18 +4844,22 @@ async def handle_experiment_control_fast_intent(
         speak_txt(conn, reply)
         return True
 
-    try:
-        await _sync_experiment_graph_forward_to_recent_context(
-            conn,
-            original_text=original_text,
-            filtered_text=filtered_text,
-        )
-    except Exception as exc:
-        conn.logger.bind(tag=TAG).warning(
-            f"experiment fast path graph sync failed: {exc}"
-        )
-
+    waiting_for_step_start = _assistant_waiting_for_step_start(conn)
+    explicitly_ready_to_start = _is_explicit_ready_to_start_reply(filtered_text)
     action = _classify_short_experiment_control(conn, filtered_text)
+
+    if not waiting_for_step_start and action == "advance":
+        try:
+            await _sync_experiment_graph_forward_to_recent_context(
+                conn,
+                original_text=original_text,
+                filtered_text=filtered_text,
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"experiment fast path graph sync failed: {exc}"
+            )
+
     if not action:
         if not _is_experiment_fast_path_action_enabled(conn, "confirm"):
             return False
@@ -4614,8 +4876,6 @@ async def handle_experiment_control_fast_intent(
         f"experiment control fast path hit: action={action}, text={filtered_text}"
     )
 
-    waiting_for_step_start = _assistant_waiting_for_step_start(conn)
-    explicitly_ready_to_start = _is_explicit_ready_to_start_reply(filtered_text)
     ready_reply_unlocks_step = (
         waiting_for_step_start
         and explicitly_ready_to_start

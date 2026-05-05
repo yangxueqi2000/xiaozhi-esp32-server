@@ -5,7 +5,7 @@ import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -90,6 +90,12 @@ class _FakeConn:
         self.dialogue = _FakeDialogue()
         self.client_abort = False
         self.sentence_id = None
+        self.chat_session_id = ""
+        self.model_session_key = ""
+        self.user_id = ""
+        self.device_id = ""
+        self.prompt = ""
+        self.llm = None
         self.experiment_session_id = "exp-1"
         self.experiment_current_step_id = "step_prepare_setup_all"
         self.experiment_current_step = None
@@ -101,6 +107,9 @@ class _FakeConn:
         self.cmd_exit = []
         self.experiment_resume_recovery_required = False
         self.experiment_resume_latest_current_step_id = ""
+        self.experiment_resume_log_path = ""
+        self.experiment_resume_turn_count = "0"
+        self.experiment_resume_latest_session_id = ""
 
     def enrich_latest_clean_user_utterance_snapshot(self):
         self.enriched = True
@@ -171,6 +180,49 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("[source=asr]", content)
             self.assertIn("[current_step_id=step_photo_confirm_sample_1]", content)
             self.assertIn("可以拍照。", content)
+
+    def test_build_resume_context_extracts_latest_step_from_transcript_log(self):
+        with TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "94_a9_90_27_3c_84.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "[2026-05-05T14:34:44.431+08:00] [TRANSCRIPT] [USER] [source=asr] "
+                        "[experiment_session_id=dfcdd64e1f7947b48915e6a4c985bd1f] "
+                        "[current_step_id=step_prepare_setup_all] "
+                        "[yaml=C:\\demo\\experiments.yaml] \u5f00\u59cb\u4eca\u5929\u7684\u5b9e\u9a8c\u3002",
+                        "[2026-05-05T14:35:58.428+08:00] [TRANSCRIPT] [ASSISTANT] [source=speak_txt] "
+                        "[experiment_session_id=dfcdd64e1f7947b48915e6a4c985bd1f] "
+                        "[current_step_id=step_sample1_2_add_kbr_water_nabh4] "
+                        "[yaml=C:\\demo\\experiments.yaml] \u7ee7\u7eed\u524d\u8fd8\u5dee\u8fd9\u51e0\u4e2a\u786e\u8ba4\u3002",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = {
+                "LLM": {
+                    "codex_app_server": {
+                        "type": "codex",
+                        "stream_log_path": str(Path(temp_dir) / "{device_id}.log"),
+                    }
+                }
+            }
+
+            context = experiment_resume.build_resume_context(
+                config,
+                "94:a9:90:27:3c:84",
+            )
+
+            self.assertIsNotNone(context)
+            self.assertEqual(
+                "step_sample1_2_add_kbr_water_nabh4",
+                context.get("latest_current_step_id", ""),
+            )
+            self.assertEqual(
+                "dfcdd64e1f7947b48915e6a4c985bd1f",
+                context.get("latest_experiment_session_id", ""),
+            )
 
     def test_runtime_spoken_text_strips_technical_details(self):
         text = (
@@ -448,6 +500,23 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         action = intentHandler._classify_short_experiment_control(conn, "准备好了")
         self.assertEqual("guide", action)
+
+    def test_step_guidance_clears_waiting_for_start_context(self):
+        conn = _FakeConn()
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="浠婂ぉ鎴戜滑鍋氳繖涓疄楠屻€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
+            )
+        )
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="鐜板湪缁欎簲鍙锋牱鍝佸姞鍏ョ〖姘㈠寲閽犮€傚姞瀹屽憡璇夋垜銆?",
+            )
+        )
+
+        self.assertFalse(intentHandler._assistant_waiting_for_step_start(conn))
 
     def test_completion_variant_uses_waiting_context(self):
         conn = _FakeConn()
@@ -987,21 +1056,184 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         def fake_speak_txt(_conn, text):
             spoken.append(text)
 
-        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
-            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
-                handled = await intentHandler.handle_experiment_control_fast_intent(
-                    conn,
-                    "开始今天的实验",
-                    "开始今天的实验",
-                )
+        with patch.object(
+            intentHandler,
+            "_reset_experiment_fresh_start_context",
+            AsyncMock(),
+        ) as reset_mock:
+            with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_experiment_control_fast_intent(
+                        conn,
+                        "\u5f00\u59cb\u4eca\u5929\u7684\u5b9e\u9a8c",
+                        "\u5f00\u59cb\u4eca\u5929\u7684\u5b9e\u9a8c",
+                    )
 
         self.assertTrue(handled)
-        self.assertEqual(["开始今天的实验"], sent)
+        reset_mock.assert_awaited_once()
+        self.assertEqual(["\u5f00\u59cb\u4eca\u5929\u7684\u5b9e\u9a8c"], sent)
         self.assertEqual(1, len(spoken))
         self.assertEqual(
             "今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
             spoken[0],
         )
+
+
+    async def test_reset_fresh_start_context_rotates_session_and_clears_stale_state(self):
+        conn = _FakeConn()
+        conn.device_id = "94:a9:90:27:3c:84"
+        conn.user_id = "test"
+        conn.prompt = "system prompt"
+        conn.chat_session_id = "chat-old"
+        conn.model_session_key = "codex:chat-old"
+        conn.dialogue.put(Message(role="assistant", content="old assistant state"))
+        conn.experiment_session_id = "exp-old"
+        conn.experiment_current_step_id = "step_add_agno3_all"
+        conn.experiment_overview = {"result": {"experiment": {"title": "old"}}}
+        conn.experiment_current_step = {"result": {"step": {"id": "step_add_agno3_all"}}}
+        conn.experiment_progress_summary = {"result": {"summary": {}}}
+
+        stale_session = types.SimpleNamespace(closed=False)
+
+        def _close_stale_session():
+            stale_session.closed = True
+
+        stale_session.close = _close_stale_session
+        conn.llm = types.SimpleNamespace(
+            _sessions={
+                "codex:chat-old": stale_session,
+                "codex:keep": object(),
+            }
+        )
+
+        prewarm_calls = []
+
+        async def fake_prewarm_experiment_session(trigger="", force=False):
+            prewarm_calls.append((trigger, force))
+            conn.experiment_session_id = "exp-new"
+            conn.experiment_current_step_id = "step_prepare_setup_all"
+            return True
+
+        conn.prewarm_experiment_session = fake_prewarm_experiment_session
+
+        with patch.object(
+            intentHandler,
+            "rotate_session_binding",
+            AsyncMock(
+                return_value={
+                    "chat_session_id": "chat-new",
+                    "model_session_key": "codex:chat-new",
+                }
+            ),
+        ) as rotate_mock:
+            await intentHandler._reset_experiment_fresh_start_context(conn)
+
+        rotate_mock.assert_awaited_once()
+        self.assertEqual("chat-new", conn.chat_session_id)
+        self.assertEqual("codex:chat-new", conn.model_session_key)
+        self.assertEqual([], conn.dialogue.dialogue)
+        self.assertTrue(stale_session.closed)
+        self.assertNotIn("codex:chat-old", conn.llm._sessions)
+        self.assertEqual([("explicit_fresh_start", True)], prewarm_calls)
+        self.assertEqual("exp-new", conn.experiment_session_id)
+        self.assertEqual("step_prepare_setup_all", conn.experiment_current_step_id)
+        self.assertIsNone(conn.experiment_overview)
+
+    async def test_explicit_resume_request_without_log_requires_restart(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_reset(_conn):
+            _conn.experiment_session_id = "exp-new"
+            _conn.experiment_current_step_id = "step_prepare_setup_all"
+
+        def fake_prepare_resume_context(*, previous_session_id="", reason=""):
+            conn.experiment_resume_log_path = ""
+            conn.experiment_resume_latest_current_step_id = ""
+
+        conn._prepare_experiment_resume_recovery_context = fake_prepare_resume_context
+
+        with patch.object(
+            intentHandler,
+            "_reset_experiment_fresh_start_context",
+            fake_reset,
+        ):
+            with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_experiment_control_fast_intent(
+                        conn,
+                        "\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c",
+                        "\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(["\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("\u6ca1\u6709\u627e\u5230", spoken[0])
+        self.assertIn("\u91cd\u65b0\u5f00\u59cb", spoken[0])
+
+    async def test_explicit_resume_request_redirects_to_logged_step(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_reset(_conn):
+            _conn.experiment_session_id = "exp-new"
+            _conn.experiment_current_step_id = "step_prepare_setup_all"
+
+        def fake_prepare_resume_context(*, previous_session_id="", reason=""):
+            conn.experiment_resume_log_path = "C:/demo/device.log"
+            conn.experiment_resume_latest_current_step_id = "step_add_agno3_all"
+
+        conn._prepare_experiment_resume_recovery_context = fake_prepare_resume_context
+
+        with patch.object(
+            intentHandler,
+            "_reset_experiment_fresh_start_context",
+            fake_reset,
+        ):
+            with patch.object(
+                intentHandler,
+                "_try_redirect_experiment_step_fast",
+                AsyncMock(return_value=True),
+            ) as redirect_mock:
+                with patch.object(
+                    intentHandler,
+                    "_safe_refresh_experiment_step_cache",
+                    AsyncMock(
+                        return_value={
+                            "step_id": "step_add_agno3_all",
+                            "title": "1-5\u53f7\u6837\u54c1\uff1a\u7edf\u4e00\u52a0\u5165AgNO3",
+                            "instruction": "\u6309 1 \u5230 5 \u53f7\u987a\u5e8f\u7edf\u4e00\u5b8c\u6210 AgNO3 \u52a0\u5165\u3002",
+                        }
+                    ),
+                ):
+                    with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                        with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                            handled = await intentHandler.handle_experiment_control_fast_intent(
+                                conn,
+                                "\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c",
+                                "\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c",
+                            )
+
+        self.assertTrue(handled)
+        redirect_mock.assert_awaited_once()
+        self.assertEqual(["\u7ee7\u7eed\u4e0a\u6b21\u5b9e\u9a8c"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("AgNO3", spoken[0])
 
     async def test_ready_reply_after_start_prompt_returns_current_step(self):
         conn = _FakeConn()
@@ -1078,16 +1310,21 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             intentHandler,
+            "_sync_experiment_graph_forward_to_recent_context",
+            side_effect=AssertionError("ready reply should not sync graph"),
+        ):
+            with patch.object(
+            intentHandler,
             "_advance_experiment_step_fast",
             side_effect=AssertionError("ready reply should not advance step"),
-        ):
-            with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
-                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
-                    handled = await intentHandler.handle_experiment_control_fast_intent(
-                        conn,
-                        "准备好了",
-                        "准备好了",
-                    )
+            ):
+                with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_experiment_control_fast_intent(
+                            conn,
+                            "准备好了",
+                            "准备好了",
+                        )
 
         self.assertTrue(handled)
         self.assertEqual(["准备好了"], sent)
@@ -1130,16 +1367,21 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             intentHandler,
+            "_sync_experiment_graph_forward_to_recent_context",
+            side_effect=AssertionError("start-first-step reply should not sync graph"),
+        ):
+            with patch.object(
+            intentHandler,
             "_advance_experiment_step_fast",
             side_effect=AssertionError("start-first-step reply should not advance step"),
-        ):
-            with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
-                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
-                    handled = await intentHandler.handle_experiment_control_fast_intent(
-                        conn,
-                        "开始第一步",
-                        "开始第一步",
-                    )
+            ):
+                with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_experiment_control_fast_intent(
+                            conn,
+                            "开始第一步",
+                            "开始第一步",
+                        )
 
         self.assertTrue(handled)
         self.assertEqual(["开始第一步"], sent)
@@ -1194,6 +1436,59 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             ["你准备好后告诉我准备好了，我再带你开始第一步。"],
             spoken,
         )
+
+    async def test_repeat_current_step_does_not_sync_graph(self):
+        conn = _FakeConn()
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="现在做这一步：完成 1-5 号样品的烧杯编号和磁转子放置。做好后告诉我。",
+            )
+        )
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_prepare_setup_all",
+                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "prompts": {
+                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                    },
+                }
+            }
+        }
+        spoken = []
+        sent = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        with patch.object(
+            intentHandler,
+            "_sync_experiment_graph_forward_to_recent_context",
+            side_effect=AssertionError("repeat reply should not sync graph"),
+        ):
+            with patch.object(
+                intentHandler,
+                "_advance_experiment_step_fast",
+                side_effect=AssertionError("repeat reply should not advance step"),
+            ):
+                with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+                    with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                        handled = await intentHandler.handle_experiment_control_fast_intent(
+                            conn,
+                            "再说一遍",
+                            "再说一遍",
+                        )
+
+        self.assertTrue(handled)
+        self.assertEqual(["再说一遍"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("当前这一步", spoken[0])
+        self.assertIn("烧杯编号", spoken[0])
 
     async def test_advance_fast_path_records_and_moves_to_next_step(self):
         conn = _FakeConn()
@@ -1628,6 +1923,61 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("step_add_agno3_all", inferred)
 
+    def test_infer_experiment_step_id_ignores_generic_user_advance_text(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_prepare_setup_all",
+                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
+                "prompts": {
+                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?",
+                },
+            },
+            {
+                "id": "step_add_sodium_citrate_all",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
+                "prompts": {
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?",
+                },
+            },
+            {
+                "id": "step_add_agno3_all",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
+                "prompts": {
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 AgNO3 鍔犲叆銆?",
+                },
+            },
+            {
+                "id": "step_add_h2o2_all",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆H2O2",
+                "prompts": {
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 H2O2 鍔犲叆銆?",
+                },
+            },
+            {
+                "id": "step_sample1_2_add_kbr_water_nabh4",
+                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘村苟鍔犲叆NaBH4",
+                "prompts": {
+                    "instruction": "瀹屾垚 1 鍙锋牱鍝?KBr 鍜岀函姘村姞鍏ュ苟娣峰寑鍚庯紝蹇€熷姞鍏?NaBH4銆?",
+                },
+            },
+        ]
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="鐜板湪鍋氳繖涓€姝ワ細瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆傚仛濂藉悗鍛婅瘔鎴戙€?",
+            )
+        )
+
+        inferred = intentHandler._infer_experiment_step_id_from_context(
+            conn,
+            original_text="缁х画涓嬩竴姝?",
+            filtered_text="缁х画涓嬩竴姝?",
+        )
+
+        self.assertEqual("", inferred)
+
     async def test_fast_path_syncs_stale_graph_through_safe_confirmation_steps(self):
         conn = _FakeConn()
         spoken = []
@@ -1836,12 +2186,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "全部加好了",
-                    "全部加好了",
+                    "\u5168\u90e8\u52a0\u597d\u4e86",
+                    "\u5168\u90e8\u52a0\u597d\u4e86",
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["全部加好了"], sent)
+        self.assertEqual(["\u5168\u90e8\u52a0\u597d\u4e86"], sent)
         self.assertEqual("step_add_h2o2_all", conn.experiment_current_step_id)
         self.assertEqual(1, len(spoken))
         self.assertTrue("H2O2" in spoken[0] or "过氧化氢" in spoken[0])
