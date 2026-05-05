@@ -285,6 +285,24 @@ STRUCTURAL_BACKSTAGE_PATTERNS = [
         "[^\\u3002\\uff01\\uff1f\\uff1b]{0,120}[\\u3002\\uff01\\uff1f\\uff1b\\uff0c\\s]*$"
     ),
     re.compile(
+        "^(?:\\u6211\\u8fd9\\u8fb9|\\u8fd9\\u91cc)?(?:\\u6211\\u5148|\\u6211\\u518d|\\u6211\\u63a5\\u7740|\\u6211\\u7ee7\\u7eed)"
+        "[^\\u3002\\uff01\\uff1f\\uff1b]{0,40}"
+        "(?:\\u8bb0\\u4e0b|\\u8bb0\\u4e0b\\u6765|\\u8bb0\\u4e0a|\\u8bb0\\u5f55|\\u786e\\u8ba4)"
+        "[^\\u3002\\uff01\\uff1f\\uff1b]{0,160}"
+        "(?:\\u6700\\u7ec8\\u989c\\u8272|\\u989c\\u8272|\\u7a33\\u5b9a\\u65f6\\u95f4|\\u53cd\\u5e94\\u65f6\\u95f4|\\u8bb0\\u5f55\\u9879)"
+        "[^\\u3002\\uff01\\uff1f\\uff1b]{0,160}[\\u3002\\uff01\\uff1f\\uff1b\\uff0c\\s]*$"
+    ),
+    re.compile(
+        "^(?:\\u6211\\u8fd9\\u8fb9|\\u8fd9\\u91cc)?(?:\\u6211\\u518d|\\u6211\\u63a5\\u7740|\\u6211\\u7ee7\\u7eed|\\u6211\\u5148)"
+        "[^\\u3002\\uff01\\uff1f\\uff1b]{0,60}"
+        "(?:\\u786e\\u8ba4|\\u6838\\u5bf9)"
+        "[^\\u3002\\uff01\\uff1f\\uff1b]{0,160}"
+        "(?:\\u8fd9\\u4e00\\u5c0f\\u6b65|\\u5f53\\u524d\\u8fd9\\u4e00\\u6b65|\\u8bb0\\u5f55\\u9879)"
+        "[^\\u3002\\uff01\\uff1f\\uff1b]{0,160}"
+        "(?:\\u53ea\\u8bb0|\\u53ea\\u786e\\u8ba4|\\u521a\\u624d\\u62a5\\u7684)"
+        "[^\\u3002\\uff01\\uff1f\\uff1b]{0,120}[\\u3002\\uff01\\uff1f\\uff1b\\uff0c\\s]*$"
+    ),
+    re.compile(
         "^\\u8fd9\\u4e00\\u6b65\\u8bb0\\u5f55\\u9f50\\u4e86"
         "[^\\u3002\\uff01\\uff1f\\uff1b]{0,200}"
         "(?:\\u7ed3\\u675f\\u5f53\\u524d\\u6b65\\u9aa4|\\u5207\\u5230\\u4e0b\\u4e00\\u6b65|\\u5171\\u540c\\u52a8\\u4f5c|\\u63a5\\u4e0b\\u6765\\u8981\\u505a\\u7684\\u5171\\u540c\\u52a8\\u4f5c)"
@@ -1480,6 +1498,187 @@ def _get_recent_assistant_text_from_conn(conn, limit: int = 3) -> str:
     return normalize_spoken_text(" ".join(pieces))
 
 
+def _get_recent_user_text_from_conn(conn, limit: int = 3) -> str:
+    if conn is None:
+        return ""
+    dialogue = getattr(getattr(conn, "dialogue", None), "dialogue", None)
+    if not isinstance(dialogue, list):
+        return ""
+
+    pieces = []
+    for message in reversed(dialogue):
+        role = str(getattr(message, "role", "") or "").strip().lower()
+        content = str(getattr(message, "content", "") or "").strip()
+        if role != "user" or not content:
+            continue
+        pieces.append(content)
+        if len(pieces) >= limit:
+            break
+    pieces.reverse()
+    return normalize_spoken_text(" ".join(pieces))
+
+
+def _get_current_turn_server_mcp_tool_names(conn) -> list[str]:
+    if conn is None:
+        return []
+
+    current_sentence_id = str(getattr(conn, "sentence_id", "") or "").strip()
+    payload_sentence_id = str(
+        getattr(conn, "_current_turn_server_mcp_sentence_id", "") or ""
+    ).strip()
+    if not current_sentence_id or current_sentence_id != payload_sentence_id:
+        return []
+    return list(getattr(conn, "_current_turn_server_mcp_tool_names", []) or [])
+
+
+def _extract_experiment_step_snapshot(payload) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        return "", ""
+
+    body = payload.get("result") if isinstance(payload.get("result"), dict) else payload
+
+    step = body.get("step")
+    if isinstance(step, dict):
+        title = str(step.get("title", "") or "").strip()
+        prompts = step.get("prompts") if isinstance(step.get("prompts"), dict) else {}
+        instruction = str(prompts.get("instruction", "") or "").strip()
+        return title, instruction
+
+    summary = body.get("summary")
+    if isinstance(summary, dict):
+        current_step = (
+            summary.get("current_step") if isinstance(summary.get("current_step"), dict) else {}
+        )
+        current_details = (
+            summary.get("current_step_details")
+            if isinstance(summary.get("current_step_details"), dict)
+            else {}
+        )
+        title = str(current_step.get("title", "") or "").strip()
+        instruction = str(current_details.get("instruction", "") or "").strip()
+        return title, instruction
+
+    state = body.get("state")
+    if isinstance(state, dict):
+        current_step = (
+            state.get("current_step") if isinstance(state.get("current_step"), dict) else {}
+        )
+        title = str(current_step.get("title", "") or "").strip()
+        instruction = str(current_step.get("instruction", "") or "").strip()
+        return title, instruction
+
+    return "", ""
+
+
+def _compose_trusted_current_step_reply(conn) -> str:
+    if conn is None:
+        return ""
+
+    title = ""
+    instruction = ""
+    for payload in (
+        getattr(conn, "experiment_current_step", None),
+        getattr(conn, "experiment_progress_summary", None),
+    ):
+        title, instruction = _extract_experiment_step_snapshot(payload)
+        if title or instruction:
+            break
+
+    parts = []
+    if title:
+        parts.append(f"现在做这一步：{title}")
+    if instruction:
+        clean_instruction = instruction.rstrip("。！？!?；; ").strip()
+        if clean_instruction:
+            parts.append(clean_instruction)
+
+    if not parts:
+        step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+        if not step_id:
+            return ""
+        parts.append("现在先按当前步骤继续。")
+
+    reply = "，".join(part for part in parts if part).strip("， ")
+    if reply and reply[-1] not in "。！？!?":
+        reply += "。"
+    return prepare_runtime_spoken_text(reply)
+
+
+_EXPERIMENT_ALIGNMENT_TOOL_NAMES = {
+    "create_session",
+    "get_state",
+    "get_step",
+    "get_progress_summary",
+    "get_current_progress",
+    "start_trial",
+    "add_field",
+    "add_fields",
+    "finish_trial",
+    "can_proceed",
+    "proceed_to_next_step",
+    "redirect_to_step",
+    "redo_trial",
+    "modify_record",
+    "uvvis_session",
+    "uvvis_measure_spectra",
+    "uvvis_measure_kinetics",
+    "uvvis_scan_start",
+    "uvvis_scan_status",
+    "uvvis_scan_result",
+}
+
+
+def _looks_like_experiment_control_turn(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    if not normalized:
+        return False
+
+    tokens = (
+        "继续下一步",
+        "下一步",
+        "做好了",
+        "做完了",
+        "全部完成",
+        "已经完成",
+        "开始实验",
+        "开始今天的实验",
+        "准备好了",
+        "可以拍照",
+        "开始扫描",
+        "可以开始扫描",
+        "开始测量",
+        "开始动力学",
+        "丁达尔",
+        "颜色稳定",
+        "拍好了",
+    )
+    return any(token in normalized for token in tokens)
+
+
+def _looks_like_experiment_step_or_scan_guidance(text: str) -> bool:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return False
+    if _looks_like_step_guidance_text(normalized):
+        return True
+
+    guidance_tokens = (
+        "开始扫描",
+        "开始测量",
+        "开始动力学",
+        "丁达尔现象观察",
+        "把环境调暗",
+        "把一到五号样品位",
+        "参比位",
+        "样品位",
+        "比色皿",
+        "放好了告诉我",
+        "看完后直接告诉我",
+        "观察后告诉我",
+    )
+    return any(token in normalized for token in guidance_tokens)
+
+
 def _conn_is_waiting_for_experiment_ready(conn) -> bool:
     last_text = _get_recent_assistant_text_from_conn(conn, limit=3)
     if not last_text:
@@ -2008,6 +2207,39 @@ def _apply_tool_failure_narration_guard(conn, text: str) -> str:
     return normalize_spoken_text(normalized)
 
 
+def _apply_experiment_graph_alignment_guard(conn, text: str) -> str:
+    if not text or conn is None:
+        return text
+
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return normalized
+
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    current_step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+    if not session_id and not current_step_id:
+        return normalized
+
+    current_sentence_id = str(getattr(conn, "sentence_id", "") or "").strip()
+    bypass_sentence_id = str(
+        getattr(conn, "_experiment_ready_guard_bypass_sentence_id", "") or ""
+    ).strip()
+    if current_sentence_id and current_sentence_id == bypass_sentence_id:
+        return normalized
+
+    recent_user_text = _get_recent_user_text_from_conn(conn, limit=2)
+    if not recent_user_text:
+        return normalized
+    if not _looks_like_experiment_control_turn(recent_user_text):
+        return normalized
+
+    if not _looks_like_experiment_step_or_scan_guidance(normalized):
+        return normalized
+
+    trusted_reply = _compose_trusted_current_step_reply(conn)
+    return trusted_reply or normalized
+
+
 def _strip_backstage_leading_clauses(text: str) -> str:
     cleaned = (text or "").strip()
     while cleaned:
@@ -2198,4 +2430,5 @@ def prepare_runtime_spoken_text_for_conn(conn, text):
     prepared = _apply_experiment_ready_guard(conn, prepared)
     prepared = _apply_export_artifact_guard(conn, prepared)
     prepared = _apply_tool_failure_narration_guard(conn, prepared)
+    prepared = _apply_experiment_graph_alignment_guard(conn, prepared)
     return normalize_spoken_text(prepared)

@@ -2,10 +2,37 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+import types
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
+
+
+class _FakeLogger:
+    def bind(self, **kwargs):
+        return self
+
+    def info(self, *args, **kwargs):
+        return None
+
+    def debug(self, *args, **kwargs):
+        return None
+
+    def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
+        return None
+
+
+fake_logger_module = types.ModuleType("config.logger")
+fake_logger_module.setup_logging = lambda: _FakeLogger()
+sys.modules.setdefault("config.logger", fake_logger_module)
+sys.modules.setdefault("opuslib_next", types.ModuleType("opuslib_next"))
+fake_pydub_module = types.ModuleType("pydub")
+fake_pydub_module.AudioSegment = object
+sys.modules.setdefault("pydub", fake_pydub_module)
 
 
 from core.providers.tools.server_mcp.payload_utils import (
@@ -159,6 +186,97 @@ class ServerMCPPayloadUtilsTest(unittest.TestCase):
                 "blank_baseline_manifest_json": "C:/demo/latest_air_blank_manifest.json",
             },
             getattr(conn, "_last_uvvis_blank_baseline_state"),
+        )
+
+    def test_sync_server_mcp_payload_state_updates_experiment_step_from_progress_summary(self):
+        class _Conn:
+            pass
+
+        conn = _Conn()
+        payload = {
+            "result": {
+                "summary": {
+                    "current_step": {
+                        "step_id": "step_sample1_2_add_kbr_water_nabh4",
+                    }
+                }
+            }
+        }
+
+        sync_server_mcp_payload_state(
+            conn,
+            tool_name="get_progress_summary",
+            payload=payload,
+            arguments={"session_id": "exp-1"},
+        )
+
+        self.assertEqual("exp-1", getattr(conn, "experiment_session_id"))
+        self.assertEqual(
+            "step_sample1_2_add_kbr_water_nabh4",
+            getattr(conn, "experiment_current_step_id"),
+        )
+        self.assertEqual(payload, getattr(conn, "experiment_progress_summary"))
+        self.assertFalse(getattr(conn, "_experiment_graph_refresh_required", True))
+
+    def test_sync_server_mcp_payload_state_marks_refresh_required_after_mutation_without_step(self):
+        class _Conn:
+            pass
+
+        conn = _Conn()
+        payload = {"result": {"ok": True, "message": "advanced"}}
+
+        sync_server_mcp_payload_state(
+            conn,
+            tool_name="proceed_to_next_step",
+            payload=payload,
+            arguments={"session_id": "exp-1"},
+        )
+
+        self.assertEqual("exp-1", getattr(conn, "experiment_session_id"))
+        self.assertTrue(getattr(conn, "_experiment_graph_refresh_required", False))
+        self.assertEqual(
+            "proceed_to_next_step",
+            getattr(conn, "_last_experiment_graph_mutation_tool"),
+        )
+
+    def test_sync_server_mcp_payload_state_tracks_current_turn_tool_names_by_sentence(self):
+        class _Conn:
+            pass
+
+        conn = _Conn()
+        conn.sentence_id = "turn-1"
+
+        sync_server_mcp_payload_state(
+            conn,
+            tool_name="get_step",
+            payload={"result": {"step": {"id": "step_prepare_setup_all"}}},
+            arguments={"session_id": "exp-1"},
+        )
+        sync_server_mcp_payload_state(
+            conn,
+            tool_name="uvvis_measure_spectra",
+            payload={"result": {"ok": True}},
+            arguments={"session_key": "lease-1"},
+        )
+
+        self.assertEqual("turn-1", getattr(conn, "_current_turn_server_mcp_sentence_id"))
+        self.assertEqual(
+            ["get_step", "uvvis_measure_spectra"],
+            getattr(conn, "_current_turn_server_mcp_tool_names"),
+        )
+
+        conn.sentence_id = "turn-2"
+        sync_server_mcp_payload_state(
+            conn,
+            tool_name="get_progress_summary",
+            payload={"result": {"summary": {"current_step": {"step_id": "step-2"}}}},
+            arguments={"session_id": "exp-1"},
+        )
+
+        self.assertEqual("turn-2", getattr(conn, "_current_turn_server_mcp_sentence_id"))
+        self.assertEqual(
+            ["get_progress_summary"],
+            getattr(conn, "_current_turn_server_mcp_tool_names"),
         )
 
     def test_build_server_mcp_spoken_response_for_missing_uvvis_blank_baseline(self):

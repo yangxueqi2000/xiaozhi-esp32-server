@@ -49,6 +49,10 @@ async def handle_user_intent(conn, text):
 
     # Keep photo and UV-Vis direct handlers ahead of the generic experiment fast
     # path so confirmations like "可以拍照" still follow the device shortcut.
+    await _maybe_refresh_experiment_state_before_direct_handlers(
+        conn,
+        reason="before_direct_handlers",
+    )
     _update_server_photo_confirmation_state(conn, filtered_text)
 
     photo_direct_handlers = (
@@ -78,6 +82,20 @@ async def handle_user_intent(conn, text):
     except Exception as exc:
         conn.logger.bind(tag=TAG).warning(
             f"experiment control fast path failed: {exc}"
+        )
+    else:
+        if handled:
+            return True
+
+    try:
+        handled = await handle_experiment_control_strict_graph_intent(
+            conn,
+            text,
+            filtered_text,
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"experiment control strict graph path failed: {exc}"
         )
     else:
         if handled:
@@ -132,6 +150,43 @@ async def analyze_intent_with_llm(conn, text):
         conn.logger.bind(tag=TAG).error(f"意图识别失败: {str(e)}")
 
     return None
+
+
+async def _maybe_refresh_experiment_state_before_direct_handlers(
+    conn,
+    *,
+    reason: str = "",
+):
+    if not bool(getattr(conn, "_experiment_graph_refresh_required", False)):
+        return
+
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return
+
+    try:
+        if hasattr(conn, "refresh_experiment_foreground_state"):
+            refreshed = await conn.refresh_experiment_foreground_state(
+                reason=reason or "before_direct_handlers"
+            )
+            if isinstance(refreshed, dict) and str(
+                refreshed.get("current_step_id", "") or ""
+            ).strip():
+                conn._experiment_graph_refresh_required = False
+            return
+
+        step_meta = await _safe_refresh_experiment_step_cache(
+            conn,
+            session_id,
+            reason=reason or "before_direct_handlers",
+        )
+        if str(step_meta.get("step_id", "") or "").strip() or _get_current_experiment_step_id(conn):
+            conn._experiment_graph_refresh_required = False
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            "experiment direct-handler refresh bridge failed: "
+            f"session_id={session_id}, reason={reason or 'unknown'}, error={exc}"
+        )
 
 
 def _normalize_text_for_match(text: str) -> str:
@@ -394,6 +449,8 @@ def _normalize_confirmation_signature(text: str) -> str:
     norm = norm.replace("已经", "已")
     norm = norm.replace("完成了", "完成")
     norm = norm.replace("加入了", "加入")
+    norm = norm.replace("双杯", "烧杯")
+    norm = norm.replace("磁子", "磁转子")
     return norm
 
 
@@ -1331,6 +1388,7 @@ async def _refresh_experiment_step_cache(conn, session_id: str):
             conn.experiment_current_step_id = current_step_id
             if getattr(conn, "experiment_resume_recovery_required", False):
                 conn.experiment_resume_latest_current_step_id = current_step_id
+    conn._experiment_graph_refresh_required = False
     return _merge_experiment_step_meta(
         _extract_experiment_step_meta(step_payload),
         _extract_experiment_step_meta(progress_payload),
@@ -1476,6 +1534,43 @@ def _looks_like_explicit_completion_report(filtered_text: str) -> bool:
     return _contains_any(norm, completion_tokens)
 
 
+def _looks_like_explicit_added_completion_report(filtered_text: str) -> bool:
+    norm = _normalize_confirmation_signature(filtered_text)
+    if not norm:
+        return False
+    if _contains_any(norm, _RESUME_LOG_NEGATIVE_TOKENS):
+        return False
+    completion_tokens = (
+        "全部加好",
+        "都加好了",
+        "全都加好了",
+        "已经加好了",
+        "已加好了",
+        "全部加完",
+        "都加完了",
+        "全都加完了",
+        "已经加完了",
+        "已加完了",
+    )
+    return _contains_any(norm, completion_tokens)
+
+
+def _looks_like_addition_confirmation_description(description: str) -> bool:
+    norm = _normalize_confirmation_signature(description)
+    if not norm:
+        return False
+    return _contains_any(
+        norm,
+        (
+            "加入",
+            "加液",
+            "滴加",
+            "加完",
+            "加好",
+        ),
+    )
+
+
 def _build_experiment_current_step_confirmation_fields(
     filtered_text: str,
     schema_by_name: dict,
@@ -1492,6 +1587,7 @@ def _build_experiment_current_step_confirmation_fields(
         return {}
 
     global_completion = _looks_like_explicit_completion_report(filtered_text)
+    added_completion = _looks_like_explicit_added_completion_report(filtered_text)
     result = {}
     for field_name in missing_fields or []:
         field = schema_by_name.get(field_name, {})
@@ -1503,9 +1599,13 @@ def _build_experiment_current_step_confirmation_fields(
         )
         if not description:
             continue
-        if global_completion or _looks_like_confirmation_signature_match(
-            norm,
-            description,
+        if (
+            global_completion
+            or (
+                added_completion
+                and _looks_like_addition_confirmation_description(description)
+            )
+            or _looks_like_confirmation_signature_match(norm, description)
         ):
             result[field_name] = True
     return result
@@ -1568,6 +1668,19 @@ async def _try_apply_current_confirmation_report(
         allow_confirmation_autofill=True,
     )
     if not write_fields:
+        bool_prompts = []
+        for field_name in missing_fields or []:
+            field = schema_by_name.get(field_name, {})
+            type_text = str(field.get("type", "")).strip().lower()
+            if type_text not in {"bool", "boolean"}:
+                continue
+            description = _clean_field_description(field.get("description", ""))
+            bool_prompts.append(description or str(field_name or ""))
+        conn.logger.bind(tag=TAG).info(
+            "experiment confirmation writeback no-match: "
+            f"text={filtered_text}, missing_fields={missing_fields}, "
+            f"bool_prompts={bool_prompts}"
+        )
         return None
 
     conn.logger.bind(tag=TAG).info(
@@ -2655,7 +2768,7 @@ def _compose_photo_confirmation_not_advanced_reply(
 ) -> str:
     confirmation = textUtils.prepare_runtime_spoken_text(confirmation_reply)
     followup = textUtils.prepare_runtime_spoken_text(followup_reply)
-    bridge = "这边步骤还没有自动切到下一步，我先按当前步骤继续。"
+    bridge = "当前实验图谱还停在这一步，先按这一步继续。"
 
     if confirmation and not followup:
         confirmation = confirmation.rstrip("。！？!? ").strip()
@@ -2676,6 +2789,38 @@ def _compose_photo_confirmation_not_advanced_reply(
     if confirmation:
         confirmation = f"{confirmation}。"
     return f"{confirmation}{bridge}{followup}"
+
+
+def _looks_like_internal_experiment_graph_message(message: str) -> bool:
+    raw_text = str(message or "").strip()
+    if not raw_text:
+        return False
+
+    normalized = _normalize_text_for_match(raw_text)
+    internal_tokens = (
+        "无法跳转到step",
+        "前置步骤未完成",
+        "redirect_to_step",
+        "finish_trial",
+        "can_proceed",
+        "proceed_to_next_step",
+        "session_id",
+        "step_",
+    )
+    if _contains_any(normalized, internal_tokens):
+        return True
+    return False
+
+
+def _sanitize_experiment_graph_followup_reply(
+    reply: str,
+    *,
+    fallback_reply: str = "",
+) -> str:
+    prepared_reply = textUtils.prepare_runtime_spoken_text(reply)
+    if prepared_reply and not _looks_like_internal_experiment_graph_message(reply):
+        return prepared_reply
+    return textUtils.prepare_runtime_spoken_text(fallback_reply)
 
 
 async def _safe_refresh_experiment_step_cache(
@@ -2719,9 +2864,13 @@ async def _finalize_photo_followup_without_graph_advance(
     current_step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
     current_step_title = str(step_meta.get("title", "") or "").strip()
     current_step_reply = _compose_experiment_step_reply(step_meta, mode="guide")
+    sanitized_followup_reply = _sanitize_experiment_graph_followup_reply(
+        followup_reply,
+        fallback_reply=current_step_reply,
+    )
     final_reply = _compose_photo_confirmation_not_advanced_reply(
         confirmation_reply,
-        followup_reply or current_step_reply,
+        sanitized_followup_reply or current_step_reply,
     )
 
     recent_state = _remember_recent_server_photo_confirmation(
@@ -3163,7 +3312,7 @@ async def _advance_photo_confirmation_step_locally_v2(
                     followup_reply=followup_reply,
                     reason="redirect_to_inferred_photo_step_rejected",
                     expected_step_id=inferred_step_id,
-                    refresh_state=False,
+                    refresh_state=True,
                 )
 
             step_meta = await _safe_refresh_experiment_step_cache(
@@ -3270,7 +3419,7 @@ async def _advance_photo_confirmation_step_locally_v2(
             confirmation_reply=confirmation_reply,
             followup_reply=followup_reply,
             reason="finish_trial_rejected_after_photo_confirmation",
-            refresh_state=False,
+            refresh_state=True,
         )
 
     can_proceed_payload = await _call_experiment_graph_tool_fast(
@@ -3290,7 +3439,7 @@ async def _advance_photo_confirmation_step_locally_v2(
             confirmation_reply=confirmation_reply,
             followup_reply=followup_reply,
             reason="can_proceed_rejected_after_photo_confirmation",
-            refresh_state=False,
+            refresh_state=True,
         )
 
     proceed_payload = await _call_experiment_graph_tool_fast(
@@ -3310,7 +3459,7 @@ async def _advance_photo_confirmation_step_locally_v2(
             confirmation_reply=confirmation_reply,
             followup_reply=followup_reply,
             reason="proceed_to_next_step_rejected_after_photo_confirmation",
-            refresh_state=False,
+            refresh_state=True,
         )
 
     next_meta = await _safe_refresh_experiment_step_cache(
@@ -3432,6 +3581,90 @@ def _compose_uvvis_step_rejection_reply(step_id: str) -> str:
     }:
         return "当前实验图谱还没推进到对应的 400 纳米动力学步骤，先完成前面的步骤。"
     return _UVVIS_NOT_READY_REPLY
+
+
+def _looks_like_explicit_uvvis_turn(
+    original_text: str = "",
+    filtered_text: str = "",
+) -> bool:
+    normalized = _normalize_text_for_match(
+        " ".join(
+            text
+            for text in (original_text, filtered_text)
+            if str(text or "").strip()
+        )
+    )
+    if not normalized:
+        return False
+
+    uvvis_tokens = (
+        "uvvis",
+        "uv-vis",
+        "紫外可见",
+        "光谱",
+        "吸光度",
+        "lambda max",
+        "λmax",
+        "400纳米",
+        "动力学",
+        "暗电流",
+        "空气基线",
+        "纯水空白",
+        "参比位",
+        "样品位",
+        "比色皿",
+        "空白液",
+    )
+    return _contains_any(normalized, uvvis_tokens)
+
+
+def _assistant_recently_prompted_uvvis_action(conn) -> bool:
+    recent_text = _normalize_text_for_match(_get_recent_assistant_text(conn, limit=3))
+    if not recent_text:
+        return False
+
+    uvvis_prompt_tokens = (
+        "uvvis",
+        "uv-vis",
+        "紫外可见",
+        "暗电流",
+        "空气基线",
+        "纯水空白",
+        "参比位",
+        "样品位",
+        "比色皿",
+        "400纳米",
+        "动力学",
+        "光谱",
+        "空白液",
+    )
+    return _contains_any(recent_text, uvvis_prompt_tokens)
+
+
+def _looks_like_uvvis_followup_reply(conn, filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    if not norm:
+        return False
+    if not _assistant_recently_prompted_uvvis_action(conn):
+        return False
+    if _is_affirmative_short_reply_fixed(filtered_text):
+        return True
+    if _looks_like_pure_short_completion_control(norm):
+        return True
+    followup_tokens = (
+        "放好了",
+        "都放好了",
+        "已经放好了",
+        "可以开始了",
+        "开始吧",
+        "开始测量",
+        "开始扫描",
+        "可以开始扫描",
+        "扫描吧",
+        "开始空架扫描",
+        "开始动力学",
+    )
+    return _contains_any(norm, followup_tokens)
 
 
 def _get_current_experiment_step_id(conn) -> str:
@@ -4594,7 +4827,19 @@ async def _handle_uvvis_shared_blank_prep(
         or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
         or _contains_any(
             _normalize_text_for_match(filtered_text),
-            ("暗电流", "空气基线", "空气能量", "纯水空白", "空白校正", "开始uvvis", "开始紫外可见", "开始测量"),
+            (
+                "暗电流",
+                "空气基线",
+                "空气能量",
+                "纯水空白",
+                "空白校正",
+                "开始uvvis",
+                "开始紫外可见",
+                "开始测量",
+                "开始扫描",
+                "可以开始扫描",
+                "空架扫描",
+            ),
         )
     ):
         return False
@@ -5003,6 +5248,20 @@ async def _handle_uvvis_kinetics_measurement(
 
 async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: str) -> bool:
     step_id = _get_current_experiment_step_id(conn)
+    status_query = _looks_like_uvvis_status_query(
+        conn,
+        original_text,
+        filtered_text,
+        inferred_step_id="",
+    )
+    if not _is_uvvis_step(step_id):
+        if not (
+            status_query
+            or _looks_like_explicit_uvvis_turn(original_text, filtered_text)
+            or _looks_like_uvvis_followup_reply(conn, filtered_text)
+        ):
+            return False
+
     inferred_step_id = step_id if _is_uvvis_step(step_id) else _infer_uvvis_step_id_from_context(
         conn,
         original_text,
@@ -5319,6 +5578,72 @@ async def handle_experiment_control_fast_intent(
         return True
 
     return False
+
+
+async def handle_experiment_control_strict_graph_intent(
+    conn,
+    original_text: str,
+    filtered_text: str,
+) -> bool:
+    if _is_experiment_fast_path_available(conn):
+        return False
+
+    if _is_explicit_experiment_resume_request(filtered_text):
+        return False
+    if _is_explicit_experiment_start_request(filtered_text):
+        return False
+
+    if _assistant_waiting_for_step_start(conn) and _is_explicit_ready_to_start_reply(
+        filtered_text
+    ):
+        return False
+
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return False
+
+    action = _classify_short_experiment_control(conn, filtered_text)
+    if not action:
+        return await _handle_confirmation_step_semantic_fast_intent(
+            conn,
+            original_text,
+            filtered_text,
+        )
+
+    if action != "advance":
+        return False
+
+    conn.logger.bind(tag=TAG).info(
+        f"experiment control strict graph path hit: action={action}, text={filtered_text}"
+    )
+
+    try:
+        reply = await _try_apply_current_confirmation_report(conn, filtered_text)
+        if not reply:
+            reply = await _advance_experiment_step_fast(conn, session_id)
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"experiment control strict graph advance failed: {exc}"
+        )
+        return False
+
+    next_step_meta = _get_cached_experiment_step_meta(conn)
+    reply = _prepare_fastpath_spoken_reply(
+        reply,
+        fallback_step_meta=next_step_meta,
+        fallback_mode="guide",
+    )
+    if not reply:
+        return False
+
+    await _start_direct_intent_turn(conn, original_text)
+    if hasattr(conn, "enrich_latest_clean_user_utterance_snapshot"):
+        try:
+            conn.enrich_latest_clean_user_utterance_snapshot()
+        except Exception:
+            pass
+    speak_txt(conn, reply)
+    return True
 
 
 def _is_direct_photo_command(filtered_text: str) -> bool:

@@ -307,6 +307,61 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("", result)
 
+    def test_conn_runtime_spoken_text_reanchors_speculative_future_step_to_current_graph_step(self):
+        conn = _FakeConn()
+        conn.sentence_id = "turn-graph-align-1"
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_prepare_setup_all",
+                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "prompts": {
+                        "instruction": "先完成 1-5 号烧杯编号和磁转子放置。",
+                    },
+                }
+            }
+        }
+        conn.dialogue.put(Message(role="user", content="继续下一步。"))
+
+        result = textUtils.prepare_runtime_spoken_text_for_conn(
+            conn,
+            "现在做丁达尔现象观察：把环境调暗，用激光笔从侧面照射样品。看完后告诉我。",
+        )
+
+        self.assertIn("准备烧杯与磁转子", result)
+        self.assertIn("烧杯编号", result)
+        self.assertNotIn("丁达尔", result)
+
+    def test_conn_runtime_spoken_text_reanchors_future_step_even_after_graph_tools_ran(self):
+        conn = _FakeConn()
+        conn.sentence_id = "turn-graph-align-2"
+        conn._current_turn_server_mcp_sentence_id = "turn-graph-align-2"
+        conn._current_turn_server_mcp_tool_names = [
+            "get_step",
+            "get_progress_summary",
+        ]
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_add_h2o2_all",
+                    "title": "1-5号样品：统一加入H2O2",
+                    "prompts": {
+                        "instruction": "按 1 到 5 号顺序统一完成 H2O2 加入。",
+                    },
+                }
+            }
+        }
+        conn.dialogue.put(Message(role="user", content="继续下一步。"))
+
+        result = textUtils.prepare_runtime_spoken_text_for_conn(
+            conn,
+            "现在做丁达尔现象观察：把环境调暗，用激光笔从侧面照射样品。看完后告诉我。",
+        )
+
+        self.assertIn("统一加入H2O2", result)
+        self.assertIn("H2O2", result)
+        self.assertNotIn("丁达尔", result)
+
     def test_conn_runtime_spoken_text_bypasses_ready_guard_for_same_sentence(self):
         conn = _FakeConn()
         conn.dialogue.put(
@@ -464,6 +519,30 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "接下来做这一步：2号样品：先静置1到2分钟，再观察并拍照，做好后告诉我。",
             result,
         )
+
+    def test_prepare_runtime_spoken_text_drops_recordkeeping_backstage_sentence(self):
+        text = "我先记下一号样品的最终颜色和稳定时间。现在可以拍照。"
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual("现在可以拍照。", result)
+
+    def test_current_step_confirmation_fields_accept_all_added_completion_report(self):
+        schema_by_name = {
+            "h2o2_added_to_all": {
+                "type": "bool",
+                "description": "已按 1-5 号顺序完成全部 H2O2 加入",
+            }
+        }
+
+        result = intentHandler._build_experiment_current_step_confirmation_fields(
+            "全部加好了",
+            schema_by_name,
+            ["h2o2_added_to_all"],
+            allow_confirmation_autofill=True,
+        )
+
+        self.assertEqual({"h2o2_added_to_all": True}, result)
 
     def test_repeat_reply_is_direct_and_requests_completion(self):
         reply = intentHandler._compose_experiment_step_reply(
@@ -796,6 +875,68 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertTrue(getattr(conn, "_server_photo_capture_granted", False))
 
+    async def test_handle_user_intent_refreshes_dirty_experiment_state_before_direct_handlers(self):
+        conn = _FakeConn()
+        conn.intent_type = "function_call"
+        conn.experiment_session_id = "exp-1"
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        conn._experiment_graph_refresh_required = True
+
+        async def fake_refresh_experiment_foreground_state(*, reason=""):
+            conn.experiment_current_step_id = "step_sample1_2_add_kbr_water_nabh4"
+            conn._experiment_graph_refresh_required = False
+            return {"current_step_id": conn.experiment_current_step_id}
+
+        conn.refresh_experiment_foreground_state = fake_refresh_experiment_foreground_state
+
+        async def handle_pending_direct_photo(*args, **kwargs):
+            self.assertEqual(
+                "step_sample1_2_add_kbr_water_nabh4",
+                conn.experiment_current_step_id,
+            )
+            self.assertFalse(conn._experiment_graph_refresh_required)
+            return True
+
+        async def return_false(*args, **kwargs):
+            return False
+
+        with patch.object(
+            intentHandler,
+            "handle_pending_direct_photo_confirmation",
+            handle_pending_direct_photo,
+        ):
+            with patch.object(
+                intentHandler,
+                "handle_pending_server_photo_confirmation",
+                return_false,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "handle_direct_photo_navigation_intent",
+                    return_false,
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "handle_direct_photo_intent",
+                        return_false,
+                    ):
+                        with patch.object(
+                            intentHandler,
+                            "handle_direct_uvvis_intent",
+                            return_false,
+                        ):
+                            with patch.object(
+                                intentHandler,
+                                "handle_experiment_control_fast_intent",
+                                return_false,
+                            ):
+                                handled = await intentHandler.handle_user_intent(
+                                    conn,
+                                    "可以拍照",
+                                )
+
+        self.assertTrue(handled)
+
     async def test_handle_user_intent_routes_short_experiment_control_to_fast_path(self):
         conn = _FakeConn()
         conn.intent_type = "function_call"
@@ -848,6 +989,62 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             [("鍏ㄩ儴鍔犲ソ浜?", "鍏ㄩ儴鍔犲ソ浜")],
             seen,
         )
+
+    async def test_handle_user_intent_routes_short_experiment_control_to_strict_graph_path_when_fast_path_disabled(self):
+        conn = _FakeConn()
+        conn.intent_type = "function_call"
+        conn.config = {"experiment_fast_path_enabled": False}
+        seen = []
+
+        async def return_false(*args, **kwargs):
+            return False
+
+        async def handle_strict(_conn, original_text, filtered_text):
+            seen.append((original_text, filtered_text))
+            return True
+
+        with patch.object(
+            intentHandler,
+            "handle_pending_direct_photo_confirmation",
+            return_false,
+        ):
+            with patch.object(
+                intentHandler,
+                "handle_pending_server_photo_confirmation",
+                return_false,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "handle_direct_photo_navigation_intent",
+                    return_false,
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "handle_direct_photo_intent",
+                        return_false,
+                    ):
+                        with patch.object(
+                            intentHandler,
+                            "handle_direct_uvvis_intent",
+                            return_false,
+                        ):
+                            with patch.object(
+                                intentHandler,
+                                "handle_experiment_control_fast_intent",
+                                return_false,
+                            ):
+                                with patch.object(
+                                    intentHandler,
+                                    "handle_experiment_control_strict_graph_intent",
+                                    handle_strict,
+                                ):
+                                    handled = await intentHandler.handle_user_intent(
+                                        conn,
+                                        "继续下一步",
+                                    )
+
+        self.assertTrue(handled)
+        self.assertEqual([("继续下一步", "继续下一步")], seen)
 
     async def test_handle_user_intent_routes_imperative_photo_confirmation_to_server_photo(self):
         conn = _FakeConn()
@@ -3067,7 +3264,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("step_prepare_setup_all", conn.experiment_current_step_id)
         self.assertIn("拍好了", reply)
-        self.assertIn("还没有自动切到下一步", reply)
+        self.assertIn("当前实验图谱还停在这一步", reply)
         self.assertIn("烧杯编号和磁子放置", reply)
         recent_state = getattr(conn, "_recent_server_photo_confirmation", {})
         self.assertFalse(recent_state.get("graph_advanced"))
@@ -3084,6 +3281,113 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             recent_state.get("current_step_title"),
         )
         self.assertGreater(recent_state.get("graph_refresh_checked_at", 0.0), 0.0)
+
+    async def test_local_photo_followup_redirect_rejection_hides_internal_graph_message(
+        self,
+    ):
+        conn = _FakeConn()
+        tool_calls = []
+        state = {"step_reads": 0}
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                state["step_reads"] += 1
+                if state["step_reads"] == 1:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_prepare_setup_all",
+                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "prompts": {
+                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                },
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_sample1_2_add_kbr_water_nabh4",
+                            "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                            "prompts": {
+                                "instruction": "先加入 KBr 和纯水，再快速加入 NaBH4 并持续搅拌。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": ["beakers_labeled"]},
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [{"name": "beakers_labeled", "type": "bool"}],
+                    }
+                }
+            if tool_name == "redirect_to_step":
+                self.assertEqual("step_sample1_5_photo_confirm", arguments["step_id"])
+                return {
+                    "result": {
+                        "ok": False,
+                        "message": "无法跳转到 step_sample1_5_photo_confirm：前置步骤未完成: step_sample1_2_add_kbr_water_nabh4",
+                    }
+                }
+            if tool_name == "get_progress_summary":
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_sample1_2_add_kbr_water_nabh4",
+                                "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                            },
+                            "current_step_details": {
+                                "instruction": "先加入 KBr 和纯水，再快速加入 NaBH4 并持续搅拌。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(
+            intentHandler,
+            "_infer_photo_confirmation_step_id_from_context",
+            return_value="step_sample1_5_photo_confirm",
+        ):
+            reply = await intentHandler._advance_photo_confirmation_step_locally(
+                conn,
+                {
+                    "photo_meta": {
+                        "found": True,
+                        "file_name": "1号样品_20260505_171900.png",
+                        "mirrored_path": "C:/demo/1号样品_20260505_171900.png",
+                    }
+                },
+                fallback_reply="拍好了，已经保存。",
+                requested_arguments={"photo_name": "1号样品"},
+            )
+
+        self.assertIn("拍好了", reply)
+        self.assertIn("当前实验图谱还停在这一步", reply)
+        self.assertIn("KBr", reply)
+        self.assertIn("NaBH4", reply)
+        self.assertNotIn("前置步骤未完成", reply)
+        self.assertNotIn("step_sample1_5_photo_confirm", reply)
+        self.assertEqual("step_sample1_2_add_kbr_water_nabh4", conn.experiment_current_step_id)
+        self.assertIn(
+            "redirect_to_step",
+            [name for name, _args, _priority in tool_calls],
+        )
 
     def test_infer_photo_confirmation_step_id_ignores_non_photo_step_mentions(self):
         conn = _FakeConn()
@@ -3406,6 +3710,42 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             spoken,
         )
 
+    async def test_handle_direct_uvvis_shared_blank_prep_accepts_start_scan_phrase(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_BLANK_STEP_ID
+        executed = []
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"message": "pure water blank missing"}
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "开始扫描。",
+                        "开始扫描。",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "uvvis_measure_spectra",
+                    {
+                        "session_key": "lease-1",
+                        "sample_positions": [1, 2, 3, 4, 5],
+                        "ready_for_samples": False,
+                    },
+                )
+            ],
+            executed,
+        )
+
     async def test_handle_direct_uvvis_shared_blank_infers_step_from_context_when_graph_stale(self):
         conn = _FakeConn()
         conn.experiment_current_step_id = "step_prepare_setup_all"
@@ -3493,6 +3833,73 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             spoken,
         )
 
+    async def test_handle_direct_uvvis_followup_start_scan_infers_step_from_context_when_graph_stale(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content=(
+                    "先不要放任何液体，把样品位和参比位都留空，准备做暗电流和空气基线。"
+                    "可以开始扫描时直接告诉我开始扫描。"
+                ),
+            )
+        )
+        executed = []
+        redirected = []
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            if tool_name == "redirect_to_step":
+                redirected.append((tool_name, dict(arguments), priority))
+                return {"result": {"ok": True}}
+            raise AssertionError(f"unexpected graph tool call: {tool_name}")
+
+        async def fake_ensure_session_key(_conn):
+            return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"message": "pure water blank missing"}
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "开始扫描。",
+                        "开始扫描。",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "redirect_to_step",
+                    {
+                        "session_id": "exp-1",
+                        "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
+                    },
+                    "foreground",
+                )
+            ],
+            redirected,
+        )
+        self.assertEqual(
+            [
+                (
+                    "uvvis_measure_spectra",
+                    {
+                        "session_key": "lease-1",
+                        "sample_positions": [1, 2, 3, 4, 5],
+                        "ready_for_samples": False,
+                    },
+                )
+            ],
+            executed,
+        )
+
     async def test_handle_direct_uvvis_status_query_reports_idle_shared_blank_waiting(self):
         conn = _FakeConn()
         conn.experiment_current_step_id = "step_prepare_setup_all"
@@ -3565,8 +3972,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_direct_uvvis_intent(
                     conn,
-                    "继续下一步。",
-                    "继续下一步。",
+                    "开始 UV-Vis 前置校正。",
+                    "开始 UV-Vis 前置校正。",
                 )
 
         self.assertTrue(handled)
@@ -3586,6 +3993,35 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ["当前实验图谱还没推进到 UV-Vis 前置校正，先完成丁达尔现象观察。"],
             spoken,
+        )
+
+    async def test_handle_direct_uvvis_intent_ignores_generic_next_with_stale_uvvis_state(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        conn._uvvis_direct_state = {
+            "step_id": intentHandler._UVVIS_KINETICS_SAMPLE2_STEP_ID,
+            "run_name": "sample2",
+            "sample_position": 1,
+            "phase": "done",
+            "session_key": "lease-1",
+        }
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="拍好了，已经保存。当前实验图谱还停在这一步，先按这一步继续。",
+            )
+        )
+
+        handled = await intentHandler.handle_direct_uvvis_intent(
+            conn,
+            "继续下一步。",
+            "继续下一步。",
+        )
+
+        self.assertFalse(handled)
+        self.assertEqual(
+            intentHandler._UVVIS_KINETICS_SAMPLE2_STEP_ID,
+            getattr(conn, "_uvvis_direct_state", {}).get("step_id"),
         )
 
     async def test_handle_direct_uvvis_shared_blank_prep_reuses_blank_and_advances(self):
@@ -4162,6 +4598,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "我再看一眼这一步要你回报什么。"
             ),
         )
+        self.assertEqual(
+            "",
+            textUtils.filter_spoken_backstage_text(
+                "我接着确认一号样品这一小步的记录项，只记你刚才报的颜色和时间。"
+            ),
+        )
 
 
     async def test_confirmation_statement_reports_missing_confirmation_field_instead_of_advancing(self):
@@ -4280,6 +4722,138 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["按一到五号顺序完成全部柠檬酸钠加入"], sent)
         self.assertEqual(1, len(spoken))
         self.assertIn("AgNO3", spoken[0])
+        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+        self.assertIn(
+            "proceed_to_next_step",
+            [name for name, _args, _priority in tool_calls],
+        )
+
+    async def test_advance_strict_graph_path_records_and_moves_to_next_step_when_fast_path_disabled(self):
+        conn = _FakeConn()
+        conn.config = {"experiment_fast_path_enabled": False}
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {"reported": False, "advanced": False}
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                if not state["advanced"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_prepare_setup_all",
+                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "prompts": {
+                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                },
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_add_sodium_citrate_all",
+                            "title": "1-5号样品：统一加入柠檬酸钠",
+                            "prompts": {
+                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {"result": {"ok": True, "progress": None}}
+            if tool_name == "start_trial":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": (
+                                []
+                                if state["reported"]
+                                else ["beakers_labeled", "stir_bars_added_to_all"]
+                            )
+                        },
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {
+                                "name": "beakers_labeled",
+                                "type": "bool",
+                                "description": "已完成 1-5 号烧杯编号",
+                            },
+                            {
+                                "name": "stir_bars_added_to_all",
+                                "type": "bool",
+                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                            },
+                        ],
+                    }
+                }
+            if tool_name == "add_fields":
+                state["reported"] = True
+                self.assertEqual(
+                    {"beakers_labeled": True, "stir_bars_added_to_all": True},
+                    arguments.get("data"),
+                )
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "can_proceed":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "proceed_to_next_step":
+                state["advanced"] = state["reported"]
+                conn.experiment_current_step_id = "step_add_sodium_citrate_all"
+                return {"result": {"ok": state["advanced"]}}
+            if tool_name == "get_progress_summary":
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_add_sodium_citrate_all",
+                                "title": "1-5号样品：统一加入柠檬酸钠",
+                            },
+                            "current_step_details": {
+                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_strict_graph_intent(
+                    conn,
+                    "全部完成",
+                    "全部完成",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["全部完成"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("柠檬酸钠", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
         self.assertIn(
             "proceed_to_next_step",
@@ -4623,6 +5197,230 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("颜色", spoken[0])
         self.assertIn("时间", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+
+    async def test_global_completion_phrase_all_done_advances_after_writeback(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {"reported": False, "advanced": False}
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                if not state["advanced"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_prepare_setup_all",
+                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "prompts": {
+                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                },
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_add_sodium_citrate_all",
+                            "title": "1-5号样品：统一加入柠檬酸钠",
+                            "prompts": {
+                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": (
+                                []
+                                if state["reported"]
+                                else ["beakers_labeled", "stir_bars_added_to_all"]
+                            )
+                        },
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {
+                                "name": "beakers_labeled",
+                                "type": "bool",
+                                "description": "已完成 1-5 号烧杯编号",
+                            },
+                            {
+                                "name": "stir_bars_added_to_all",
+                                "type": "bool",
+                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                            },
+                        ],
+                    }
+                }
+            if tool_name == "add_fields":
+                state["reported"] = True
+                self.assertEqual(
+                    {"beakers_labeled": True, "stir_bars_added_to_all": True},
+                    arguments.get("data"),
+                )
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "can_proceed":
+                return {"result": {"ok": state["reported"]}}
+            if tool_name == "proceed_to_next_step":
+                state["advanced"] = state["reported"]
+                conn.experiment_current_step_id = "step_add_sodium_citrate_all"
+                return {"result": {"ok": state["advanced"]}}
+            if tool_name == "get_progress_summary":
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_add_sodium_citrate_all",
+                                "title": "1-5号样品：统一加入柠檬酸钠",
+                            },
+                            "current_step_details": {
+                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "全部完成",
+                    "全部完成",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["全部完成"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("柠檬酸钠", spoken[0])
+        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+        self.assertIn(
+            "proceed_to_next_step",
+            [name for name, _args, _priority in tool_calls],
+        )
+
+    async def test_specific_confirmation_phrase_marks_only_matching_bool_field(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {"written_fields": set()}
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_prepare_setup_all",
+                            "title": "1-5号样品：准备烧杯与磁转子",
+                            "prompts": {
+                                "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                missing = []
+                if "stir_bars_added_to_all" not in state["written_fields"]:
+                    missing.append("stir_bars_added_to_all")
+                if "beakers_labeled" not in state["written_fields"]:
+                    missing.append("beakers_labeled")
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": missing},
+                    }
+                }
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {
+                                "name": "beakers_labeled",
+                                "type": "bool",
+                                "description": "已完成 1-5 号烧杯编号",
+                            },
+                            {
+                                "name": "stir_bars_added_to_all",
+                                "type": "bool",
+                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                            },
+                        ],
+                    }
+                }
+            if tool_name == "add_fields":
+                state["written_fields"].update(arguments.get("data", {}).keys())
+                self.assertEqual(
+                    {"stir_bars_added_to_all": True},
+                    arguments.get("data"),
+                )
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": ["beakers_labeled"]},
+                    }
+                }
+            if tool_name == "finish_trial":
+                raise AssertionError("current step should stay blocked until all bool fields are reported")
+            if tool_name == "can_proceed":
+                raise AssertionError("current step should not call can_proceed while bool fields are missing")
+            if tool_name == "proceed_to_next_step":
+                raise AssertionError("current step should not advance while bool fields are missing")
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "一到五号双杯全部放入磁子",
+                    "一到五号双杯全部放入磁子",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["一到五号双杯全部放入磁子"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("烧杯编号", spoken[0])
+        self.assertNotIn("磁转子", spoken[0])
+        self.assertEqual({"stir_bars_added_to_all"}, state["written_fields"])
 
 if __name__ == "__main__":
     unittest.main()

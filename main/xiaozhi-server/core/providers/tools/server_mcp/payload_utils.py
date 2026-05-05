@@ -31,6 +31,43 @@ _ARTIFACT_VALIDATION_SPECS = {
     },
 }
 
+_EXPERIMENT_GRAPH_TOOLS = {
+    "create_session",
+    "close_session",
+    "get_state",
+    "get_overview",
+    "list_steps",
+    "get_step",
+    "get_schema",
+    "get_progress_summary",
+    "get_current_progress",
+    "get_modifiable_records",
+    "export_records",
+    "start_trial",
+    "cancel_trial",
+    "add_field",
+    "add_fields",
+    "finish_trial",
+    "can_proceed",
+    "proceed_to_next_step",
+    "redirect_to_step",
+    "redo_trial",
+    "modify_record",
+}
+
+_EXPERIMENT_GRAPH_MUTATING_TOOLS = {
+    "create_session",
+    "start_trial",
+    "cancel_trial",
+    "add_field",
+    "add_fields",
+    "finish_trial",
+    "proceed_to_next_step",
+    "redirect_to_step",
+    "redo_trial",
+    "modify_record",
+}
+
 
 def to_plain_data(payload):
     if payload is None:
@@ -136,6 +173,65 @@ def _normalize_bool(value):
     return None
 
 
+def _experiment_result_body(payload):
+    if isinstance(payload, dict):
+        nested = payload.get("result")
+        if isinstance(nested, dict):
+            return nested
+        return payload
+    return {}
+
+
+def _extract_experiment_session_id(payload, arguments: dict | None = None) -> str:
+    body = _experiment_result_body(payload)
+    for key in ("session_id", "sessionId"):
+        value = str(body.get(key, "") or "").strip()
+        if value:
+            return value
+    state = body.get("state")
+    if isinstance(state, dict):
+        for key in ("session_id", "sessionId"):
+            value = str(state.get(key, "") or "").strip()
+            if value:
+                return value
+    return str((arguments or {}).get("session_id", "") or "").strip()
+
+
+def _extract_experiment_current_step_id(payload) -> str:
+    body = _experiment_result_body(payload)
+    state = body.get("state")
+    if isinstance(state, dict):
+        value = str(state.get("current_step_id", "") or "").strip()
+        if value:
+            return value
+    step = body.get("step")
+    if isinstance(step, dict):
+        value = str(step.get("id", "") or "").strip()
+        if value:
+            return value
+    summary = body.get("summary")
+    if isinstance(summary, dict):
+        current_step = summary.get("current_step")
+        if isinstance(current_step, dict):
+            value = str(current_step.get("step_id", "") or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _payload_contains_experiment_step(payload) -> bool:
+    body = _experiment_result_body(payload)
+    return isinstance(body.get("step"), dict)
+
+
+def _payload_contains_experiment_progress(payload) -> bool:
+    body = _experiment_result_body(payload)
+    return any(
+        isinstance(body.get(key), dict)
+        for key in ("summary", "current_progress", "progress", "state")
+    )
+
+
 def annotate_artifact_validation(
     payload,
     *,
@@ -227,6 +323,47 @@ def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None, ar
         "_last_server_mcp_sentence_id",
         str(getattr(conn, "sentence_id", "") or "").strip(),
     )
+    current_sentence_id = str(getattr(conn, "sentence_id", "") or "").strip()
+    tracked_sentence_id = str(
+        getattr(conn, "_current_turn_server_mcp_sentence_id", "") or ""
+    ).strip()
+    if current_sentence_id and current_sentence_id == tracked_sentence_id:
+        current_turn_tools = list(
+            getattr(conn, "_current_turn_server_mcp_tool_names", []) or []
+        )
+    else:
+        current_turn_tools = []
+        setattr(conn, "_current_turn_server_mcp_sentence_id", current_sentence_id)
+    if actual_tool_name:
+        current_turn_tools.append(actual_tool_name)
+        setattr(conn, "_current_turn_server_mcp_tool_names", current_turn_tools)
+
+    if actual_tool_name in _EXPERIMENT_GRAPH_TOOLS:
+        session_id = _extract_experiment_session_id(payload, arguments=arguments)
+        if session_id:
+            setattr(conn, "experiment_session_id", session_id)
+
+        current_step_id = _extract_experiment_current_step_id(payload)
+        if current_step_id:
+            setattr(conn, "experiment_current_step_id", current_step_id)
+            if getattr(conn, "experiment_resume_recovery_required", False):
+                setattr(conn, "experiment_resume_latest_current_step_id", current_step_id)
+
+        if actual_tool_name == "get_step" or _payload_contains_experiment_step(payload):
+            setattr(conn, "experiment_current_step", payload)
+
+        if actual_tool_name in {"get_progress_summary", "get_current_progress", "get_state"} or _payload_contains_experiment_progress(payload):
+            setattr(conn, "experiment_progress_summary", payload)
+
+        if actual_tool_name in _EXPERIMENT_GRAPH_MUTATING_TOOLS:
+            setattr(
+                conn,
+                "_experiment_graph_refresh_required",
+                not bool(current_step_id),
+            )
+            setattr(conn, "_last_experiment_graph_mutation_tool", actual_tool_name)
+        elif current_step_id:
+            setattr(conn, "_experiment_graph_refresh_required", False)
 
     if actual_tool_name.startswith("uvvis_"):
         blank_baseline_state = extract_blank_baseline_state(payload)

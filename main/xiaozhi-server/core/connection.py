@@ -456,6 +456,38 @@ class ConnectionHandler:
         except (TypeError, ValueError):
             return 0.0
 
+    def _experiment_prewarm_timing_log_suffix(self) -> str:
+        def _as_float(value) -> float:
+            try:
+                return max(0.0, float(value or 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        started_at = _as_float(getattr(self, "experiment_prewarm_started_at", 0.0))
+        if started_at <= 0:
+            return ""
+
+        now = time.time()
+        parts = [f"elapsed_ms={int(max(0.0, now - started_at) * 1000)}"]
+
+        minimal_ready_at = _as_float(
+            getattr(self, "experiment_prewarm_minimal_ready_at", 0.0)
+        )
+        if minimal_ready_at > 0:
+            parts.append(
+                f"minimal_ready_ms={int(max(0.0, minimal_ready_at - started_at) * 1000)}"
+            )
+
+        completed_at = _as_float(
+            getattr(self, "experiment_prewarm_completed_at", 0.0)
+        )
+        if completed_at > 0:
+            parts.append(
+                f"completed_ms={int(max(0.0, completed_at - started_at) * 1000)}"
+            )
+
+        return f", {', '.join(parts)}" if parts else ""
+
     def _experiment_prewarm_debug_delay_seconds(self) -> float:
         raw_value = (
             self.config.get("codex_app", {}).get("prewarm_debug_delay_seconds", 0)
@@ -1309,6 +1341,9 @@ class ConnectionHandler:
         if not session_id:
             return False
 
+        if bool(getattr(self, "_experiment_graph_refresh_required", False)):
+            return True
+
         recent_photo_state = self._recent_server_photo_confirmation_state()
         if isinstance(recent_photo_state, dict) and not bool(
             recent_photo_state.get("graph_advanced")
@@ -1383,6 +1418,7 @@ class ConnectionHandler:
             self.experiment_current_step_id = current_step_id
             if self.experiment_resume_recovery_required:
                 self.experiment_resume_latest_current_step_id = current_step_id
+        self._experiment_graph_refresh_required = False
 
         recent_photo_state = self._recent_server_photo_confirmation_state()
         if isinstance(recent_photo_state, dict) and not bool(
@@ -1926,6 +1962,7 @@ class ConnectionHandler:
             "experiment prewarm deep warming begin: "
             f"device_id={self.device_id}, trigger={self.experiment_prewarm_trigger}, "
             f"session_id={session_id}, current_step_id={self.experiment_current_step_id}"
+            f"{self._experiment_prewarm_timing_log_suffix()}"
         )
 
         overview_payload = await self._call_experiment_graph_tool(
@@ -1969,6 +2006,7 @@ class ConnectionHandler:
             f"session_id={self.experiment_session_id}, "
             f"current_step_id={self.experiment_current_step_id}, "
             f"{self._experiment_context_presence_log_fields()}"
+            f"{self._experiment_prewarm_timing_log_suffix()}"
         )
 
     async def prewarm_experiment_session(self, trigger: str = "", force: bool = False) -> bool:
@@ -2249,6 +2287,7 @@ class ConnectionHandler:
                     f"current_step_id={self.experiment_current_step_id}, "
                     f"completed_steps={completed_steps_count}/{total_steps or '?'}, "
                     f"{self._experiment_context_presence_log_fields()}"
+                    f"{self._experiment_prewarm_timing_log_suffix()}"
                 )
 
                 await self._run_experiment_prewarm_deep_stage(
@@ -2314,6 +2353,7 @@ class ConnectionHandler:
                 f"session_id={self.experiment_session_id}, "
                 f"ready_level={self.experiment_prewarm_ready_level}, "
                 f"status={self.experiment_prewarm_status}"
+                f"{self._experiment_prewarm_timing_log_suffix()}"
             )
             return self._experiment_prewarm_route_context(wait_result="ready")
 
@@ -2341,6 +2381,7 @@ class ConnectionHandler:
                 f"session_id={self.experiment_session_id}, "
                 f"ready_level={self.experiment_prewarm_ready_level}, "
                 f"status={self.experiment_prewarm_status}"
+                f"{self._experiment_prewarm_timing_log_suffix()}"
             )
             return self._experiment_prewarm_route_context(wait_result=wait_result)
 
@@ -2356,6 +2397,7 @@ class ConnectionHandler:
             f"device_id={self.device_id}, trigger={trigger}, timeout_seconds={timeout_seconds}, "
             f"status={self.experiment_prewarm_status}, "
             f"ready_level={self.experiment_prewarm_ready_level}"
+            f"{self._experiment_prewarm_timing_log_suffix()}"
         )
         minimal_ready_event = await self._get_experiment_prewarm_minimal_ready_event()
         wait_task = asyncio.create_task(minimal_ready_event.wait())
@@ -2380,6 +2422,7 @@ class ConnectionHandler:
                     f"status={self.experiment_prewarm_status}, "
                     f"current_step_id={self.experiment_current_step_id}, "
                     f"{self._experiment_context_presence_log_fields()}"
+                    f"{self._experiment_prewarm_timing_log_suffix()}"
                 )
             elif task in done:
                 wait_result = (
@@ -2394,6 +2437,7 @@ class ConnectionHandler:
                     f"ready_level={self.experiment_prewarm_ready_level}, "
                     f"status={self.experiment_prewarm_status}, "
                     f"{self._experiment_context_presence_log_fields()}"
+                    f"{self._experiment_prewarm_timing_log_suffix()}"
                 )
             else:
                 wait_result = "timeout"
@@ -2402,6 +2446,7 @@ class ConnectionHandler:
                     f"device_id={self.device_id}, trigger={trigger}, timeout_seconds={timeout_seconds}, "
                     f"status={self.experiment_prewarm_status}, "
                     f"ready_level={self.experiment_prewarm_ready_level}"
+                    f"{self._experiment_prewarm_timing_log_suffix()}"
                 )
         except asyncio.CancelledError:
             raise
@@ -2410,6 +2455,7 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).warning(
                 "experiment prewarm wait failed: "
                 f"device_id={self.device_id}, trigger={trigger}, error={exc}"
+                f"{self._experiment_prewarm_timing_log_suffix()}"
             )
         finally:
             if not wait_task.done():
@@ -3505,6 +3551,7 @@ class ConnectionHandler:
                             f"experiment_current_step_id={prewarm_route_context.get('experiment_current_step_id', '')}, "
                             f"recovery_latest_current_step_id={prewarm_route_context.get('experiment_resume_latest_current_step_id', '')}, "
                             f"{self._experiment_context_presence_log_fields()}"
+                            f"{self._experiment_prewarm_timing_log_suffix()}"
                         )
                         llm_route_kwargs.update(prewarm_route_context)
                     except Exception as exc:

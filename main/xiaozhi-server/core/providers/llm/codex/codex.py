@@ -724,6 +724,23 @@ def _experiment_prompt_block(
             "Do not ask to retake the same sample photo unless the user explicitly asks for a retake "
             "or a fresh experiment_graph read clearly proves the confirmation is still missing."
         )
+    if current_step_id:
+        parts.append(
+            "Experiment graph alignment guard:\n"
+            f"- Treat trusted current_step_id={current_step_id} as the only safe step anchor until this turn's tool calls prove a change.\n"
+            "- Do not verbally move the student to a later experiment step unless the current turn actually called experiment_graph state/flow tools and their results support that move.\n"
+            "- When the student reports completion, observations, colors, timings, photos, or scan results for the current step, update experiment_graph records first, then narrate the next step.\n"
+            "- Do not narrate backend bookkeeping such as '我先记下…', '我接着确认记录项…', or '我把这一步写回图谱…'; either give the next student-facing instruction or ask only for the still-missing field.\n"
+            "- If you have not called get_step, get_state, get_progress_summary, get_current_progress, start_trial, add_field, add_fields, finish_trial, can_proceed, proceed_to_next_step, redirect_to_step, redo_trial, or modify_record on this turn, stay anchored to the trusted current step instead of improvising later steps from old dialogue, prefetched summaries, or memory."
+        )
+    parts.append(
+        "UV-Vis execution guard:\n"
+        "- The UV-Vis MCP tools are available in this runtime.\n"
+        "- For shared dark current, air baseline, and pure-water blank preparation, use uvvis_measure_spectra with ready_for_samples=false.\n"
+        "- For the actual batch spectra measurement after the cuvettes are loaded, use uvvis_measure_spectra with ready_for_samples=true.\n"
+        "- For kinetics runs, use uvvis_measure_kinetics. Use uvvis_session when you need to acquire or refresh the UV-Vis lease/session first.\n"
+        "- Do not say you are starting a UV-Vis scan, baseline, or kinetics run unless one of those UV-Vis tools was actually called on the current turn."
+    )
     parts.append(reuse_rule)
     return "\n\n".join(parts)
 

@@ -2,6 +2,8 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
+import types
 import unittest
 from pathlib import Path
 
@@ -9,7 +11,10 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from core.connection import ConnectionHandler
+sys.modules.setdefault("opuslib_next", types.ModuleType("opuslib_next"))
+fake_pydub_module = types.ModuleType("pydub")
+fake_pydub_module.AudioSegment = object
+sys.modules.setdefault("pydub", fake_pydub_module)
 
 
 class _FakeLogger:
@@ -27,6 +32,53 @@ class _FakeLogger:
 
     def error(self, *args, **kwargs):
         return None
+
+
+fake_logger_module = types.ModuleType("config.logger")
+fake_logger_module.setup_logging = lambda: _FakeLogger()
+fake_logger_module.build_module_string = lambda *args, **kwargs: ""
+fake_logger_module.create_connection_logger = lambda *args, **kwargs: _FakeLogger()
+sys.modules.setdefault("config.logger", fake_logger_module)
+
+fake_hello_module = types.ModuleType("core.handle.helloHandle")
+
+
+async def _fake_check_wakeup_words(conn, filtered_text):
+    return False
+
+
+fake_hello_module.checkWakeupWords = _fake_check_wakeup_words
+fake_hello_module.handleHelloMessage = lambda *args, **kwargs: None
+sys.modules.setdefault("core.handle.helloHandle", fake_hello_module)
+
+fake_send_audio_module = types.ModuleType("core.handle.sendAudioHandle")
+fake_send_audio_module.send_stt_message = lambda *args, **kwargs: None
+fake_send_audio_module.send_tts_message = lambda *args, **kwargs: None
+fake_send_audio_module.sendAudioMessage = lambda *args, **kwargs: None
+fake_send_audio_module.SentenceType = types.SimpleNamespace(
+    FIRST="FIRST",
+    LAST="LAST",
+)
+sys.modules.setdefault("core.handle.sendAudioHandle", fake_send_audio_module)
+
+fake_device_mcp_module = types.ModuleType("core.providers.tools.device_mcp")
+fake_device_mcp_module.call_mcp_tool = lambda *args, **kwargs: None
+fake_device_mcp_module.handle_mcp_message = lambda *args, **kwargs: None
+fake_device_mcp_module.DeviceMCPExecutor = object
+sys.modules.setdefault("core.providers.tools.device_mcp", fake_device_mcp_module)
+sys.modules.setdefault("portalocker", types.ModuleType("portalocker"))
+
+fake_loadplugins_module = types.ModuleType("plugins_func.loadplugins")
+fake_loadplugins_module.auto_import_modules = lambda *args, **kwargs: None
+sys.modules.setdefault("plugins_func.loadplugins", fake_loadplugins_module)
+
+fake_register_module = types.ModuleType("plugins_func.register")
+fake_register_module.Action = object
+fake_register_module.ActionResponse = object
+fake_register_module.all_function_registry = {}
+sys.modules.setdefault("plugins_func.register", fake_register_module)
+
+from core.connection import ConnectionHandler
 
 
 class ExperimentDeepPrefetchTest(unittest.IsolatedAsyncioTestCase):
@@ -228,6 +280,43 @@ class ExperimentDeepPrefetchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("list_steps", handler.experiment_list_steps["tool"])
         self.assertEqual("get_schema", handler.experiment_schema["tool"])
         self.assertIsNone(handler.experiment_reference)
+
+    async def test_prewarm_wait_budget_is_maximum_not_fixed_delay(self):
+        handler = self._make_handler()
+        handler.experiment_prewarm_status = "completed"
+        handler.experiment_prewarm_ready_level = "completed"
+        handler.experiment_prewarm_started_at = time.time() - 0.02
+        handler.experiment_prewarm_minimal_ready_at = time.time() - 0.01
+
+        started = time.perf_counter()
+        context = await handler.wait_for_experiment_prewarm_for_real_user_turn(3.0)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual("ready", context["experiment_prewarm_wait_result"])
+        self.assertLess(elapsed, 0.2)
+
+    async def test_prewarm_wait_timeout_respects_budget_when_not_ready(self):
+        handler = self._make_handler()
+        handler.experiment_prewarm_status = "minimal_warming"
+        handler.experiment_prewarm_ready_level = "none"
+        handler.experiment_session_id = ""
+        handler.experiment_current_step_id = ""
+        handler.experiment_prewarm_started_at = time.time()
+        handler.experiment_prewarm_minimal_ready_at = 0.0
+        handler.experiment_prewarm_completed_at = 0.0
+        handler.experiment_prewarm_minimal_ready_event = asyncio.Event()
+        handler.experiment_prewarm_task = asyncio.create_task(asyncio.sleep(0.05))
+
+        started = time.perf_counter()
+        try:
+            context = await handler.wait_for_experiment_prewarm_for_real_user_turn(0.01)
+        finally:
+            await handler.experiment_prewarm_task
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual("timeout", context["experiment_prewarm_wait_result"])
+        self.assertGreaterEqual(elapsed, 0.005)
+        self.assertLess(elapsed, 0.2)
 
 
 if __name__ == "__main__":

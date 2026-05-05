@@ -33,6 +33,7 @@ sys.modules.setdefault("config.logger", fake_logger_module)
 
 from core.providers.llm.codex.codex import (
     _CodexSession,
+    _experiment_prompt_block,
     _recoverable_stderr_reason,
     _should_suppress_stderr_warning,
 )
@@ -199,6 +200,32 @@ class CodexPromptStateTest(unittest.TestCase):
             "Use this deep-prefetched detail context first before calling list_steps",
             prompt_text,
         )
+
+    def test_experiment_prompt_block_includes_graph_alignment_and_uvvis_execution_guards(self):
+        prompt_text = _experiment_prompt_block(
+            {
+                "experiment_prewarm_wait_result": "ready",
+                "experiment_prewarm_status": "completed",
+                "experiment_prewarm_ready_level": "completed",
+                "experiment_session_id": "exp-1",
+                "experiment_current_step_id": "step_prepare_setup_all",
+                "experiment_current_step_summary": '{"step":"prepare"}',
+            },
+            "\u5f00\u59cb\u626b\u63cf",
+        )
+
+        self.assertIn("Experiment graph alignment guard:", prompt_text)
+        self.assertIn(
+            "Do not verbally move the student to a later experiment step unless the current turn actually called experiment_graph state/flow tools",
+            prompt_text,
+        )
+        self.assertIn(
+            "Do not narrate backend bookkeeping such as '我先记下…'",
+            prompt_text,
+        )
+        self.assertIn("UV-Vis execution guard:", prompt_text)
+        self.assertIn("uvvis_measure_spectra with ready_for_samples=false", prompt_text)
+        self.assertIn("uvvis_measure_kinetics", prompt_text)
 
     def test_recent_photo_confirmation_context_is_included_on_later_turn(self):
         session = self._make_session()
