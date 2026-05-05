@@ -362,6 +362,101 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("H2O2", result)
         self.assertNotIn("丁达尔", result)
 
+    def test_conn_runtime_spoken_text_uses_yaml_step_cache_when_graph_snapshot_missing(self):
+        conn = _FakeConn()
+        conn.sentence_id = "turn-graph-align-3"
+        conn.experiment_current_step_id = "step_sample1_2_add_kbr_water_nabh4"
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_sample1_2_add_kbr_water_nabh4",
+                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "prompts": {
+                    "instruction": (
+                        "先加入并混匀 KBr 与纯水，再快速加入 NaBH4。"
+                        "从加入 NaBH4 的瞬间开始计时，持续搅拌并观察颜色变化，待颜色稳定后再汇报结果。"
+                    )
+                },
+            }
+        ]
+        conn.dialogue.put(Message(role="user", content="全部确认都做好了。"))
+
+        result = textUtils.prepare_runtime_spoken_text_for_conn(
+            conn,
+            "现在做这一步：1号样品：先在加入 NaBH4 的同时开始计时，持续搅拌，持续观察颜色变化。",
+        )
+
+        self.assertIn("KBr", result)
+        self.assertIn("纯水", result)
+        self.assertIn("NaBH4", result)
+        self.assertNotIn("只剩后半句", result)
+
+    def test_cached_experiment_step_meta_prefers_yaml_instruction_and_photo_prompt(self):
+        conn = _FakeConn()
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_sample1_5_photo_confirm",
+                    "title": "1号样品：颜色稳定后拍照记录",
+                    "prompts": {
+                        "instruction": "拍照记录当前样品颜色。",
+                    },
+                }
+            }
+        }
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_sample1_5_photo_confirm",
+                "title": "1号样品：颜色稳定后拍照记录",
+                "prompts": {
+                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                },
+            },
+            {
+                "id": "step_sample1_2_add_kbr_water_nabh4",
+                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "prompts": {
+                    "instruction": "先加入并混匀 KBr 与纯水，再快速加入 NaBH4。",
+                },
+            },
+        ]
+
+        meta = intentHandler._get_cached_experiment_step_meta(conn)
+        reply = intentHandler._compose_experiment_step_reply(meta, mode="next")
+
+        self.assertIn("颜色稳定后拍照", meta["instruction"])
+        self.assertEqual("1号样品颜色已经稳定，现在可以拍照吗？", reply)
+
+    def test_cached_experiment_step_meta_prefers_yaml_instruction_for_sample_step(self):
+        conn = _FakeConn()
+        conn.experiment_current_step = {
+            "result": {
+                "step": {
+                    "id": "step_sample1_2_add_kbr_water_nabh4",
+                    "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                    "prompts": {
+                        "instruction": "先在加入 NaBH4 的同时开始计时，持续搅拌，持续观察颜色变化。",
+                    },
+                }
+            }
+        }
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_sample1_2_add_kbr_water_nabh4",
+                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "prompts": {
+                    "instruction": "先加入并混匀 KBr 与纯水，再快速加入 NaBH4，从加入 NaBH4 的瞬间开始计时并持续搅拌。",
+                },
+            }
+        ]
+
+        meta = intentHandler._get_cached_experiment_step_meta(conn)
+        reply = intentHandler._compose_experiment_step_reply(meta, mode="guide")
+
+        self.assertIn("KBr", meta["instruction"])
+        self.assertIn("纯水", meta["instruction"])
+        self.assertIn("KBr", reply)
+        self.assertIn("纯水", reply)
+
     def test_conn_runtime_spoken_text_bypasses_ready_guard_for_same_sentence(self):
         conn = _FakeConn()
         conn.dialogue.put(
@@ -433,6 +528,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "银纳米粒子的制备及其催化还原对硝基苯酚的反应动力学探究",
             result,
         )
+
+    def test_normalize_tts_text_reads_borohydride_with_peng_pronunciation(self):
+        result = textUtils.normalize_tts_text("加入硼氢化钠后，再补加NaBH4。")
+
+        self.assertEqual("加入彭氢化钠后，再补加彭氢化钠。", result)
+
+    def test_explicit_completion_report_treats_all_mixed_uniformly_as_done(self):
+        self.assertTrue(intentHandler._looks_like_explicit_completion_report("已经全部混匀"))
 
     def test_payload_looks_busy_or_inaccessible_ignores_idle_lease_metadata(self):
         payload = {
@@ -5197,6 +5300,180 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("颜色", spoken[0])
         self.assertIn("时间", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+
+    async def test_strict_graph_observation_report_writes_current_step_and_advances_to_photo(self):
+        conn = _FakeConn()
+        conn.config = {"experiment_fast_path_enabled": False}
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {"advanced": False}
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            if tool_name == "get_step":
+                if not state["advanced"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "step": {
+                                "id": "step_sample1_2_add_kbr_water_nabh4",
+                                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                                "interaction": {
+                                    "fast_path_mode": "observation_record_step",
+                                    "capabilities": ["step_confirmation", "observation_capture"],
+                                },
+                                "prompts": {
+                                    "instruction": "先在加入 NaBH4 的同时开始计时，持续搅拌，持续观察颜色变化。",
+                                },
+                            },
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": "step_sample1_5_photo_confirm",
+                            "title": "1号样品：颜色稳定后拍照记录",
+                            "interaction": {
+                                "fast_path_mode": "photo_confirmation_step",
+                            },
+                            "prompts": {
+                                "instruction": "拍照记录当前样品颜色。",
+                            },
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {"result": {"ok": True, "progress": None}}
+            if tool_name == "start_trial":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": [
+                                "KBr_volume",
+                                "H2O_volume",
+                                "mixed_uniformly",
+                                "nabh4_volume",
+                                "added_quickly",
+                                "color",
+                                "reaction_time",
+                                "color_stable",
+                            ]
+                        },
+                    }
+                }
+            if tool_name == "get_schema":
+                if not state["advanced"]:
+                    return {
+                        "result": {
+                            "ok": True,
+                            "schema_view": [
+                                {"name": "KBr_volume", "type": "bool", "description": "已按当前样品目标用量加入 KBr"},
+                                {"name": "H2O_volume", "type": "bool", "description": "已按当前样品目标用量加入纯水"},
+                                {"name": "mixed_uniformly", "type": "bool", "description": "加入 KBr 和纯水后已搅拌均匀"},
+                                {"name": "nabh4_volume", "type": "bool", "description": "已准确加入 2.50 mL NaBH4"},
+                                {"name": "added_quickly", "type": "bool", "description": "已快速完成 NaBH4 加入"},
+                                {"name": "color", "type": "string", "description": "当前样品最终颜色"},
+                                {"name": "reaction_time", "type": "float", "description": "当前样品颜色稳定所用时间"},
+                                {"name": "color_stable", "type": "bool", "description": "已确认颜色稳定"},
+                            ],
+                        }
+                    }
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {"name": "photo_taken", "type": "bool", "description": "已完成拍照"},
+                            {"name": "color_confirmed_by_photo", "type": "bool", "description": "已基于照片确认当前样品颜色稳定"},
+                        ],
+                    }
+                }
+            if tool_name == "add_fields":
+                self.assertEqual(
+                    {
+                        "KBr_volume": True,
+                        "H2O_volume": True,
+                        "mixed_uniformly": True,
+                        "nabh4_volume": True,
+                        "added_quickly": True,
+                        "color": "黑灰色",
+                        "reaction_time": 1.0,
+                        "color_stable": True,
+                    },
+                    arguments["data"],
+                )
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                return {"result": {"ok": True}}
+            if tool_name == "can_proceed":
+                return {"result": {"ok": True}}
+            if tool_name == "proceed_to_next_step":
+                state["advanced"] = True
+                conn.experiment_current_step_id = "step_sample1_5_photo_confirm"
+                return {"result": {"ok": True}}
+            if tool_name == "get_progress_summary":
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": "step_sample1_5_photo_confirm",
+                                "title": "1号样品：颜色稳定后拍照记录",
+                            },
+                            "current_step_details": {
+                                "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                            },
+                        },
+                    }
+                }
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_sample1_2_add_kbr_water_nabh4",
+                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "prompts": {
+                    "instruction": "先加入并混匀 KBr 与纯水，再快速加入 NaBH4，从加入 NaBH4 的瞬间开始计时并持续搅拌。",
+                },
+            },
+            {
+                "id": "step_sample1_5_photo_confirm",
+                "title": "1号样品：颜色稳定后拍照记录",
+                "interaction": {"fast_path_mode": "photo_confirmation_step"},
+                "prompts": {
+                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                },
+            },
+        ]
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_strict_graph_intent(
+                    conn,
+                    "黑灰色一分钟",
+                    "黑灰色一分钟",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["黑灰色一分钟"], sent)
+        self.assertEqual(["1号样品颜色已经稳定，现在可以拍照吗？"], spoken)
+        self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+        self.assertIn("finish_trial", [name for name, _args, _priority in tool_calls])
+        self.assertIn("proceed_to_next_step", [name for name, _args, _priority in tool_calls])
 
     async def test_global_completion_phrase_all_done_advances_after_writeback(self):
         conn = _FakeConn()

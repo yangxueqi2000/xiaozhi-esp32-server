@@ -345,6 +345,45 @@ def _extract_experiment_step_interaction(payload) -> dict:
     return interaction
 
 
+def _extract_yaml_step_prompt_value(step: dict, key: str) -> str:
+    prompts = step.get("prompts") if isinstance(step.get("prompts"), dict) else {}
+    value = prompts.get(key)
+    if isinstance(value, list):
+        return str(value[0] or "").strip() if value else ""
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _enrich_experiment_step_meta_from_yaml(conn, step_meta: dict) -> dict:
+    meta = dict(step_meta or {})
+    step_id = str(meta.get("step_id", "") or "").strip()
+    if not step_id:
+        return meta
+
+    step = _resolve_experiment_step_by_id(conn).get(step_id)
+    if not isinstance(step, dict):
+        return meta
+
+    yaml_title = str(step.get("title", "") or "").strip()
+    yaml_description = str(step.get("description", "") or "").strip()
+    yaml_instruction = _extract_yaml_step_prompt_value(step, "instruction")
+    yaml_safety = _extract_yaml_step_prompt_value(step, "safety")
+    yaml_tip = _extract_yaml_step_prompt_value(step, "tips")
+
+    if yaml_title:
+        meta["title"] = yaml_title
+    if yaml_description:
+        meta["description"] = yaml_description
+    if yaml_instruction:
+        meta["instruction"] = yaml_instruction
+    if yaml_safety:
+        meta["safety"] = yaml_safety
+    if yaml_tip:
+        meta["tip"] = yaml_tip
+    return meta
+
+
 def _merge_experiment_step_meta(primary: dict, fallback: dict) -> dict:
     merged = dict(fallback or {})
     for key, value in (primary or {}).items():
@@ -358,7 +397,10 @@ def _get_cached_experiment_step_meta(conn) -> dict:
     fallback = _extract_experiment_step_meta(
         getattr(conn, "experiment_progress_summary", None)
     )
-    return _merge_experiment_step_meta(primary, fallback)
+    return _enrich_experiment_step_meta_from_yaml(
+        conn,
+        _merge_experiment_step_meta(primary, fallback),
+    )
 
 
 def _extract_experiment_current_progress(payload):
@@ -545,6 +587,22 @@ def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
 
     if not instruction:
         return ""
+
+    if _step_meta_looks_like_photo_confirmation(step_meta):
+        sample_index = _extract_sample_index_from_text(
+            " ".join(
+                value
+                for value in (
+                    title,
+                    instruction,
+                    _first_nonempty_text(step_meta.get("description", "")),
+                    str(step_meta.get("step_id", "") or "").strip(),
+                )
+                if value
+            )
+        )
+        sample_name = _format_sample_name(sample_index, "当前样品")
+        return f"{sample_name}颜色已经稳定，现在可以拍照吗？"
 
     if title and title not in instruction:
         core = f"{title}。{instruction}"
@@ -1314,9 +1372,12 @@ async def _load_experiment_step_meta(conn) -> dict:
 
     conn.experiment_current_step = step_payload
     conn.experiment_progress_summary = progress_payload
-    loaded_meta = _merge_experiment_step_meta(
-        _extract_experiment_step_meta(step_payload),
-        _extract_experiment_step_meta(progress_payload),
+    loaded_meta = _enrich_experiment_step_meta_from_yaml(
+        conn,
+        _merge_experiment_step_meta(
+            _extract_experiment_step_meta(step_payload),
+            _extract_experiment_step_meta(progress_payload),
+        ),
     )
     if hasattr(conn, "_extract_experiment_current_step_id"):
         current_step_id = conn._extract_experiment_current_step_id(
@@ -1389,9 +1450,12 @@ async def _refresh_experiment_step_cache(conn, session_id: str):
             if getattr(conn, "experiment_resume_recovery_required", False):
                 conn.experiment_resume_latest_current_step_id = current_step_id
     conn._experiment_graph_refresh_required = False
-    return _merge_experiment_step_meta(
-        _extract_experiment_step_meta(step_payload),
-        _extract_experiment_step_meta(progress_payload),
+    return _enrich_experiment_step_meta_from_yaml(
+        conn,
+        _merge_experiment_step_meta(
+            _extract_experiment_step_meta(step_payload),
+            _extract_experiment_step_meta(progress_payload),
+        ),
     )
 
 
@@ -1530,6 +1594,12 @@ def _looks_like_explicit_completion_report(filtered_text: str) -> bool:
         "全都做好",
         "做好了",
         "做完了",
+        "全部混匀",
+        "都混匀了",
+        "全都混匀了",
+        "已经全部混匀",
+        "已全部混匀",
+        "搅拌好了",
     )
     return _contains_any(norm, completion_tokens)
 
@@ -1611,6 +1681,187 @@ def _build_experiment_current_step_confirmation_fields(
     return result
 
 
+_CHINESE_NUMERIC_CHAR_MAP = {
+    "零": "0",
+    "一": "1",
+    "二": "2",
+    "两": "2",
+    "三": "3",
+    "四": "4",
+    "五": "5",
+    "六": "6",
+    "七": "7",
+    "八": "8",
+    "九": "9",
+}
+
+
+def _parse_small_chinese_float(token: str) -> float | None:
+    text = str(token or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return _extract_float_value(text)
+
+    normalized = text.replace("两", "二")
+    if normalized == "半":
+        return 0.5
+    if "点" in normalized:
+        left, right = normalized.split("点", 1)
+        if not right:
+            return None
+        left_value = _parse_small_chinese_integer(left or "零")
+        if left_value is None:
+            return None
+        decimal_digits = "".join(
+            _CHINESE_NUMERIC_CHAR_MAP.get(char, "")
+            for char in right
+            if char in _CHINESE_NUMERIC_CHAR_MAP
+        )
+        if not decimal_digits:
+            return None
+        return _extract_float_value(f"{left_value}.{decimal_digits}")
+
+    integer_value = _parse_small_chinese_integer(normalized)
+    if integer_value is None:
+        return None
+    return float(integer_value)
+
+
+def _extract_observation_duration_minutes(filtered_text: str) -> float | None:
+    text = textUtils.normalize_spoken_text(filtered_text or "")
+    if not text:
+        return None
+
+    numeric_match = re.search(r"(\d+(?:\.\d+)?)\s*(分钟|分|秒钟|秒)", text)
+    if numeric_match:
+        value = _extract_float_value(numeric_match.group(1))
+        if value is None:
+            return None
+        unit = numeric_match.group(2)
+        return round(value / 60.0, 4) if "秒" in unit else value
+
+    chinese_match = re.search(
+        r"([零一二两三四五六七八九十点半]+)\s*(分钟|分|秒钟|秒)",
+        text,
+    )
+    if not chinese_match:
+        return None
+    value = _parse_small_chinese_float(chinese_match.group(1))
+    if value is None:
+        return None
+    unit = chinese_match.group(2)
+    return round(value / 60.0, 4) if "秒" in unit else value
+
+
+def _field_matches_observation_semantics(field_name: str, field: dict, tokens: tuple[str, ...]) -> bool:
+    haystack = _normalize_confirmation_signature(
+        f"{field_name} {_clean_field_description(field.get('description', ''))}"
+    )
+    if not haystack:
+        return False
+    return _contains_any(haystack, tokens)
+
+
+def _extract_observation_color_value(filtered_text: str) -> str:
+    text = textUtils.normalize_spoken_text(filtered_text or "")
+    norm = _normalize_confirmation_signature(filtered_text)
+    if (
+        not text
+        or _looks_like_question_reply(filtered_text)
+        or _looks_like_pure_short_completion_control(norm)
+        or _looks_like_explicit_completion_report(filtered_text)
+        or _looks_like_explicit_added_completion_report(filtered_text)
+    ):
+        return ""
+
+    cleaned = re.sub(r"\d+(?:\.\d+)?\s*(分钟|分|秒钟|秒)", "", text)
+    cleaned = re.sub(r"[零一二两三四五六七八九十点半]+\s*(分钟|分|秒钟|秒)", "", cleaned)
+    cleaned = re.sub(r"(颜色|最终|稳定|用了|用时|大约|大概|约|是|为|记作|已经|确认|样品)", "", cleaned)
+    cleaned = re.sub(r"[0-9一二三四五六七八九十]+\s*号", "", cleaned)
+    cleaned = re.sub(r"\s+", "", cleaned).strip("，,。；;：: ")
+    if not cleaned:
+        return ""
+    if len(cleaned) > 12:
+        return ""
+    if _contains_any(cleaned, ("可以拍照", "下一步", "继续", "然后呢", "干嘛", "没错", "对")):
+        return ""
+    return cleaned
+
+
+def _step_supports_observation_report(step_payload, schema_by_name: dict) -> bool:
+    interaction = _extract_experiment_step_interaction(step_payload)
+    fast_path_mode = str(interaction.get("fast_path_mode", "")).strip().lower()
+    capabilities = {
+        str(item or "").strip().lower()
+        for item in (interaction.get("capabilities") or [])
+    }
+    if fast_path_mode == "observation_record_step" or "observation_capture" in capabilities:
+        return True
+
+    for field_name, field in (schema_by_name or {}).items():
+        if _field_matches_observation_semantics(
+            field_name,
+            field,
+            ("最终颜色", "颜色稳定所用时间", "反应时间", "颜色稳定"),
+        ):
+            return True
+    return False
+
+
+def _build_experiment_current_step_observation_fields(
+    filtered_text: str,
+    schema_by_name: dict,
+    missing_fields,
+    *,
+    allow_bool_completion: bool = False,
+) -> dict:
+    if not allow_bool_completion:
+        return {}
+
+    observation_fields = {}
+    duration_minutes = _extract_observation_duration_minutes(filtered_text)
+    color_value = _extract_observation_color_value(filtered_text)
+
+    color_field_name = ""
+    time_field_name = ""
+    stable_field_name = ""
+    bool_field_names = []
+    for field_name in missing_fields or []:
+        field = schema_by_name.get(field_name, {})
+        type_text = str(field.get("type", "")).strip().lower()
+        if type_text in {"bool", "boolean"}:
+            bool_field_names.append(field_name)
+            if _field_matches_observation_semantics(field_name, field, ("颜色稳定", "确认颜色稳定")):
+                stable_field_name = stable_field_name or field_name
+            continue
+        if type_text in {"string", "str"} and _field_matches_observation_semantics(
+            field_name, field, ("最终颜色", "颜色")
+        ):
+            color_field_name = color_field_name or field_name
+        if type_text in {"float", "number", "int", "integer"} and _field_matches_observation_semantics(
+            field_name,
+            field,
+            ("颜色稳定所用时间", "反应时间", "稳定时间", "所用时间"),
+        ):
+            time_field_name = time_field_name or field_name
+
+    if color_field_name and color_value:
+        observation_fields[color_field_name] = color_value
+    if time_field_name and duration_minutes is not None:
+        observation_fields[time_field_name] = duration_minutes
+    if stable_field_name and (
+        duration_minutes is not None or "稳定" in textUtils.normalize_spoken_text(filtered_text or "")
+    ):
+        observation_fields[stable_field_name] = True
+
+    if color_value and duration_minutes is not None:
+        for field_name in bool_field_names:
+            observation_fields.setdefault(field_name, True)
+
+    return observation_fields
+
+
 async def _try_apply_current_confirmation_report(
     conn,
     filtered_text: str,
@@ -1667,6 +1918,20 @@ async def _try_apply_current_confirmation_report(
         missing_fields,
         allow_confirmation_autofill=True,
     )
+    if _step_supports_observation_report(step_payload, schema_by_name):
+        observation_fields = _build_experiment_current_step_observation_fields(
+            filtered_text,
+            schema_by_name,
+            missing_fields,
+            allow_bool_completion=True,
+        )
+        write_fields.update(
+            {
+                key: value
+                for key, value in observation_fields.items()
+                if value not in (None, "")
+            }
+        )
     if not write_fields:
         bool_prompts = []
         for field_name in missing_fields or []:

@@ -556,6 +556,8 @@ _DEFAULT_TTS_SPOKEN_ALIASES = {
     "H2SO3": "亚硫酸",
     "H3PO4": "磷酸",
     "NaBH4": "硼氢化钠",
+    # Bailian TTS occasionally misreads "硼" here, so use a homophone for speech only.
+    "硼氢化钠": "彭氢化钠",
     "Na3Cit": "柠檬酸钠",
     "NH3·H2O": "氨水",
     "NH4OH": "氨水",
@@ -1583,6 +1585,26 @@ def _compose_trusted_current_step_reply(conn) -> str:
         title, instruction = _extract_experiment_step_snapshot(payload)
         if title or instruction:
             break
+
+    if not (title or instruction):
+        step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+        yaml_steps = getattr(conn, "_experiment_yaml_steps_cache", None)
+        if step_id and isinstance(yaml_steps, list):
+            for step in yaml_steps:
+                if not isinstance(step, dict):
+                    continue
+                candidate_step_id = str(step.get("id", "") or "").strip()
+                if candidate_step_id != step_id:
+                    continue
+                title = str(step.get("title", "") or "").strip()
+                prompts = step.get("prompts") if isinstance(step.get("prompts"), dict) else {}
+                instruction = str(
+                    prompts.get("instruction")
+                    or step.get("instruction")
+                    or step.get("description")
+                    or ""
+                ).strip()
+                break
 
     parts = []
     if title:

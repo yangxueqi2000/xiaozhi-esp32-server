@@ -454,6 +454,42 @@ class SendAudioTimingTest(unittest.TestCase):
         self.assertEqual("fallback subtitle for last audio", sentence_payload["text"])
         self.assertEqual("stop", stop_payload["state"])
 
+    def test_last_audio_message_skips_stop_while_followup_tts_is_still_processing(self):
+        ws = _DummyWebSocket()
+        conn = SimpleNamespace(
+            session_id="sess-6",
+            sentence_id="turn-4",
+            websocket=ws,
+            config={"enable_stop_tts_notify": False},
+            logger=_DummyLogger(),
+            tts=SimpleNamespace(
+                tts_audio_first_sentence=False,
+                has_inflight_tts_text_processing=lambda: True,
+            ),
+            client_is_speaking=True,
+            close_after_chat=False,
+            clearSpeakStatus=lambda: None,
+            has_external_busy=lambda: False,
+        )
+
+        asyncio.run(
+            sendAudioMessage(
+                conn,
+                SentenceType.LAST,
+                [],
+                "follow-up subtitle still synthesizing",
+                sentence_id="turn-4",
+            )
+        )
+
+        self.assertEqual(1, len(ws.messages))
+        sentence_payload = json.loads(ws.messages[0])
+        self.assertEqual("sentence_start", sentence_payload["state"])
+        self.assertEqual(
+            "follow-up subtitle still synthesizing",
+            sentence_payload["text"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

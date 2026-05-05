@@ -175,42 +175,46 @@ class TTSProvider(TTSProviderBase):
         while not self.conn.stop_event.is_set():
             try:
                 message = self.tts_text_queue.get(timeout=1)
-                if message.sentence_type == SentenceType.FIRST:
-                    self.conn.client_abort = False
+                self._mark_tts_text_processing_start()
+                try:
+                    if message.sentence_type == SentenceType.FIRST:
+                        self.conn.client_abort = False
 
-                if self.conn.client_abort:
-                    logger.bind(tag=TAG).info(
-                        "Received client abort, skip current Bailian TTS task."
-                    )
-                    continue
-
-                if message.sentence_type == SentenceType.FIRST:
-                    self.tts_stop_request = False
-                    self.processed_chars = 0
-                    self.tts_text_buff = []
-                    self.is_first_sentence = True
-                    # Each new TTS turn must re-enter the frontend/device speaking
-                    # state, otherwise later replies may keep the client in
-                    # listening mode and the synthesized audio will not play.
-                    self.tts_audio_first_sentence = True
-                    self.before_stop_play_files.clear()
-                    self._current_audio_sentence_id = message.sentence_id
-                elif ContentType.TEXT == message.content_type:
-                    self.tts_text_buff.append(message.content_detail)
-                    segment_text = self._get_segment_text()
-                    if segment_text:
-                        self.to_tts_single_stream(segment_text)
-                elif ContentType.FILE == message.content_type:
-                    if message.content_file and os.path.exists(message.content_file):
-                        self._process_audio_file_stream(
-                            message.content_file,
-                            callback=lambda audio_data: self.handle_audio_file(
-                                audio_data, message.content_detail
-                            ),
+                    if self.conn.client_abort:
+                        logger.bind(tag=TAG).info(
+                            "Received client abort, skip current Bailian TTS task."
                         )
+                        continue
 
-                if message.sentence_type == SentenceType.LAST:
-                    self._process_remaining_text_stream(is_last=True)
+                    if message.sentence_type == SentenceType.FIRST:
+                        self.tts_stop_request = False
+                        self.processed_chars = 0
+                        self.tts_text_buff = []
+                        self.is_first_sentence = True
+                        # Each new TTS turn must re-enter the frontend/device speaking
+                        # state, otherwise later replies may keep the client in
+                        # listening mode and the synthesized audio will not play.
+                        self.tts_audio_first_sentence = True
+                        self.before_stop_play_files.clear()
+                        self._current_audio_sentence_id = message.sentence_id
+                    elif ContentType.TEXT == message.content_type:
+                        self.tts_text_buff.append(message.content_detail)
+                        segment_text = self._get_segment_text()
+                        if segment_text:
+                            self.to_tts_single_stream(segment_text)
+                    elif ContentType.FILE == message.content_type:
+                        if message.content_file and os.path.exists(message.content_file):
+                            self._process_audio_file_stream(
+                                message.content_file,
+                                callback=lambda audio_data: self.handle_audio_file(
+                                    audio_data, message.content_detail
+                                ),
+                            )
+
+                    if message.sentence_type == SentenceType.LAST:
+                        self._process_remaining_text_stream(is_last=True)
+                finally:
+                    self._mark_tts_text_processing_end()
 
             except queue.Empty:
                 continue

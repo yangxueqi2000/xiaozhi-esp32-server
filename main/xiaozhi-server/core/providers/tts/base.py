@@ -73,6 +73,8 @@ class TTSProviderBase(ABC):
         ).lower() in ("1", "true", "yes", "on")
         self.fallback_provider = None
         self.fallback_provider_name = ""
+        self._tts_text_processing_lock = threading.Lock()
+        self._tts_text_processing_count = 0
         fallback_after_failures = config.get("fallback_after_failures", 1)
         try:
             self.fallback_after_failures = max(1, int(fallback_after_failures))
@@ -113,6 +115,20 @@ class TTSProviderBase(ABC):
     def set_fallback_provider(self, provider, provider_name: str = ""):
         self.fallback_provider = provider
         self.fallback_provider_name = str(provider_name or "").strip()
+
+    def _mark_tts_text_processing_start(self):
+        with self._tts_text_processing_lock:
+            self._tts_text_processing_count += 1
+
+    def _mark_tts_text_processing_end(self):
+        with self._tts_text_processing_lock:
+            self._tts_text_processing_count = max(
+                0, self._tts_text_processing_count - 1
+            )
+
+    def has_inflight_tts_text_processing(self) -> bool:
+        with self._tts_text_processing_lock:
+            return self._tts_text_processing_count > 0
 
     async def _synthesize_text_once(self, text, output_file, *, attempt_number: int):
         try:
@@ -368,39 +384,43 @@ class TTSProviderBase(ABC):
         while not self.conn.stop_event.is_set():
             try:
                 message = self.tts_text_queue.get(timeout=1)
-                if message.sentence_type == SentenceType.FIRST:
-                    self.conn.client_abort = False
-                if self.conn.client_abort:
-                    logger.bind(tag=TAG).info("收到打断信息，终止TTS文本处理线程")
-                    continue
-                if message.sentence_type == SentenceType.FIRST:
-                    # 初始化参数
-                    self.tts_stop_request = False
-                    self.processed_chars = 0
-                    self.tts_text_buff = []
-                    self.is_first_sentence = True
-                    self.tts_audio_first_sentence = True
-                    self._current_audio_sentence_id = message.sentence_id
-                elif ContentType.TEXT == message.content_type:
-                    self.tts_text_buff.append(message.content_detail)
-                    segment_text = self._get_segment_text()
-                    if segment_text:
-                        self.to_tts_stream(segment_text, opus_handler=self.handle_opus)
-                elif ContentType.FILE == message.content_type:
-                    self._process_remaining_text_stream(opus_handler=self.handle_opus)
-                    tts_file = message.content_file
-                    if tts_file and os.path.exists(tts_file):
-                        self._process_audio_file_stream(
-                            tts_file, callback=self.handle_opus
+                self._mark_tts_text_processing_start()
+                try:
+                    if message.sentence_type == SentenceType.FIRST:
+                        self.conn.client_abort = False
+                    if self.conn.client_abort:
+                        logger.bind(tag=TAG).info("收到打断信息，终止TTS文本处理线程")
+                        continue
+                    if message.sentence_type == SentenceType.FIRST:
+                        # 初始化参数
+                        self.tts_stop_request = False
+                        self.processed_chars = 0
+                        self.tts_text_buff = []
+                        self.is_first_sentence = True
+                        self.tts_audio_first_sentence = True
+                        self._current_audio_sentence_id = message.sentence_id
+                    elif ContentType.TEXT == message.content_type:
+                        self.tts_text_buff.append(message.content_detail)
+                        segment_text = self._get_segment_text()
+                        if segment_text:
+                            self.to_tts_stream(segment_text, opus_handler=self.handle_opus)
+                    elif ContentType.FILE == message.content_type:
+                        self._process_remaining_text_stream(opus_handler=self.handle_opus)
+                        tts_file = message.content_file
+                        if tts_file and os.path.exists(tts_file):
+                            self._process_audio_file_stream(
+                                tts_file, callback=self.handle_opus
+                            )
+                    if message.sentence_type == SentenceType.LAST:
+                        self._process_remaining_text_stream(opus_handler=self.handle_opus)
+                        self._put_audio_queue(
+                            message.sentence_type,
+                            [],
+                            message.content_detail,
+                            sentence_id=message.sentence_id,
                         )
-                if message.sentence_type == SentenceType.LAST:
-                    self._process_remaining_text_stream(opus_handler=self.handle_opus)
-                    self._put_audio_queue(
-                        message.sentence_type,
-                        [],
-                        message.content_detail,
-                        sentence_id=message.sentence_id,
-                    )
+                finally:
+                    self._mark_tts_text_processing_end()
 
             except queue.Empty:
                 continue

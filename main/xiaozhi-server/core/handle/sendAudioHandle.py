@@ -153,6 +153,17 @@ def _queue_has_pending_followup_tts(conn, sentence_id=None):
         return False
 
     try:
+        has_inflight_processing = getattr(
+            tts,
+            "has_inflight_tts_text_processing",
+            None,
+        )
+        if callable(has_inflight_processing) and has_inflight_processing():
+            return True
+    except Exception:
+        return False
+
+    try:
         text_queue = getattr(tts, "tts_text_queue", None)
         if text_queue is not None:
             with text_queue.mutex:
