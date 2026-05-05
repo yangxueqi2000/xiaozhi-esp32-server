@@ -706,6 +706,138 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertTrue(getattr(conn, "_server_photo_capture_granted", False))
 
+    async def test_handle_user_intent_routes_short_experiment_control_to_fast_path(self):
+        conn = _FakeConn()
+        conn.intent_type = "function_call"
+        seen = []
+
+        async def return_false(*args, **kwargs):
+            return False
+
+        async def handle_fast(_conn, original_text, filtered_text):
+            seen.append((original_text, filtered_text))
+            return True
+
+        with patch.object(
+            intentHandler,
+            "handle_pending_direct_photo_confirmation",
+            return_false,
+        ):
+            with patch.object(
+                intentHandler,
+                "handle_pending_server_photo_confirmation",
+                return_false,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "handle_direct_photo_navigation_intent",
+                    return_false,
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "handle_direct_photo_intent",
+                        return_false,
+                    ):
+                        with patch.object(
+                            intentHandler,
+                            "handle_direct_uvvis_intent",
+                            return_false,
+                        ):
+                            with patch.object(
+                                intentHandler,
+                                "handle_experiment_control_fast_intent",
+                                handle_fast,
+                            ):
+                                handled = await intentHandler.handle_user_intent(
+                                    conn,
+                                    "鍏ㄩ儴鍔犲ソ浜?",
+                                )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            [("鍏ㄩ儴鍔犲ソ浜?", "鍏ㄩ儴鍔犲ソ浜")],
+            seen,
+        )
+
+    async def test_handle_user_intent_routes_imperative_photo_confirmation_to_server_photo(self):
+        conn = _FakeConn()
+        conn.intent_type = "function_call"
+        conn.device_id = "94:a9:90:27:3c:84"
+        conn.config = {
+            "device_mcp_shortcuts": {
+                "enable_server_photo_confirmation_direct": True,
+                "photo_confirm_delay_seconds": 0,
+            }
+        }
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="先把2号样品单独摆好、颜色区域露清楚，再说一声“拍吧”。",
+            )
+        )
+
+        sent = []
+        waits = []
+        executed = []
+
+        async def return_false(*args, **kwargs):
+            return False
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        async def fake_wait_before_capture(_conn, source):
+            waits.append(source)
+
+        async def fake_execute(_conn, arguments):
+            executed.append(dict(arguments))
+            return True
+
+        with patch.object(
+            intentHandler,
+            "handle_pending_direct_photo_confirmation",
+            return_false,
+        ):
+            with patch.object(
+                intentHandler,
+                "handle_direct_photo_navigation_intent",
+                return_false,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "handle_direct_photo_intent",
+                    side_effect=AssertionError("should not fall back to direct photo"),
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "send_stt_message",
+                        fake_send_stt_message,
+                    ):
+                        with patch.object(
+                            intentHandler,
+                            "_maybe_wait_before_photo_capture",
+                            fake_wait_before_capture,
+                        ):
+                            with patch.object(
+                                intentHandler,
+                                "_execute_server_photo_intent",
+                                fake_execute,
+                            ):
+                                handled = await intentHandler.handle_user_intent(
+                                    conn,
+                                    "可以拍照",
+                                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["可以拍照"], sent)
+        self.assertEqual(["server_photo_confirmation"], waits)
+        self.assertEqual(1, len(executed))
+        self.assertEqual("2号样品", executed[0]["photo_name"])
+        self.assertEqual(
+            "请拍摄2号样品当前状态的照片。",
+            executed[0]["question"],
+        )
+
     async def test_server_photo_confirmation_direct_still_works_when_experiment_fast_path_is_disabled(self):
         conn = _FakeConn()
         conn.device_id = "94:a9:90:27:3c:84"
@@ -1447,6 +1579,600 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("接下来做这一步", spoken[0])
         self.assertIn("AgNO3", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
+
+    def test_infer_experiment_step_id_from_natural_assistant_reagent_instruction(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_prepare_setup_all"
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_prepare_setup_all",
+                "title": "1-5号样品：准备烧杯与磁转子",
+                "prompts": {
+                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                },
+            },
+            {
+                "id": "step_add_sodium_citrate_all",
+                "title": "1-5号样品：统一加入柠檬酸钠",
+                "prompts": {
+                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                },
+            },
+            {
+                "id": "step_add_agno3_all",
+                "title": "1-5号样品：统一加入AgNO3",
+                "prompts": {
+                    "instruction": "按 1 到 5 号顺序统一完成 AgNO3 加入（每个烧杯均为 5.00 mL）。",
+                },
+            },
+            {
+                "id": "step_add_h2o2_all",
+                "title": "1-5号样品：统一加入H2O2",
+                "prompts": {
+                    "instruction": "按 1 到 5 号顺序统一完成 H2O2 加入。",
+                },
+            },
+        ]
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="按1到5号顺序，给每个烧杯各加入五点零零毫升硝酸银溶液，注意不要溅出、编号别弄混，全部加完告诉我。",
+            )
+        )
+
+        inferred = intentHandler._infer_experiment_step_id_from_context(
+            conn,
+            original_text="全部加好了",
+            filtered_text="全部加好了",
+        )
+
+        self.assertEqual("step_add_agno3_all", inferred)
+
+    async def test_fast_path_syncs_stale_graph_through_safe_confirmation_steps(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {
+            "current_idx": 0,
+            "ready_to_finish": set(),
+            "completed": set(),
+        }
+        steps = [
+            {
+                "id": "step_prepare_setup_all",
+                "title": "1-5号样品：准备烧杯与磁转子",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "beakers_labeled": {
+                        "type": "bool",
+                        "description": "已完成 1-5 号烧杯编号",
+                    },
+                    "stir_bars_added_to_all": {
+                        "type": "bool",
+                        "description": "已为 1-5 号烧杯全部放入磁转子",
+                    },
+                },
+                "prompts": {
+                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                },
+            },
+            {
+                "id": "step_add_sodium_citrate_all",
+                "title": "1-5号样品：统一加入柠檬酸钠",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "sodium_citrate_added_to_all": {
+                        "type": "bool",
+                        "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                    },
+                },
+                "prompts": {
+                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                },
+            },
+            {
+                "id": "step_add_agno3_all",
+                "title": "1-5号样品：统一加入AgNO3",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "agno3_added_to_all": {
+                        "type": "bool",
+                        "description": "已按 1-5 号顺序完成全部 AgNO3 加入",
+                    },
+                },
+                "prompts": {
+                    "instruction": "按 1 到 5 号顺序统一完成 AgNO3 加入。",
+                },
+            },
+            {
+                "id": "step_add_h2o2_all",
+                "title": "1-5号样品：统一加入H2O2",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "h2o2_added_to_all": {
+                        "type": "bool",
+                        "description": "已按 1-5 号顺序完成全部 H2O2 加入",
+                    },
+                },
+                "prompts": {
+                    "instruction": "按 1 到 5 号顺序统一完成 H2O2 加入。",
+                },
+            },
+        ]
+        order = [step["id"] for step in steps]
+        step_by_id = {step["id"]: step for step in steps}
+        conn._experiment_yaml_steps_cache = steps
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="按1到5号顺序，给每个烧杯各加入五点零零毫升硝酸银溶液，注意不要溅出、编号别弄混，全部加完告诉我。",
+            )
+        )
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        def current_step():
+            return steps[state["current_idx"]]
+
+        def current_missing_fields():
+            step = current_step()
+            if step["id"] in state["completed"]:
+                return []
+            return list(step.get("record_schema", {}).keys())
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            step = current_step()
+            if tool_name == "get_step":
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": step["id"],
+                            "title": step["title"],
+                            "interaction": step.get("interaction", {}),
+                            "prompts": step.get("prompts", {}),
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {"result": {"ok": True, "progress": None}}
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {"name": name, **field}
+                            for name, field in step.get("record_schema", {}).items()
+                        ],
+                    }
+                }
+            if tool_name == "can_proceed":
+                return {
+                    "result": {
+                        "ok": step["id"] in state["completed"],
+                        "message": None if step["id"] in state["completed"] else "尚未完成",
+                    }
+                }
+            if tool_name == "start_trial":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": current_missing_fields(),
+                        },
+                    }
+                }
+            if tool_name == "add_fields":
+                self.assertEqual(
+                    {
+                        name: True
+                        for name in step.get("record_schema", {})
+                    },
+                    arguments["data"],
+                )
+                state["ready_to_finish"].add(step["id"])
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                self.assertIn(step["id"], state["ready_to_finish"])
+                state["completed"].add(step["id"])
+                return {"result": {"ok": True}}
+            if tool_name == "proceed_to_next_step":
+                self.assertIn(step["id"], state["completed"])
+                if state["current_idx"] < len(steps) - 1:
+                    state["current_idx"] += 1
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_step_id": order[state["current_idx"]],
+                    }
+                }
+            if tool_name == "get_progress_summary":
+                current = current_step()
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": current["id"],
+                                "title": current["title"],
+                            },
+                            "current_step_details": {
+                                "instruction": current.get("prompts", {}).get("instruction", ""),
+                            },
+                        },
+                    }
+                }
+            if tool_name == "redirect_to_step":
+                state["current_idx"] = order.index(arguments["step_id"])
+                return {"result": {"ok": True}}
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "全部加好了",
+                    "全部加好了",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["全部加好了"], sent)
+        self.assertEqual("step_add_h2o2_all", conn.experiment_current_step_id)
+        self.assertEqual(1, len(spoken))
+        self.assertTrue("H2O2" in spoken[0] or "过氧化氢" in spoken[0])
+        self.assertGreaterEqual(
+            len(
+                [
+                    name
+                    for name, _args, _priority in tool_calls
+                    if name == "proceed_to_next_step"
+                ]
+            ),
+            3,
+        )
+
+    async def test_fast_path_syncs_until_blocked_observation_step_and_then_asks_missing_fields(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+        tool_calls = []
+        state = {
+            "current_idx": 0,
+            "ready_to_finish": set(),
+            "completed": set(),
+        }
+        steps = [
+            {
+                "id": "step_prepare_setup_all",
+                "title": "1-5号样品：准备烧杯与磁转子",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "beakers_labeled": {
+                        "type": "bool",
+                        "description": "已完成 1-5 号烧杯编号",
+                    },
+                    "stir_bars_added_to_all": {
+                        "type": "bool",
+                        "description": "已为 1-5 号烧杯全部放入磁转子",
+                    },
+                },
+                "prompts": {"instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。"},
+            },
+            {
+                "id": "step_add_sodium_citrate_all",
+                "title": "1-5号样品：统一加入柠檬酸钠",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "sodium_citrate_added_to_all": {
+                        "type": "bool",
+                        "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                    },
+                },
+                "prompts": {"instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。"},
+            },
+            {
+                "id": "step_add_agno3_all",
+                "title": "1-5号样品：统一加入AgNO3",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "agno3_added_to_all": {
+                        "type": "bool",
+                        "description": "已按 1-5 号顺序完成全部 AgNO3 加入",
+                    },
+                },
+                "prompts": {"instruction": "按 1 到 5 号顺序统一完成 AgNO3 加入。"},
+            },
+            {
+                "id": "step_add_h2o2_all",
+                "title": "1-5号样品：统一加入H2O2",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "h2o2_added_to_all": {
+                        "type": "bool",
+                        "description": "已按 1-5 号顺序完成全部 H2O2 加入",
+                    },
+                },
+                "prompts": {"instruction": "按 1 到 5 号顺序统一完成 H2O2 加入。"},
+            },
+            {
+                "id": "step_stirring_all",
+                "title": "1-5号样品：同时启动搅拌并混匀",
+                "interaction": {
+                    "fast_path_mode": "confirmation_step",
+                    "capabilities": ["step_confirmation"],
+                },
+                "record_schema": {
+                    "all_samples_stirring": {
+                        "type": "bool",
+                        "description": "已同时启动 1-5 号样品搅拌并确认混匀",
+                    },
+                },
+                "prompts": {"instruction": "同时启动 1-5 号样品搅拌并确认混匀。"},
+            },
+            {
+                "id": "step_sample1_2_add_kbr_water_nabh4",
+                "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                "interaction": {
+                    "fast_path_mode": "observation_record_step",
+                    "capabilities": ["step_confirmation", "observation_capture"],
+                },
+                "record_schema": {
+                    "KBr_volume": {
+                        "type": "bool",
+                        "description": "已按当前样品目标用量加入 KBr",
+                    },
+                    "H2O_volume": {
+                        "type": "bool",
+                        "description": "已按当前样品目标用量加入纯水",
+                    },
+                    "mixed_uniformly": {
+                        "type": "bool",
+                        "description": "加入 KBr 和纯水后已搅拌均匀",
+                    },
+                    "nabh4_volume": {
+                        "type": "bool",
+                        "description": "已准确加入 2.50 mL NaBH4",
+                    },
+                    "added_quickly": {
+                        "type": "bool",
+                        "description": "已快速完成 NaBH4 加入",
+                    },
+                    "color": {
+                        "type": "string",
+                        "description": "当前样品最终颜色",
+                    },
+                    "reaction_time": {
+                        "type": "float",
+                        "description": "当前样品颜色稳定所用时间",
+                    },
+                    "color_stable": {
+                        "type": "bool",
+                        "description": "已确认颜色稳定",
+                    },
+                },
+                "prompts": {
+                    "instruction": "完成 1 号样品 KBr 和纯水加入并混匀后，快速加入 NaBH4 并保持搅拌，记录颜色稳定时间和收尾情况。",
+                },
+            },
+        ]
+        order = [step["id"] for step in steps]
+        conn._experiment_yaml_steps_cache = steps
+        conn.dialogue.put(
+            Message(
+                role="assistant",
+                content="接着做1号样品：向1号烧杯加入二点五零毫升硼氢化钠，保持搅拌，注意它有腐蚀性、现配后容易分解，尽量快加，做好告诉我已经做好了。",
+            )
+        )
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        def current_step():
+            return steps[state["current_idx"]]
+
+        def current_missing_fields():
+            step_id = current_step()["id"]
+            if step_id == "step_sample1_2_add_kbr_water_nabh4":
+                if step_id in state["ready_to_finish"]:
+                    return ["color", "reaction_time", "color_stable"]
+                return [
+                    "KBr_volume",
+                    "H2O_volume",
+                    "mixed_uniformly",
+                    "nabh4_volume",
+                    "added_quickly",
+                    "color",
+                    "reaction_time",
+                    "color_stable",
+                ]
+            if step_id in state["completed"]:
+                return []
+            return list(current_step().get("record_schema", {}).keys())
+
+        async def fake_call(tool_name, arguments, priority="foreground"):
+            tool_calls.append((tool_name, dict(arguments), priority))
+            step = current_step()
+            if tool_name == "get_step":
+                return {
+                    "result": {
+                        "ok": True,
+                        "step": {
+                            "id": step["id"],
+                            "title": step["title"],
+                            "interaction": step.get("interaction", {}),
+                            "prompts": step.get("prompts", {}),
+                        },
+                    }
+                }
+            if tool_name == "get_current_progress":
+                return {"result": {"ok": True, "progress": None}}
+            if tool_name == "get_schema":
+                return {
+                    "result": {
+                        "ok": True,
+                        "schema_view": [
+                            {"name": name, **field}
+                            for name, field in step.get("record_schema", {}).items()
+                        ],
+                    }
+                }
+            if tool_name == "can_proceed":
+                return {
+                    "result": {
+                        "ok": step["id"] in state["completed"],
+                        "message": None if step["id"] in state["completed"] else "尚未完成",
+                    }
+                }
+            if tool_name == "start_trial":
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {
+                            "missing_fields": current_missing_fields(),
+                        },
+                    }
+                }
+            if tool_name == "add_fields":
+                if step["id"] == "step_sample1_2_add_kbr_water_nabh4":
+                    self.assertEqual(
+                        {
+                            "KBr_volume": True,
+                            "H2O_volume": True,
+                            "mixed_uniformly": True,
+                            "nabh4_volume": True,
+                            "added_quickly": True,
+                        },
+                        arguments["data"],
+                    )
+                    state["ready_to_finish"].add(step["id"])
+                    return {
+                        "result": {
+                            "ok": True,
+                            "current_progress": {
+                                "missing_fields": [
+                                    "color",
+                                    "reaction_time",
+                                    "color_stable",
+                                ]
+                            },
+                        }
+                    }
+
+                self.assertEqual(
+                    {
+                        name: True
+                        for name in step.get("record_schema", {})
+                    },
+                    arguments["data"],
+                )
+                state["ready_to_finish"].add(step["id"])
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_progress": {"missing_fields": []},
+                    }
+                }
+            if tool_name == "finish_trial":
+                self.assertIn(step["id"], state["ready_to_finish"])
+                state["completed"].add(step["id"])
+                return {"result": {"ok": True}}
+            if tool_name == "proceed_to_next_step":
+                self.assertIn(step["id"], state["completed"])
+                if state["current_idx"] < len(steps) - 1:
+                    state["current_idx"] += 1
+                return {
+                    "result": {
+                        "ok": True,
+                        "current_step_id": order[state["current_idx"]],
+                    }
+                }
+            if tool_name == "get_progress_summary":
+                current = current_step()
+                return {
+                    "result": {
+                        "ok": True,
+                        "summary": {
+                            "current_step": {
+                                "step_id": current["id"],
+                                "title": current["title"],
+                            },
+                            "current_step_details": {
+                                "instruction": current.get("prompts", {}).get("instruction", ""),
+                            },
+                        },
+                    }
+                }
+            if tool_name == "redirect_to_step":
+                state["current_idx"] = order.index(arguments["step_id"])
+                return {"result": {"ok": True}}
+            raise AssertionError(f"unexpected tool call: {tool_name}")
+
+        conn._call_experiment_graph_tool = fake_call
+
+        with patch.object(intentHandler, "send_stt_message", fake_send_stt_message):
+            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                handled = await intentHandler.handle_experiment_control_fast_intent(
+                    conn,
+                    "已经做好了",
+                    "已经做好了",
+                )
+
+        self.assertTrue(handled)
+        self.assertEqual(["已经做好了"], sent)
+        self.assertEqual("step_sample1_2_add_kbr_water_nabh4", conn.experiment_current_step_id)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("颜色", spoken[0])
+        self.assertIn("颜色稳定所用时间", spoken[0])
+        self.assertGreaterEqual(
+            len(
+                [
+                    name
+                    for name, _args, _priority in tool_calls
+                    if name == "proceed_to_next_step"
+                ]
+            ),
+            5,
+        )
 
     async def test_local_photo_followup_writes_back_and_moves_to_next_step(self):
         conn = _FakeConn()

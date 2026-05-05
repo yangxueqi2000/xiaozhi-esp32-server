@@ -46,8 +46,8 @@ async def handle_user_intent(conn, text):
     if await checkWakeupWords(conn, filtered_text):
         return True
 
-    # Experiment/runtime fast paths stay retired, but photo capture and preview
-    # should still bypass Codex when the request can be resolved locally.
+    # Keep photo and UV-Vis direct handlers ahead of the generic experiment fast
+    # path so confirmations like "可以拍照" still follow the device shortcut.
     _update_server_photo_confirmation_state(conn, filtered_text)
 
     photo_direct_handlers = (
@@ -65,6 +65,20 @@ async def handle_user_intent(conn, text):
                 f"photo direct handler failed: handler={handler.__name__}, error={exc}"
             )
             continue
+        if handled:
+            return True
+
+    try:
+        handled = await handle_experiment_control_fast_intent(
+            conn,
+            text,
+            filtered_text,
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"experiment control fast path failed: {exc}"
+        )
+    else:
         if handled:
             return True
 
@@ -1479,6 +1493,346 @@ def _resolve_experiment_yaml_steps(conn) -> list[dict]:
             setattr(conn, "_experiment_yaml_steps_cache", normalized_steps)
             return normalized_steps
     return []
+
+
+_EXPERIMENT_STEP_MATCH_ALIAS_RULES = (
+    (re.compile(r"agno3", flags=re.IGNORECASE), ("硝酸银",)),
+    (re.compile(r"硝酸银"), ("agno3",)),
+    (re.compile(r"h2o2", flags=re.IGNORECASE), ("过氧化氢",)),
+    (re.compile(r"过氧化氢"), ("h2o2",)),
+    (re.compile(r"nabh4", flags=re.IGNORECASE), ("硼氢化钠",)),
+    (re.compile(r"硼氢化钠"), ("nabh4",)),
+    (re.compile(r"kbr", flags=re.IGNORECASE), ("溴化钾",)),
+    (re.compile(r"溴化钾"), ("kbr",)),
+    (re.compile(r"uv-?vis", flags=re.IGNORECASE), ("紫外可见",)),
+    (re.compile(r"紫外[-－]?可见"), ("uvvis",)),
+    (re.compile(r"去离子水"), ("纯水",)),
+    (re.compile(r"纯水"), ("去离子水",)),
+)
+_EXPERIMENT_STEP_HINT_TOKEN_TEXTS = (
+    "柠檬酸钠",
+    "agno3",
+    "硝酸银",
+    "h2o2",
+    "过氧化氢",
+    "kbr",
+    "溴化钾",
+    "nabh4",
+    "硼氢化钠",
+    "纯水",
+    "去离子水",
+    "搅拌",
+    "拍照",
+    "照片",
+    "丁达尔",
+    "比色皿",
+    "参比",
+    "反应液",
+    "uvvis",
+    "紫外可见",
+    "吸光度",
+    "动力学",
+    "400nm",
+    "400纳米",
+)
+
+
+def _expand_experiment_step_match_aliases(text: str) -> str:
+    src = str(text or "").strip()
+    if not src:
+        return ""
+
+    expanded_parts = [src]
+    for pattern, aliases in _EXPERIMENT_STEP_MATCH_ALIAS_RULES:
+        if not pattern.search(src):
+            continue
+        expanded_parts.extend(alias for alias in aliases if alias)
+    return " ".join(expanded_parts)
+
+
+def _normalize_experiment_step_match_text(text: str) -> str:
+    src = _expand_experiment_step_match_aliases(text)
+    norm = _normalize_confirmation_signature(src)
+    norm = re.sub(r"[^\w\u4e00-\u9fff\-]+", "", norm)
+    return norm
+
+
+def _yaml_step_scope_signature(step: dict) -> tuple[str, int | None]:
+    prompts = step.get("prompts") if isinstance(step.get("prompts"), dict) else {}
+    candidate_text = " ".join(
+        value
+        for value in (
+            str(step.get("title", "") or "").strip(),
+            str(step.get("description", "") or "").strip(),
+            str(prompts.get("instruction", "") or "").strip(),
+        )
+        if value
+    )
+    normalized = _normalize_experiment_step_match_text(candidate_text)
+    if any(
+        token in normalized for token in ("1-5号样品", "1到5号样品", "1至5号样品", "全部样品")
+    ):
+        return "multi_sample", None
+    sample_index = _extract_sample_index_from_text(normalized)
+    if sample_index is not None:
+        return "single_sample", sample_index
+
+    return "", None
+
+
+def _yaml_step_context_match_score(query_text: str, step: dict) -> float:
+    query_norm = _normalize_experiment_step_match_text(query_text)
+    if len(query_norm) < 4:
+        return 0.0
+
+    prompts = step.get("prompts") if isinstance(step.get("prompts"), dict) else {}
+    title_text = str(step.get("title", "") or "").strip()
+    instruction_text = str(prompts.get("instruction", "") or "").strip()
+    description_text = str(step.get("description", "") or "").strip()
+    step_text = " ".join(
+        value for value in (title_text, instruction_text, description_text) if value
+    )
+    step_norm = _normalize_experiment_step_match_text(step_text)
+    if len(step_norm) < 4:
+        return 0.0
+
+    query_has_multi_sample = any(
+        token in query_norm for token in ("1-5号", "1到5号", "1至5号", "每个烧杯", "全部样品")
+    )
+    query_sample_index = None if query_has_multi_sample else _extract_sample_index_from_text(query_norm)
+    step_scope, step_sample_index = _yaml_step_scope_signature(step)
+    if (
+        query_sample_index is not None
+        and step_scope == "single_sample"
+        and step_sample_index is not None
+        and step_sample_index != query_sample_index
+    ):
+        return 0.0
+    if query_sample_index is not None and step_scope == "multi_sample":
+        return 0.0
+    if query_has_multi_sample and step_scope == "single_sample":
+        return 0.0
+
+    title_norm = _normalize_experiment_step_match_text(title_text)
+    instruction_norm = _normalize_experiment_step_match_text(instruction_text)
+    if title_norm and (title_norm in query_norm or query_norm in title_norm):
+        return 1.0
+    if instruction_norm and len(instruction_norm) >= 8 and instruction_norm[:8] in query_norm:
+        return 0.96
+
+    query_grams = _confirmation_char_ngrams(query_norm)
+    step_grams = _confirmation_char_ngrams(step_norm)
+    if not query_grams or not step_grams:
+        return 0.0
+
+    overlap_ratio = len(query_grams & step_grams) / max(
+        1, min(len(query_grams), len(step_grams))
+    )
+    lcs = _longest_common_substring_len(query_norm, step_norm)
+    lcs_ratio = lcs / max(4, min(len(query_norm), len(step_norm)))
+    score = overlap_ratio * 0.72 + min(1.0, lcs_ratio) * 0.28
+
+    shared_hint_tokens = []
+    for raw_token in _EXPERIMENT_STEP_HINT_TOKEN_TEXTS:
+        token = _normalize_experiment_step_match_text(raw_token)
+        if token and token in query_norm and token in step_norm:
+            shared_hint_tokens.append(token)
+    if shared_hint_tokens:
+        score += min(0.24, 0.08 * len(shared_hint_tokens))
+
+    if query_sample_index is not None and step_scope == "single_sample":
+        score += 0.05
+    if query_has_multi_sample and step_scope == "multi_sample":
+        score += 0.05
+    if title_norm:
+        title_lcs = _longest_common_substring_len(query_norm, title_norm)
+        if title_lcs >= 4:
+            score += 0.08
+    return min(1.0, score)
+
+
+def _resolve_experiment_step_id_order(conn) -> list[str]:
+    cache = getattr(conn, "_experiment_yaml_step_id_order_cache", None)
+    if isinstance(cache, list):
+        return cache
+
+    order = []
+    for step in _resolve_experiment_yaml_steps(conn):
+        step_id = str(step.get("id", "") or "").strip()
+        if step_id:
+            order.append(step_id)
+    setattr(conn, "_experiment_yaml_step_id_order_cache", order)
+    return order
+
+
+def _resolve_experiment_step_by_id(conn) -> dict[str, dict]:
+    cache = getattr(conn, "_experiment_yaml_step_by_id_cache", None)
+    if isinstance(cache, dict):
+        return cache
+
+    mapping = {}
+    for step in _resolve_experiment_yaml_steps(conn):
+        step_id = str(step.get("id", "") or "").strip()
+        if step_id:
+            mapping[step_id] = step
+    setattr(conn, "_experiment_yaml_step_by_id_cache", mapping)
+    return mapping
+
+
+def _infer_experiment_step_id_from_context(
+    conn,
+    original_text: str = "",
+    filtered_text: str = "",
+) -> str:
+    order = _resolve_experiment_step_id_order(conn)
+    if not order:
+        return ""
+
+    current_step_id = _get_current_experiment_step_id(conn)
+    index_by_id = {step_id: idx for idx, step_id in enumerate(order)}
+    current_index = index_by_id.get(current_step_id, -1)
+    step_by_id = _resolve_experiment_step_by_id(conn)
+
+    candidates = [
+        ("assistant_last", _get_last_assistant_text_raw(conn), 0.08),
+        ("assistant_recent", _get_recent_assistant_text(conn, limit=4), 0.06),
+        ("user_now", original_text, 0.04),
+        ("user_filtered", filtered_text, 0.02),
+        ("user_recent", _get_recent_user_text(conn, limit=4), 0.0),
+    ]
+
+    best_step_id = ""
+    best_score = 0.0
+    for _source, text, bonus in candidates:
+        normalized = _normalize_experiment_step_match_text(text)
+        if len(normalized) < 4:
+            continue
+        for step_id in order:
+            step_index = index_by_id.get(step_id, -1)
+            if step_index < 0 or step_index <= current_index:
+                continue
+            step = step_by_id.get(step_id)
+            if not isinstance(step, dict):
+                continue
+            score = _yaml_step_context_match_score(text, step) + bonus
+            if score > best_score:
+                best_step_id = step_id
+                best_score = score
+
+    if best_score < 0.42:
+        return ""
+    return best_step_id
+
+
+def _yaml_step_is_safe_generic_catchup_confirmation(step: dict) -> bool:
+    if not isinstance(step, dict):
+        return False
+
+    interaction = step.get("interaction") if isinstance(step.get("interaction"), dict) else {}
+    fast_path_mode = str(interaction.get("fast_path_mode", "") or "").strip().lower()
+    if fast_path_mode != "confirmation_step":
+        return False
+
+    record_schema = step.get("record_schema")
+    if not isinstance(record_schema, dict) or not record_schema:
+        return False
+
+    for field_name, field in record_schema.items():
+        if not isinstance(field, dict):
+            return False
+        if bool(field.get("optional", False)):
+            continue
+        type_text = str(field.get("type", "") or "").strip().lower()
+        if type_text not in {"bool", "boolean"}:
+            return False
+        haystack = _normalize_experiment_step_match_text(
+            f"{field_name} {field.get('description', '')}"
+        )
+        if _contains_any(
+            haystack,
+            (
+                "照片",
+                "拍照",
+                "photo",
+                "颜色",
+                "观察",
+                "现象",
+                "absorbance",
+                "吸光",
+                "波长",
+                "kinetics",
+                "csv",
+                "路径",
+                "file",
+                "path",
+            ),
+        ):
+            return False
+    return True
+
+
+async def _sync_experiment_graph_forward_to_recent_context(
+    conn,
+    original_text: str = "",
+    filtered_text: str = "",
+) -> bool:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return False
+
+    order = _resolve_experiment_step_id_order(conn)
+    if not order:
+        return False
+
+    current_step_id = _get_current_experiment_step_id(conn)
+    target_step_id = _infer_experiment_step_id_from_context(
+        conn,
+        original_text=original_text,
+        filtered_text=filtered_text,
+    )
+    if not current_step_id or not target_step_id or current_step_id == target_step_id:
+        return False
+
+    index_by_id = {step_id: idx for idx, step_id in enumerate(order)}
+    current_index = index_by_id.get(current_step_id, -1)
+    target_index = index_by_id.get(target_step_id, -1)
+    if current_index < 0 or target_index < 0 or target_index <= current_index:
+        return False
+
+    step_by_id = _resolve_experiment_step_by_id(conn)
+    made_progress = False
+    for step_id in order[current_index:target_index]:
+        current_step_id = _get_current_experiment_step_id(conn)
+        if current_step_id == target_step_id:
+            break
+        if current_step_id != step_id:
+            if current_step_id:
+                current_idx = index_by_id.get(current_step_id, -1)
+                if current_idx >= target_index:
+                    break
+            redirected = await _try_redirect_experiment_step_fast(
+                conn,
+                step_id,
+                log_reason="experiment fast path syncing stale graph to recent context",
+            )
+            if not redirected:
+                break
+
+        step = step_by_id.get(step_id)
+        if not _yaml_step_is_safe_generic_catchup_confirmation(step):
+            break
+
+        reply = await _advance_experiment_step_fast(conn, session_id)
+        made_progress = True
+        next_step_id = _get_current_experiment_step_id(conn)
+        if not next_step_id or next_step_id == step_id:
+            conn.logger.bind(tag=TAG).info(
+                "experiment fast path sync stopped before target: "
+                f"current_step_id={step_id}, target_step_id={target_step_id}, reply={reply or ''}"
+            )
+            break
+
+    return made_progress
 
 
 _PHOTO_CONFIRMATION_FIELD_NAMES = frozenset(
@@ -4231,6 +4585,17 @@ async def handle_experiment_control_fast_intent(
         await _start_direct_intent_turn(conn, original_text)
         speak_txt(conn, reply)
         return True
+
+    try:
+        await _sync_experiment_graph_forward_to_recent_context(
+            conn,
+            original_text=original_text,
+            filtered_text=filtered_text,
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"experiment fast path graph sync failed: {exc}"
+        )
 
     action = _classify_short_experiment_control(conn, filtered_text)
     if not action:
