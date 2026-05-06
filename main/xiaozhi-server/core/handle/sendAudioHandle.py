@@ -152,32 +152,45 @@ def _queue_has_pending_followup_tts(conn, sentence_id=None):
     if not tts:
         return False
 
-    try:
-        has_inflight_processing = getattr(
-            tts,
-            "has_inflight_tts_text_processing",
-            None,
-        )
-        if callable(has_inflight_processing) and has_inflight_processing():
-            return True
-    except Exception:
-        return False
-
+    has_queued_followup = False
     try:
         text_queue = getattr(tts, "tts_text_queue", None)
         if text_queue is not None:
             with text_queue.mutex:
                 if len(text_queue.queue) > 0:
-                    return True
+                    has_queued_followup = True
     except Exception:
-        return False
+        has_queued_followup = False
 
     try:
         audio_queue = getattr(tts, "tts_audio_queue", None)
         if audio_queue is not None:
             with audio_queue.mutex:
                 if len(audio_queue.queue) > 0:
-                    return True
+                    has_queued_followup = True
+    except Exception:
+        pass
+
+    if has_queued_followup:
+        return True
+
+    try:
+        has_inflight_processing = getattr(
+            tts,
+            "has_inflight_tts_text_processing",
+            None,
+        )
+        if not callable(has_inflight_processing) or not has_inflight_processing():
+            return False
+
+        active_sentence_id = str(sentence_id or "").strip()
+        inflight_sentence_id = str(
+            getattr(tts, "_current_audio_sentence_id", "") or ""
+        ).strip()
+        # Ignore the provider's current LAST task when it is just finishing its
+        # own turn. Otherwise the final audio item can race ahead of the worker
+        # thread teardown and we would suppress the only stop event forever.
+        return bool(inflight_sentence_id and inflight_sentence_id != active_sentence_id)
     except Exception:
         return False
 

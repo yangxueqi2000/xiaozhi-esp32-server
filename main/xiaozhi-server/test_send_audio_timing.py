@@ -454,7 +454,7 @@ class SendAudioTimingTest(unittest.TestCase):
         self.assertEqual("fallback subtitle for last audio", sentence_payload["text"])
         self.assertEqual("stop", stop_payload["state"])
 
-    def test_last_audio_message_skips_stop_while_followup_tts_is_still_processing(self):
+    def test_last_audio_message_still_emits_stop_when_only_current_turn_is_inflight(self):
         ws = _DummyWebSocket()
         conn = SimpleNamespace(
             session_id="sess-6",
@@ -465,6 +465,43 @@ class SendAudioTimingTest(unittest.TestCase):
             tts=SimpleNamespace(
                 tts_audio_first_sentence=False,
                 has_inflight_tts_text_processing=lambda: True,
+                _current_audio_sentence_id="turn-4",
+            ),
+            client_is_speaking=True,
+            close_after_chat=False,
+            clearSpeakStatus=lambda: None,
+            has_external_busy=lambda: False,
+        )
+
+        asyncio.run(
+            sendAudioMessage(
+                conn,
+                SentenceType.LAST,
+                [],
+                "final subtitle still unwinding",
+                sentence_id="turn-4",
+            )
+        )
+
+        self.assertEqual(2, len(ws.messages))
+        sentence_payload = json.loads(ws.messages[0])
+        stop_payload = json.loads(ws.messages[1])
+        self.assertEqual("sentence_start", sentence_payload["state"])
+        self.assertEqual("final subtitle still unwinding", sentence_payload["text"])
+        self.assertEqual("stop", stop_payload["state"])
+
+    def test_last_audio_message_skips_stop_while_different_followup_tts_is_inflight(self):
+        ws = _DummyWebSocket()
+        conn = SimpleNamespace(
+            session_id="sess-7",
+            sentence_id="turn-4",
+            websocket=ws,
+            config={"enable_stop_tts_notify": False},
+            logger=_DummyLogger(),
+            tts=SimpleNamespace(
+                tts_audio_first_sentence=False,
+                has_inflight_tts_text_processing=lambda: True,
+                _current_audio_sentence_id="turn-5",
             ),
             client_is_speaking=True,
             close_after_chat=False,

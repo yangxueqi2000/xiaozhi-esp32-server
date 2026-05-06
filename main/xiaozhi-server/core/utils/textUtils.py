@@ -1185,10 +1185,13 @@ _SPOKEN_FILE_NAME_RE = re.compile(
     r"\b[^\s\\/]+\.(?:pdf|ya?ml|json|csv|png|jpe?g|wav)\b",
     re.IGNORECASE,
 )
+_SPOKEN_INLINE_CODE_RE = re.compile(r"`[^`]+`")
 _SPOKEN_TECHNICAL_FIELD_RE = re.compile(
     r"\b(?:device_id|session_id|chat_session_id|transport_session_id|"
     r"connection_session_id|model_session_key|local_path|file_path|output_path|"
     r"yaml_path|pdf_path|photo_path|task_id|client_id|tool_name|function_name|"
+    r"session_key|ready_for_samples|sample_positions|wavelength_nm|duration_minutes|"
+    r"interval_seconds|run_name|sessionkey|readyforsamples|samplepositions|"
     r"jsonrpc|serverinfo|capabilities)\b"
     r"\s*[:=：]?\s*[^\s，。！？；]*",
     re.IGNORECASE,
@@ -1200,6 +1203,12 @@ _SPOKEN_TOOL_NAME_RE = re.compile(
     r"modify_record|redo_trial|redirect_to_step|cancel_trial|"
     r"get_experiment_reference|search_experiment_reference|export_records|"
     r"export_records_to_yaml|xiaozhi_[a-z_]+|uvvis_[a-z_]+|self_[a-z_]+)\b"
+)
+_SPOKEN_TOOL_ARGUMENT_BLOCK_RE = re.compile(
+    r"\(\s*(?:sample_positions|samplepositions|ready_for_samples|readyforsamples|"
+    r"session_key|sessionkey|wavelength_nm|duration_minutes|interval_seconds|run_name)"
+    r"[^)]*\)",
+    re.IGNORECASE,
 )
 _SPOKEN_TRAILING_TECHNICAL_TAIL_RE = re.compile(
     r"(?:[，,、 ]*(?:路径|位置|地址)\s*(?:是|为|在)?|"
@@ -1436,10 +1445,12 @@ def _strip_spoken_technical_details(text: str) -> str:
     cleaned_sentences = []
     for sentence in _split_spoken_sentence_chunks(text):
         cleaned = sentence
+        cleaned = _SPOKEN_INLINE_CODE_RE.sub("", cleaned)
         cleaned = _SPOKEN_URL_RE.sub("", cleaned)
         cleaned = _SPOKEN_WINDOWS_PATH_RE.sub("", cleaned)
         cleaned = _SPOKEN_TECHNICAL_FIELD_RE.sub("", cleaned)
         cleaned = _SPOKEN_TOOL_NAME_RE.sub("", cleaned)
+        cleaned = _SPOKEN_TOOL_ARGUMENT_BLOCK_RE.sub("", cleaned)
         cleaned = _SPOKEN_FILE_NAME_RE.sub("", cleaned)
         cleaned = _SPOKEN_TRAILING_TECHNICAL_TAIL_RE.sub("", cleaned)
         cleaned = re.sub(r"[，,、]+\s*([。！？!?；;])", r"\1", cleaned)
@@ -1683,6 +1694,10 @@ def _looks_like_experiment_step_or_scan_guidance(text: str) -> bool:
         return False
     if _looks_like_step_guidance_text(normalized):
         return True
+    if _looks_like_reagent_addition_step_guidance(normalized):
+        return True
+    if _looks_like_observation_record_tail_guidance(normalized):
+        return True
 
     guidance_tokens = (
         "开始扫描",
@@ -1807,6 +1822,125 @@ def _looks_like_step_guidance_text(text: str) -> bool:
     return any(token in normalized for token in guidance_tokens)
 
 
+def _looks_like_reagent_addition_step_guidance(text: str) -> bool:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return False
+
+    subject_tokens = (
+        "样品",
+        "烧杯",
+        "KBr",
+        "溴化钾",
+        "纯水",
+        "NaBH4",
+        "硼氢化钠",
+        "AgNO3",
+        "硝酸银",
+        "H2O2",
+        "过氧化氢",
+        "柠檬酸钠",
+    )
+    if not any(token in normalized for token in subject_tokens):
+        return False
+
+    addition_tokens = ("加入", "滴加", "补加")
+    if not any(token in normalized for token in addition_tokens):
+        return False
+
+    guidance_tokens = (
+        "混匀",
+        "搅拌",
+        "计时",
+        "观察",
+        "颜色变化",
+        "颜色稳定",
+        "告诉我",
+        "做好后",
+    )
+    return any(token in normalized for token in guidance_tokens)
+
+
+def _looks_like_observation_record_tail_guidance(text: str) -> bool:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return False
+
+    subject_tokens = (
+        "样品",
+        "NaBH4",
+        "硼氢化钠",
+        "KBr",
+        "溴化钾",
+        "纯水",
+    )
+    if not any(token in normalized for token in subject_tokens):
+        return False
+
+    matched_groups = 0
+    token_groups = (
+        ("开始计时", "同时开始计时", "计时"),
+        ("持续搅拌", "保持搅拌", "继续搅拌", "搅拌"),
+        ("持续观察颜色变化", "观察颜色变化", "持续观察", "观察颜色"),
+        ("等颜色稳定", "颜色稳定", "稳定后"),
+        ("最终颜色", "几分钟", "告诉我"),
+    )
+    for group in token_groups:
+        if any(token in normalized for token in group):
+            matched_groups += 1
+    return matched_groups >= 4
+
+
+def _spoken_text_has_step_completion_prompt(text: str) -> bool:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return False
+
+    completion_tokens = (
+        "做好后告诉我",
+        "做好告诉我",
+        "做好了告诉我",
+        "做完告诉我",
+        "完成后告诉我",
+        "完成了告诉我",
+        "做完了告诉我",
+        "测完告诉我",
+        "扫完告诉我",
+        "结束后告诉我",
+        "加完告诉我",
+        "加好了告诉我",
+        "拍完告诉我",
+        "拍好了告诉我",
+        "看完告诉我",
+        "观察完告诉我",
+        "记录完告诉我",
+        "放好了告诉我",
+        "开始时告诉我",
+    )
+    return any(token in normalized for token in completion_tokens)
+
+
+def _ensure_spoken_step_completion_prompt(text: str) -> str:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return ""
+    if _spoken_text_has_step_completion_prompt(normalized):
+        return normalized
+
+    looks_like_step_guidance = (
+        _looks_like_step_guidance_text(normalized)
+        or _looks_like_reagent_addition_step_guidance(normalized)
+        or _looks_like_observation_record_tail_guidance(normalized)
+    )
+    if not looks_like_step_guidance:
+        return normalized
+
+    stripped = normalized.rstrip(" ，,、；;。！？!?")
+    if not stripped:
+        return normalized
+    return f"{stripped}，做好后告诉我。"
+
+
 def _spoken_text_has_measurement_detail(text: str) -> bool:
     normalized = normalize_spoken_text(text)
     if not normalized:
@@ -1825,6 +1959,48 @@ def _spoken_text_has_measurement_detail(text: str) -> bool:
     if not any(unit in normalized for unit in primary_units):
         return False
     return bool(re.search(r"[零一二三四五六七八九十百千万两\d]", normalized))
+
+
+def _spoken_text_has_reagent_amount_detail(text: str) -> bool:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return False
+
+    reagent_tokens = (
+        "加入",
+        "滴加",
+        "补加",
+        "KBr",
+        "溴化钾",
+        "纯水",
+        "NaBH4",
+        "硼氢化钠",
+        "AgNO3",
+        "硝酸银",
+        "H2O2",
+        "过氧化氢",
+        "柠檬酸钠",
+    )
+    amount_units = (
+        "毫升",
+        "微升",
+        "克",
+        "毫克",
+        "滴",
+        "mL",
+        "uL",
+        "μL",
+        "mg",
+        "g",
+    )
+    has_numeric_amount = bool(
+        re.search(r"[0-9零一二三四五六七八九十百千万点两]", normalized)
+    )
+    return (
+        any(token in normalized for token in reagent_tokens)
+        and any(unit in normalized for unit in amount_units)
+        and has_numeric_amount
+    )
 
 
 def _compact_spoken_measurement_detail(detail: str) -> str:
@@ -2024,6 +2200,10 @@ def _merge_spoken_step_guidance_sentences(sentences: list[str]) -> list[str]:
         first,
     )
     if not first_match or not _spoken_text_has_measurement_detail(second):
+        return sentences
+    if _spoken_text_has_reagent_amount_detail(first) and not _spoken_text_has_reagent_amount_detail(
+        second
+    ):
         return sentences
 
     first_body = first_match.group("body").strip()
@@ -2442,6 +2622,7 @@ def prepare_runtime_spoken_text(text):
     filtered = _strip_spoken_technical_details(filtered)
     filtered = _compact_spoken_step_guidance_text(filtered)
     filtered = _limit_spoken_sentence_count(filtered, max_sentences=2)
+    filtered = _ensure_spoken_step_completion_prompt(filtered)
     return normalize_spoken_text(filtered)
 
 

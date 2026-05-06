@@ -575,6 +575,70 @@ def _first_nonempty_text(*values) -> str:
     return ""
 
 
+def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
+    step_id = _first_nonempty_text(
+        step_meta.get("step_id", ""),
+        step_meta.get("id", ""),
+    )
+    if not step_id:
+        return ""
+
+    if mode == "repeat":
+        prefix = "当前这一步："
+    elif mode == "next":
+        prefix = "接下来做这一步："
+    else:
+        prefix = "现在做这一步："
+
+    reply_map = {
+        "step_3_uv_vis_shared_dark_air_prep": (
+            "当前步骤是 1-5号样品：暗电流和空气能量校正。"
+            "先不要放任何液体，我先进行暗电流和空气能量准备。"
+        ),
+        "step_3_uv_vis_shared_dark_blank_prep": (
+            f"{prefix}1-5号样品：暗电流和纯水空白校正。"
+            "先不要放任何液体，准备做暗电流和空气基线；需要放纯水比色皿时我再告诉你。"
+        ),
+        "step_3_uv_vis_sample1-5_load_cuvette": (
+            f"{prefix}1-5号样品：装入比色皿。"
+            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保留纯水，擦净外壁，做好告诉我。"
+        ),
+        "step_3_uv_vis_sample1-5_record_data": (
+            f"{prefix}1-5号样品：批量测光谱并记录数据。"
+            "确认1到5号样品位都已放好真实样品、参比位保留纯水，放好了告诉我开始测量。"
+        ),
+        "step_3_uv_vis_sample5_clean_cuvette": (
+            f"{prefix}紫外-可见测量后：统一清洗比色皿。"
+            "按规范处理残液并清洗比色皿，为后续动力学实验做准备，做好告诉我。"
+        ),
+        "step_4_kinetics_sample2_reference_solution_preparation": (
+            f"{prefix}2号样品动力学：配制参比液。"
+            "按要求配好2号样品参比液，放入参比位并检查比色皿外壁和透光面，做好告诉我。"
+        ),
+        "step_4_kinetics_sample2_reaction_solution_preparation": (
+            f"{prefix}2号样品动力学：配制反应液。"
+            "按要求配好2号样品反应液，放入样品位并确认参比和样品比色皿都放置正确，做好告诉我。"
+        ),
+        "step_4_kinetics_sample2_measurement": (
+            f"{prefix}2号样品动力学：开始按时间记录吸光度。"
+            "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
+        ),
+        "step_5_kinetics_sample4_reference_solution_preparation": (
+            f"{prefix}4号样品动力学：配制参比液。"
+            "按要求配好4号样品参比液，放入参比位并检查比色皿外壁和透光面，做好告诉我。"
+        ),
+        "step_5_kinetics_sample4_reaction_solution_preparation": (
+            f"{prefix}4号样品动力学：配制反应液。"
+            "按要求配好4号样品反应液，放入样品位并确认参比和样品比色皿都放置正确，做好告诉我。"
+        ),
+        "step_5_kinetics_sample4_measurement": (
+            f"{prefix}4号样品动力学：开始按时间记录吸光度。"
+            "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
+        ),
+    }
+    return reply_map.get(step_id, "")
+
+
 def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
     title = _first_nonempty_text(step_meta.get("title", ""))
     instruction = _first_nonempty_text(
@@ -587,6 +651,10 @@ def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
 
     if not instruction:
         return ""
+
+    uvvis_reply = _compose_uvvis_step_reply(step_meta, mode=mode)
+    if uvvis_reply:
+        return uvvis_reply
 
     if _step_meta_looks_like_photo_confirmation(step_meta):
         sample_index = _extract_sample_index_from_text(
@@ -1789,6 +1857,74 @@ def _extract_observation_color_value(filtered_text: str) -> str:
     return cleaned
 
 
+def _build_experiment_current_step_tyndall_fields(
+    filtered_text: str,
+    schema_by_name: dict,
+    missing_fields,
+) -> dict:
+    norm = _normalize_confirmation_signature(filtered_text)
+    if not norm or _looks_like_question_reply(filtered_text):
+        return {}
+    if not _contains_any(norm, ("丁达尔", "tyndall")):
+        return {}
+
+    tyndall_fields = []
+    field_names = list(missing_fields or schema_by_name.keys())
+    for field_name in field_names:
+        field = schema_by_name.get(field_name, {})
+        type_text = str(field.get("type", "")).strip().lower()
+        if type_text not in {"bool", "boolean"}:
+            continue
+        if not _field_matches_observation_semantics(
+            field_name,
+            field,
+            ("丁达尔", "tyndall"),
+        ):
+            continue
+        tyndall_fields.append(field_name)
+
+    if not tyndall_fields:
+        return {}
+
+    collective_positive = (
+        _contains_any(
+            norm,
+            (
+                "全部都有",
+                "全都有",
+                "都有",
+                "均有",
+                "都观察到",
+                "都看到了",
+                "都能看到",
+                "都存在",
+                "都有明显",
+            ),
+        )
+        and _contains_any(norm, ("丁达尔", "tyndall"))
+    )
+    collective_negative = (
+        _contains_any(
+            norm,
+            (
+                "全部都没有",
+                "全都没有",
+                "都没有",
+                "均无",
+                "都看不到",
+                "都没看到",
+                "都未观察到",
+                "都不存在",
+            ),
+        )
+        and _contains_any(norm, ("丁达尔", "tyndall"))
+    )
+
+    if collective_positive == collective_negative:
+        return {}
+    return {field_name: collective_positive for field_name in tyndall_fields}
+
+
 def _step_supports_observation_report(step_payload, schema_by_name: dict) -> bool:
     interaction = _extract_experiment_step_interaction(step_payload)
     fast_path_mode = str(interaction.get("fast_path_mode", "")).strip().lower()
@@ -1819,7 +1955,11 @@ def _build_experiment_current_step_observation_fields(
     if not allow_bool_completion:
         return {}
 
-    observation_fields = {}
+    observation_fields = _build_experiment_current_step_tyndall_fields(
+        filtered_text,
+        schema_by_name,
+        missing_fields,
+    )
     duration_minutes = _extract_observation_duration_minutes(filtered_text)
     color_value = _extract_observation_color_value(filtered_text)
 
@@ -3772,6 +3912,7 @@ async def _start_direct_intent_turn(conn, original_text: str):
     conn.dialogue.put(Message(role="user", content=original_text))
 
 
+_UVVIS_SHARED_DARK_AIR_STEP_ID = "step_3_uv_vis_shared_dark_air_prep"
 _UVVIS_SHARED_BLANK_STEP_ID = "step_3_uv_vis_shared_dark_blank_prep"
 _UVVIS_SAMPLE_RECORD_STEP_ID = "step_3_uv_vis_sample1-5_record_data"
 _UVVIS_SAMPLE_LOAD_STEP_ID = "step_3_uv_vis_sample1-5_load_cuvette"
@@ -3782,6 +3923,8 @@ _UVVIS_ANALYSIS_STEP_ID = "step_6_data_analysis"
 _UVVIS_BUSY_REPLY = "我现在正在工作请你过5min再试"
 _UVVIS_NOT_READY_REPLY = "UV-Vis 这边还没准备好，请稍后再试。"
 _UVVIS_SAMPLE_POSITIONS = (1, 2, 3, 4, 5)
+_UVVIS_SPECTRA_WAVELENGTH_GRID = tuple(range(400, 701, 10))
+_UVVIS_KINETICS_TIME_GRID = tuple(range(35))
 
 
 async def _try_redirect_experiment_step_fast(
@@ -3834,7 +3977,7 @@ async def _try_redirect_experiment_step_fast(
     return True
 
 
-def _compose_uvvis_step_rejection_reply(step_id: str) -> str:
+def _legacy_compose_uvvis_step_rejection_reply(step_id: str) -> str:
     step_id = str(step_id or "").strip()
     if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
         return "当前实验图谱还没推进到 UV-Vis 前置校正，先完成丁达尔现象观察。"
@@ -3907,19 +4050,26 @@ def _assistant_recently_prompted_uvvis_action(conn) -> bool:
 
 
 def _looks_like_uvvis_followup_reply(conn, filtered_text: str) -> bool:
+    if not _assistant_recently_prompted_uvvis_action(conn):
+        return False
+    return _looks_like_uvvis_ready_reply(filtered_text)
+
+
+def _looks_like_uvvis_ready_reply(filtered_text: str) -> bool:
     norm = _normalize_text_for_match(filtered_text)
     if not norm:
         return False
-    if not _assistant_recently_prompted_uvvis_action(conn):
+    if _is_negative_short_reply_fixed(filtered_text):
         return False
     if _is_affirmative_short_reply_fixed(filtered_text):
         return True
     if _looks_like_pure_short_completion_control(norm):
         return True
-    followup_tokens = (
+    ready_tokens = (
         "放好了",
         "都放好了",
         "已经放好了",
+        "已经放好",
         "可以开始了",
         "开始吧",
         "开始测量",
@@ -3928,8 +4078,10 @@ def _looks_like_uvvis_followup_reply(conn, filtered_text: str) -> bool:
         "扫描吧",
         "开始空架扫描",
         "开始动力学",
+        "开始记录",
+        "测光谱",
     )
-    return _contains_any(norm, followup_tokens)
+    return _contains_any(norm, ready_tokens)
 
 
 def _get_current_experiment_step_id(conn) -> str:
@@ -3942,6 +4094,7 @@ def _get_current_experiment_step_id(conn) -> str:
 
 def _is_uvvis_step(step_id: str) -> bool:
     return str(step_id or "").strip() in {
+        _UVVIS_SHARED_DARK_AIR_STEP_ID,
         _UVVIS_SHARED_BLANK_STEP_ID,
         _UVVIS_SAMPLE_LOAD_STEP_ID,
         _UVVIS_SAMPLE_RECORD_STEP_ID,
@@ -3954,6 +4107,7 @@ def _is_uvvis_step(step_id: str) -> bool:
 
 def _is_uvvis_measurement_step(step_id: str) -> bool:
     return str(step_id or "").strip() in {
+        _UVVIS_SHARED_DARK_AIR_STEP_ID,
         _UVVIS_SHARED_BLANK_STEP_ID,
         _UVVIS_SAMPLE_RECORD_STEP_ID,
         _UVVIS_KINETICS_SAMPLE2_STEP_ID,
@@ -3970,6 +4124,7 @@ def _is_uvvis_kinetics_step(step_id: str) -> bool:
 
 def _is_uvvis_spectra_step(step_id: str) -> bool:
     return str(step_id or "").strip() in {
+        _UVVIS_SHARED_DARK_AIR_STEP_ID,
         _UVVIS_SHARED_BLANK_STEP_ID,
         _UVVIS_SAMPLE_RECORD_STEP_ID,
     }
@@ -4024,6 +4179,17 @@ def _infer_uvvis_step_id_from_context(
         ),
     ):
         return _UVVIS_KINETICS_SAMPLE4_STEP_ID
+
+    if _contains_any(
+        context_text,
+        (
+            "暗电流和空气能量校正",
+            "共享暗电流和空气能量校正",
+            "空气能量准备",
+            "空气能量文件",
+        ),
+    ):
+        return _UVVIS_SHARED_DARK_AIR_STEP_ID
 
     if _contains_any(
         context_text,
@@ -4287,6 +4453,48 @@ def _payload_mentions_missing_blank(payload) -> bool:
     )
 
 
+def _payload_mentions_reusable_blank(payload) -> bool:
+    named = _collect_payload_named_values(payload, ("blank_baseline_exists",))
+    exists = _normalize_bool(named.get("blank_baseline_exists"))
+    if exists is True:
+        return True
+
+    text = _extract_uvvis_payload_message(payload).lower()
+    if not text:
+        return False
+
+    if not any(
+        token in text
+        for token in ("liquid blank", "pure water", "pure_water", "blank", "空白", "纯水")
+    ):
+        return False
+
+    return any(
+        token in text
+        for token in (
+            "reused",
+            "reuse",
+            "existing",
+            "exists",
+            "available",
+            "already",
+            "可复用",
+            "已存在",
+            "已有",
+            "已记录",
+            "复用",
+        )
+    )
+
+
+def _uvvis_blank_baseline_exists(conn, payload=None) -> bool:
+    if payload is not None and _payload_mentions_reusable_blank(payload):
+        return True
+
+    blank_state = getattr(conn, "_last_uvvis_blank_baseline_state", None)
+    return isinstance(blank_state, dict) and bool(blank_state.get("blank_baseline_exists"))
+
+
 def _payload_has_success_flag(payload) -> bool | None:
     data = _to_plain_data(payload)
     if isinstance(data, dict):
@@ -4437,6 +4645,8 @@ def _compose_uvvis_status_reply(conn, status: dict, *, inferred_step_id: str = "
 
     state = _get_uvvis_direct_state(conn, inferred_step_id if _is_uvvis_step(inferred_step_id) else "")
     phase = str(state.get("phase", "") or "").strip()
+    if phase == "blank_reusable":
+        return "UV-Vis 现在没有在工作。这一步已经确认当前批次纯水空白可复用，继续下一步时记得保留或重新放好参比位纯水比色皿。"
     if phase == "await_pure_water_blank":
         return "UV-Vis 现在没有在工作。暗电流和空气基线已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"
     if phase == "await_reaction_sample":
@@ -4828,6 +5038,526 @@ def _extract_uvvis_measure_kinetics_record_fields(payload, conn, run_name: str) 
     return record_fields
 
 
+def _resolve_uvvis_primary_device_dir(conn) -> Path:
+    device_dirs = _resolve_uvvis_runtime_device_dirs(conn)
+    if device_dirs:
+        target_dir = device_dirs[0]
+    else:
+        target_dir = (Path("data").resolve() / _normalize_uvvis_device_id(conn)).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
+
+
+def _write_uvvis_csv_rows(path: Path, fieldnames: list[str], rows: list[dict]) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        return True
+    except Exception:
+        return False
+
+
+def _write_uvvis_json(path: Path, payload: dict) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _format_uvvis_svg_number(value: float) -> str:
+    if isinstance(value, int):
+        return str(value)
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _write_uvvis_line_plot_svg(
+    path: Path,
+    *,
+    title: str,
+    x_label: str,
+    y_label: str,
+    series: list[dict],
+) -> bool:
+    points = []
+    for item in series:
+        for point in item.get("points", []):
+            x = _extract_float_value(point.get("x"))
+            y = _extract_float_value(point.get("y"))
+            if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
+                continue
+            points.append((x, y))
+    if not points:
+        return False
+
+    x_values = [x for x, _ in points]
+    y_values = [y for _, y in points]
+    x_min = min(x_values)
+    x_max = max(x_values)
+    y_min = min(y_values)
+    y_max = max(y_values)
+    if x_min == x_max:
+        x_min -= 1.0
+        x_max += 1.0
+    if y_min == y_max:
+        y_min -= 0.1 if y_min else 1.0
+        y_max += 0.1 if y_max else 1.0
+
+    width = 960
+    height = 560
+    left = 90
+    right = 24
+    top = 48
+    bottom = 72
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    x_span = x_max - x_min
+    y_span = y_max - y_min
+
+    def _sx(value: float) -> float:
+        return left + ((value - x_min) / x_span) * plot_width
+
+    def _sy(value: float) -> float:
+        return top + plot_height - ((value - y_min) / y_span) * plot_height
+
+    colors = (
+        "#1f77b4",
+        "#d62728",
+        "#2ca02c",
+        "#ff7f0e",
+        "#9467bd",
+        "#8c564b",
+    )
+    svg_parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect x="0" y="0" width="100%" height="100%" fill="white"/>',
+        f'<text x="{width / 2:.1f}" y="24" text-anchor="middle" font-size="20" font-family="Arial">{title}</text>',
+    ]
+
+    for index in range(6):
+        y_value = y_min + (y_span * index / 5.0)
+        y_pos = _sy(y_value)
+        svg_parts.append(
+            f'<line x1="{left}" y1="{y_pos:.2f}" x2="{left + plot_width}" y2="{y_pos:.2f}" stroke="#e5e7eb" stroke-width="1"/>'
+        )
+        svg_parts.append(
+            f'<text x="{left - 12}" y="{y_pos + 4:.2f}" text-anchor="end" font-size="11" font-family="Arial">{_format_uvvis_svg_number(y_value)}</text>'
+        )
+
+    for index in range(6):
+        x_value = x_min + (x_span * index / 5.0)
+        x_pos = _sx(x_value)
+        svg_parts.append(
+            f'<line x1="{x_pos:.2f}" y1="{top}" x2="{x_pos:.2f}" y2="{top + plot_height}" stroke="#f1f5f9" stroke-width="1"/>'
+        )
+        svg_parts.append(
+            f'<text x="{x_pos:.2f}" y="{top + plot_height + 22}" text-anchor="middle" font-size="11" font-family="Arial">{_format_uvvis_svg_number(x_value)}</text>'
+        )
+
+    svg_parts.append(
+        f'<line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" stroke="#111827" stroke-width="1.5"/>'
+    )
+    svg_parts.append(
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" stroke="#111827" stroke-width="1.5"/>'
+    )
+    svg_parts.append(
+        f'<text x="{left + plot_width / 2:.1f}" y="{height - 20}" text-anchor="middle" font-size="13" font-family="Arial">{x_label}</text>'
+    )
+    svg_parts.append(
+        f'<text x="22" y="{top + plot_height / 2:.1f}" text-anchor="middle" font-size="13" font-family="Arial" transform="rotate(-90 22 {top + plot_height / 2:.1f})">{y_label}</text>'
+    )
+
+    legend_x = left + 8
+    legend_y = 34
+    for index, item in enumerate(series):
+        clean_points = []
+        for point in item.get("points", []):
+            x = _extract_float_value(point.get("x"))
+            y = _extract_float_value(point.get("y"))
+            if x is None or y is None or not math.isfinite(x) or not math.isfinite(y):
+                continue
+            clean_points.append((x, y))
+        if not clean_points:
+            continue
+        color = item.get("color") or colors[index % len(colors)]
+        polyline = " ".join(f"{_sx(x):.2f},{_sy(y):.2f}" for x, y in clean_points)
+        svg_parts.append(
+            f'<polyline fill="none" stroke="{color}" stroke-width="2.2" points="{polyline}"/>'
+        )
+        legend_offset = index * 120
+        svg_parts.append(
+            f'<line x1="{legend_x + legend_offset}" y1="{legend_y}" x2="{legend_x + legend_offset + 18}" y2="{legend_y}" stroke="{color}" stroke-width="3"/>'
+        )
+        svg_parts.append(
+            f'<text x="{legend_x + legend_offset + 24}" y="{legend_y + 4}" font-size="12" font-family="Arial">{item.get("label", f"Series {index + 1}")}</text>'
+        )
+
+    svg_parts.append("</svg>")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(svg_parts), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _read_uvvis_absorbance_curve_csv(path_text: str) -> list[dict]:
+    path = Path(str(path_text or "").strip())
+    if not path.exists():
+        return []
+
+    points = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                wavelength_nm = _extract_float_value(
+                    row.get("wavelength_nm") or row.get("wavelength")
+                )
+                absorbance = _extract_float_value(row.get("absorbance"))
+                if wavelength_nm is None or absorbance is None:
+                    continue
+                if not math.isfinite(wavelength_nm) or not math.isfinite(absorbance):
+                    continue
+                points.append(
+                    {
+                        "wavelength_nm": wavelength_nm,
+                        "corrected_absorbance": absorbance,
+                    }
+                )
+    except Exception:
+        return []
+    points.sort(key=lambda item: item["wavelength_nm"])
+    return points
+
+
+def _extract_uvvis_measure_spectra_curve_sources(payload, conn) -> dict[int, str]:
+    sources: dict[int, str] = {}
+    data = _to_plain_data(payload)
+
+    def _visit(node):
+        if isinstance(node, dict):
+            sample_position = _extract_int_value(
+                node.get("sample_position")
+                or node.get("position")
+                or node.get("sample_index")
+            )
+            absorbance_path = str(
+                node.get("absorbance_output_csv")
+                or node.get("absorbance_csv")
+                or node.get("output_csv")
+                or node.get("csv_path")
+                or ""
+            ).strip()
+            if sample_position is not None and absorbance_path and sample_position not in sources:
+                sources[sample_position] = absorbance_path
+            for value in node.values():
+                if isinstance(value, (dict, list)):
+                    _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+
+    _visit(data)
+
+    for text in _collect_payload_strings(data):
+        lower_text = text.lower()
+        if "absorbance.csv" not in lower_text:
+            continue
+        sample_position = _extract_uvvis_sample_position_from_path(text)
+        if sample_position is not None and sample_position not in sources:
+            sources[sample_position] = text
+
+    for sample_position in _UVVIS_SAMPLE_POSITIONS:
+        if sample_position in sources:
+            continue
+        for device_dir in _resolve_uvvis_runtime_device_dirs(conn):
+            candidate_paths = [
+                device_dir / f"sample{sample_position}_latest_absorbance.csv",
+                device_dir / f"sample_run_sample{sample_position}_latest_absorbance.csv",
+                device_dir / "uvvis_measure_spectra" / f"sample{sample_position}_latest_absorbance.csv",
+            ]
+            for candidate in candidate_paths:
+                if candidate.exists():
+                    sources[sample_position] = str(candidate.resolve())
+                    break
+            if sample_position in sources:
+                break
+
+    return sources
+
+
+def _persist_uvvis_measure_spectra_artifacts(conn, payload, rows: dict[int, dict]) -> dict:
+    artifact_dir = _resolve_uvvis_primary_device_dir(conn) / "uvvis_measure_spectra"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    curve_sources = _extract_uvvis_measure_spectra_curve_sources(payload, conn)
+    sample_curves = {}
+
+    for sample_position in _UVVIS_SAMPLE_POSITIONS:
+        curve_path = str(curve_sources.get(sample_position, "") or "").strip()
+        points = _read_uvvis_absorbance_curve_csv(curve_path)
+        if not points:
+            continue
+        sample_curves[sample_position] = {
+            "source_csv": curve_path,
+            "point_count": len(points),
+            "points": points,
+        }
+
+    summary_csv_path = artifact_dir / "uvvis_spectra_latest_summary.csv"
+    summary_rows = []
+    for sample_position in _UVVIS_SAMPLE_POSITIONS:
+        row = rows.get(sample_position, {})
+        summary_rows.append(
+            {
+                "sample_position": sample_position,
+                "lambda_max_nm": row.get("lambda_max_nm", ""),
+                "max_corrected_absorbance": row.get("max_absorbance", ""),
+                "source_absorbance_csv": str(curve_sources.get(sample_position, "") or ""),
+                "point_count": sample_curves.get(sample_position, {}).get("point_count", 0),
+            }
+        )
+    summary_ok = _write_uvvis_csv_rows(
+        summary_csv_path,
+        [
+            "sample_position",
+            "lambda_max_nm",
+            "max_corrected_absorbance",
+            "source_absorbance_csv",
+            "point_count",
+        ],
+        summary_rows,
+    )
+
+    combined_csv_path = artifact_dir / "uvvis_spectra_latest_combined.csv"
+    plot_svg_path = artifact_dir / "uvvis_spectra_latest_plot.svg"
+    combined_ok = False
+    plot_ok = False
+    grid_complete = False
+    if len(sample_curves) == len(_UVVIS_SAMPLE_POSITIONS):
+        per_sample_maps = {
+            sample_position: {
+                int(round(point["wavelength_nm"])): point["corrected_absorbance"]
+                for point in curve["points"]
+            }
+            for sample_position, curve in sample_curves.items()
+        }
+        grid_complete = all(
+            all(wavelength_nm in per_sample_maps.get(sample_position, {}) for wavelength_nm in _UVVIS_SPECTRA_WAVELENGTH_GRID)
+            for sample_position in _UVVIS_SAMPLE_POSITIONS
+        )
+        combined_rows = []
+        for wavelength_nm in _UVVIS_SPECTRA_WAVELENGTH_GRID:
+            row = {"wavelength_nm": wavelength_nm}
+            for sample_position in _UVVIS_SAMPLE_POSITIONS:
+                row[f"sample_{sample_position}_corrected_absorbance"] = per_sample_maps.get(
+                    sample_position, {}
+                ).get(wavelength_nm, "")
+            combined_rows.append(row)
+        combined_ok = _write_uvvis_csv_rows(
+            combined_csv_path,
+            ["wavelength_nm"]
+            + [
+                f"sample_{sample_position}_corrected_absorbance"
+                for sample_position in _UVVIS_SAMPLE_POSITIONS
+            ],
+            combined_rows,
+        )
+        plot_ok = _write_uvvis_line_plot_svg(
+            plot_svg_path,
+            title="UV-Vis Spectra (400-700 nm, corrected)",
+            x_label="Wavelength (nm)",
+            y_label="Corrected Absorbance",
+            series=[
+                {
+                    "label": f"Sample {sample_position}",
+                    "points": [
+                        {
+                            "x": point["wavelength_nm"],
+                            "y": point["corrected_absorbance"],
+                        }
+                        for point in sample_curves[sample_position]["points"]
+                    ],
+                }
+                for sample_position in _UVVIS_SAMPLE_POSITIONS
+                if sample_position in sample_curves
+            ],
+        )
+
+    manifest = {
+        "tool_name": "uvvis_measure_spectra",
+        "generated_at_epoch": int(time.time()),
+        "device_dir": str(_resolve_uvvis_primary_device_dir(conn)),
+        "value_semantics": "corrected absorbance after dark-current and blank/reference subtraction",
+        "expected_wavelength_grid_nm": list(_UVVIS_SPECTRA_WAVELENGTH_GRID),
+        "summary_csv": str(summary_csv_path.resolve()) if summary_ok else "",
+        "combined_absorbance_csv": str(combined_csv_path.resolve()) if combined_ok else "",
+        "plot_svg": str(plot_svg_path.resolve()) if plot_ok else "",
+        "all_expected_outputs_exist": bool(
+            summary_ok
+            and combined_ok
+            and plot_ok
+            and len(sample_curves) == len(_UVVIS_SAMPLE_POSITIONS)
+            and grid_complete
+        ),
+        "sample_curves": {
+            str(sample_position): {
+                "source_csv": curve.get("source_csv", ""),
+                "point_count": curve.get("point_count", 0),
+                "lambda_max_nm": rows.get(sample_position, {}).get("lambda_max_nm"),
+                "max_corrected_absorbance": rows.get(sample_position, {}).get("max_absorbance"),
+            }
+            for sample_position, curve in sample_curves.items()
+        },
+    }
+    manifest_path = artifact_dir / "uvvis_spectra_latest_manifest.json"
+    manifest_ok = _write_uvvis_json(manifest_path, manifest)
+    artifacts = dict(manifest)
+    artifacts["manifest_json"] = str(manifest_path.resolve()) if manifest_ok else ""
+    return artifacts
+
+
+def _extract_uvvis_kinetics_series_rows(payload, conn, run_name: str, record_fields: dict) -> list[dict]:
+    absorbance_paths = []
+    for text in _collect_payload_strings(payload):
+        lower_text = text.lower()
+        if "absorbance.csv" in lower_text and run_name.lower() in lower_text:
+            absorbance_paths.append(text)
+
+    if not absorbance_paths:
+        for device_dir in _resolve_uvvis_runtime_device_dirs(conn):
+            kinetics_dir = device_dir / "uvvis_measure_kinetics" / run_name
+            if not kinetics_dir.exists():
+                continue
+            for candidate in sorted(
+                kinetics_dir.glob("*absorbance*.csv"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            ):
+                absorbance_paths.append(str(candidate))
+                break
+            if absorbance_paths:
+                break
+
+    for path_text in absorbance_paths:
+        path = Path(str(path_text or "").strip())
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = []
+                for index, row in enumerate(reader):
+                    time_index = _extract_int_value(
+                        row.get("time_index")
+                        or row.get("time_min")
+                        or row.get("minute")
+                    )
+                    if time_index is None:
+                        time_index = index
+                    absorbance = _extract_float_value(row.get("absorbance"))
+                    if absorbance is None or not math.isfinite(absorbance):
+                        continue
+                    rows.append(
+                        {
+                            "time_index": time_index,
+                            "time_min": time_index,
+                            "corrected_absorbance": absorbance,
+                        }
+                    )
+        except Exception:
+            continue
+        if rows:
+            rows.sort(key=lambda item: item["time_index"])
+            return rows
+
+    rows = []
+    for key, value in sorted(record_fields.items()):
+        match = re.fullmatch(r"t(\d+)_absorbance", str(key or ""))
+        if not match:
+            continue
+        absorbance = _extract_float_value(value)
+        if absorbance is None or not math.isfinite(absorbance):
+            continue
+        time_index = int(match.group(1))
+        rows.append(
+            {
+                "time_index": time_index,
+                "time_min": time_index,
+                "corrected_absorbance": absorbance,
+            }
+        )
+    rows.sort(key=lambda item: item["time_index"])
+    return rows
+
+
+def _persist_uvvis_measure_kinetics_artifacts(
+    conn,
+    payload,
+    *,
+    run_name: str,
+    sample_position: int,
+    record_fields: dict,
+) -> dict:
+    artifact_dir = _resolve_uvvis_primary_device_dir(conn) / "uvvis_measure_kinetics" / run_name
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    rows = _extract_uvvis_kinetics_series_rows(payload, conn, run_name, record_fields)
+
+    timeseries_csv_path = artifact_dir / f"{run_name}_kinetics_latest_timeseries.csv"
+    timeseries_ok = _write_uvvis_csv_rows(
+        timeseries_csv_path,
+        ["time_index", "time_min", "corrected_absorbance"],
+        rows,
+    )
+    time_grid_complete = {row.get("time_index") for row in rows} >= set(_UVVIS_KINETICS_TIME_GRID)
+    plot_svg_path = artifact_dir / f"{run_name}_kinetics_latest_plot.svg"
+    plot_ok = _write_uvvis_line_plot_svg(
+        plot_svg_path,
+        title=f"{run_name} kinetics at 400 nm (corrected)",
+        x_label="Time (min)",
+        y_label="Corrected Absorbance",
+        series=[
+            {
+                "label": f"Sample position {sample_position}",
+                "points": [
+                    {"x": row["time_min"], "y": row["corrected_absorbance"]}
+                    for row in rows
+                ],
+            }
+        ],
+    )
+    manifest = {
+        "tool_name": "uvvis_measure_kinetics",
+        "generated_at_epoch": int(time.time()),
+        "device_dir": str(_resolve_uvvis_primary_device_dir(conn)),
+        "run_name": run_name,
+        "sample_position": sample_position,
+        "value_semantics": "corrected absorbance after dark-current and reference subtraction",
+        "expected_time_grid_min": list(_UVVIS_KINETICS_TIME_GRID),
+        "timeseries_csv": str(timeseries_csv_path.resolve()) if timeseries_ok else "",
+        "plot_svg": str(plot_svg_path.resolve()) if plot_ok else "",
+        "time_point_count": len(rows),
+        "all_expected_outputs_exist": bool(
+            timeseries_ok and plot_ok and len(rows) >= 35 and time_grid_complete
+        ),
+    }
+    manifest_path = artifact_dir / f"{run_name}_kinetics_latest_manifest.json"
+    manifest_ok = _write_uvvis_json(manifest_path, manifest)
+    artifacts = dict(manifest)
+    artifacts["manifest_json"] = str(manifest_path.resolve()) if manifest_ok else ""
+    return artifacts
+
+
 def _filter_fields_for_schema(fields: dict, schema_by_name: dict) -> dict:
     if not fields:
         return {}
@@ -5025,7 +5755,101 @@ async def _release_uvvis_session_for_analysis(conn) -> None:
     setattr(conn, "_uvvis_analysis_release_done_step_id", step_id)
 
 
-async def _handle_uvvis_shared_blank_prep(
+async def _handle_uvvis_shared_dark_air_prep(
+    conn, original_text: str, filtered_text: str
+) -> bool:
+    if not (
+        _is_affirmative_short_reply_fixed(filtered_text)
+        or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
+        or _contains_any(
+            _normalize_text_for_match(filtered_text),
+            (
+                "暗电流",
+                "空气基线",
+                "空气能量",
+                "共享暗电流",
+                "开始uvvis",
+                "开始紫外可见",
+                "开始测量",
+                "开始扫描",
+                "可以开始扫描",
+                "空架扫描",
+            ),
+        )
+    ):
+        return False
+
+    session_key, busy_reply = await _ensure_uvvis_session_key(conn)
+    if not session_key:
+        if busy_reply:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, busy_reply)
+            return True
+        return False
+
+    await _start_direct_intent_turn(conn, original_text)
+    speak_txt(conn, "先不要放任何液体，我先进行暗电流和空气能量准备。")
+    payload = await _execute_uvvis_tool_payload(
+        conn,
+        "uvvis_measure_spectra",
+        {
+            "session_key": session_key,
+            "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+            "ready_for_samples": False,
+        },
+    )
+    if _payload_looks_busy_or_inaccessible(payload):
+        speak_txt(conn, _UVVIS_BUSY_REPLY)
+        return True
+
+    auto_advanced, reply = await _complete_experiment_step_with_fields(
+        conn,
+        fields={
+            "shared_dark_current_ready": True,
+            "shared_air_baseline_ready": True,
+            "pure_water_blank_status_checked": True,
+            "observations": "共享暗电流和空气能量校正已完成，并已确认当前批次纯水空白状态。",
+        },
+        auto_advance=True,
+        fallback_reply="暗电流和空气能量校正已经完成。",
+    )
+    if not auto_advanced:
+        if reply:
+            speak_txt(conn, reply)
+        return True
+
+    if _payload_mentions_missing_blank(payload):
+        _set_uvvis_direct_state(
+            conn,
+            step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+            phase="await_pure_water_blank",
+            session_key=session_key,
+        )
+        speak_txt(
+            conn,
+            "暗电流和空气能量校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好了告诉我，我们再做纯水空白校正。",
+        )
+        return True
+
+    if _uvvis_blank_baseline_exists(conn, payload):
+        _set_uvvis_direct_state(
+            conn,
+            step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+            phase="blank_reusable",
+            session_key=session_key,
+        )
+        speak_txt(
+            conn,
+            "暗电流和空气能量校正已经完成。当前批次纯水空白可复用。继续下一步时参比位保留或重新放好纯水比色皿就行。",
+        )
+        return True
+
+    if reply:
+        speak_txt(conn, reply)
+    return True
+
+
+async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
     conn, original_text: str, filtered_text: str, state: dict
 ) -> bool:
     session_key, busy_reply = await _ensure_uvvis_session_key(conn)
@@ -5042,7 +5866,7 @@ async def _handle_uvvis_shared_blank_prep(
             speak_txt(conn, "好，等你把纯水比色皿放好再告诉我。")
             return True
 
-        if not _is_affirmative_short_reply_fixed(filtered_text):
+        if not _looks_like_uvvis_ready_reply(filtered_text):
             return False
 
         await _start_direct_intent_turn(conn, original_text)
@@ -5153,16 +5977,122 @@ async def _handle_uvvis_shared_blank_prep(
     return True
 
 
-async def _handle_uvvis_spectra_measurement(
-    conn, original_text: str, filtered_text: str
+async def _handle_uvvis_shared_blank_prep(
+    conn, original_text: str, filtered_text: str, state: dict
 ) -> bool:
+    session_key, busy_reply = await _ensure_uvvis_session_key(conn)
+    if not session_key:
+        if busy_reply:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, busy_reply)
+            return True
+        return False
+
+    if state.get("phase") == "await_pure_water_blank":
+        if _is_negative_short_reply_fixed(filtered_text):
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，等你把纯水比色皿放好再告诉我。")
+            return True
+
+        if not _looks_like_uvvis_ready_reply(filtered_text):
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_measure_spectra",
+            {
+                "session_key": session_key,
+                "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+                "ready_for_samples": True,
+            },
+        )
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        if _payload_mentions_missing_blank(payload):
+            _set_uvvis_direct_state(
+                conn,
+                step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+                phase="await_pure_water_blank",
+                session_key=session_key,
+            )
+            speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。")
+            return True
+
+        auto_advanced, reply = await _complete_experiment_step_with_fields(
+            conn,
+            fields={
+                "pure_water_blank_ready": True,
+                "reference_cuvette_ready": True,
+                "observations": "当前批次纯水空白已记录完成，参比位纯水比色皿可继续用于后续测量。",
+            },
+            auto_advance=True,
+            fallback_reply="纯水空白已经准备好了。",
+        )
+        if auto_advanced:
+            _clear_uvvis_direct_state(conn)
+        if reply:
+            speak_txt(conn, reply)
+        return True
+
     if not (
         _is_affirmative_short_reply_fixed(filtered_text)
         or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
         or _contains_any(
             _normalize_text_for_match(filtered_text),
-            ("放好了", "都放好了", "已经放好", "可以开始了", "开始测量", "开始扫描", "测光谱"),
+            (
+                "纯水空白",
+                "纯水比色皿",
+                "空白校正",
+                "开始uvvis",
+                "开始紫外可见",
+                "开始测量",
+                "开始扫描",
+                "可以开始扫描",
+                "空白",
+            ),
         )
+    ):
+        return False
+
+    await _start_direct_intent_turn(conn, original_text)
+
+    if _uvvis_blank_baseline_exists(conn):
+        auto_advanced, reply = await _complete_experiment_step_with_fields(
+            conn,
+            fields={
+                "pure_water_blank_ready": True,
+                "reference_cuvette_ready": True,
+                "observations": "当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
+            },
+            auto_advance=True,
+            fallback_reply="当前批次纯水空白可复用，接下来装入样品比色皿。",
+        )
+        _clear_uvvis_direct_state(conn)
+        if reply:
+            speak_txt(conn, reply)
+        return True
+
+    _set_uvvis_direct_state(
+        conn,
+        step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+        phase="await_pure_water_blank",
+        session_key=session_key,
+    )
+    speak_txt(
+        conn,
+        "暗电流和空气能量校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好了告诉我，我们再做纯水空白校正。",
+    )
+    return True
+
+
+async def _handle_uvvis_spectra_measurement(
+    conn, original_text: str, filtered_text: str
+) -> bool:
+    if not (
+        _looks_like_uvvis_ready_reply(filtered_text)
+        or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
     ):
         return False
 
@@ -5202,8 +6132,16 @@ async def _handle_uvvis_spectra_measurement(
         return True
 
     rows = _extract_uvvis_measure_spectra_rows(payload, conn)
+    spectra_artifacts = _persist_uvvis_measure_spectra_artifacts(conn, payload, rows)
+    setattr(conn, "_last_uvvis_spectra_artifacts", spectra_artifacts)
     if len(rows) < 5 or any(sample_position not in rows for sample_position in _UVVIS_SAMPLE_POSITIONS):
         speak_txt(conn, "这次光谱结果还不完整，我还没拿到 1 到 5 号样品的完整结果，请稍后再试。")
+        return True
+    if not spectra_artifacts.get("all_expected_outputs_exist", False):
+        speak_txt(
+            conn,
+            "这次光谱峰位我已经拿到了，但 400 到 700 纳米每隔 10 纳米的完整校正吸光度结果或绘图还没保存成功，请稍后重试。",
+        )
         return True
 
     fields = {
@@ -5224,6 +6162,7 @@ async def _handle_uvvis_spectra_measurement(
             f"{sample_position}号样品λmax={rows[sample_position]['lambda_max_nm']}nm"
             for sample_position in _UVVIS_SAMPLE_POSITIONS
         )
+        + "；400-700nm（10nm步长）的校正吸光度结果和光谱图已保存"
     )
 
     auto_advanced, reply = await _complete_experiment_step_with_fields(
@@ -5236,7 +6175,7 @@ async def _handle_uvvis_spectra_measurement(
         f"{sample_position}号{rows[sample_position]['lambda_max_nm']}纳米"
         for sample_position in _UVVIS_SAMPLE_POSITIONS
     )
-    spoken_reply = f"{summary}。"
+    spoken_reply = f"{summary}。400到700纳米每隔10纳米的校正吸光度结果和光谱图已保存。"
     if reply:
         if reply.startswith("接下来"):
             spoken_reply = f"{spoken_reply}{reply}"
@@ -5286,10 +6225,7 @@ async def _handle_uvvis_kinetics_measurement(
         state = _get_uvvis_direct_state(conn, step_id)
 
     is_negative = _is_negative_short_reply_fixed(filtered_text)
-    is_affirmative = _is_affirmative_short_reply_fixed(filtered_text) or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"} or _contains_any(
-        _normalize_text_for_match(filtered_text),
-        ("放好了", "已经放好", "可以开始了", "开始测量", "开始动力学", "开始记录"),
-    )
+    is_affirmative = _looks_like_uvvis_ready_reply(filtered_text) or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
 
     session_key, busy_reply = await _ensure_uvvis_session_key(conn)
     if not session_key:
@@ -5407,6 +6343,21 @@ async def _handle_uvvis_kinetics_measurement(
             speak_txt(conn, "这次动力学结果还不完整，我还没拿到 35 个时间点，请稍后再试。")
             return True
 
+        kinetics_artifacts = _persist_uvvis_measure_kinetics_artifacts(
+            conn,
+            payload,
+            run_name=run_name,
+            sample_position=sample_position,
+            record_fields=record_fields,
+        )
+        setattr(conn, "_last_uvvis_kinetics_artifacts", kinetics_artifacts)
+        if not kinetics_artifacts.get("all_expected_outputs_exist", False):
+            speak_txt(
+                conn,
+                "这次动力学的 0 到 34 分钟校正吸光度结果或曲线图还没保存完整，请稍后重试。",
+            )
+            return True
+
         fields = dict(record_fields)
         extracted_optional = _collect_payload_named_values(
             payload,
@@ -5422,6 +6373,7 @@ async def _handle_uvvis_kinetics_measurement(
         fields["observations"] = (
             f"{sample_position}号样品400纳米动力学测量完成，"
             f"共记录35个时间点。"
+            "；0-34min 每分钟一个点的校正吸光度结果和动力学曲线已保存"
         )
 
         completed, reply = await _complete_experiment_step_with_fields(
@@ -5439,7 +6391,10 @@ async def _handle_uvvis_kinetics_measurement(
                 phase="done",
                 session_key=session_key,
             )
-            speak_txt(conn, "我记录好了，可以继续进行下一步了吗？")
+            speak_txt(
+                conn,
+                "我记录好了，可以继续进行下一步了吗？0到34分钟每分钟一个点的校正吸光度结果和动力学曲线也已经保存。",
+            )
         elif reply:
             speak_txt(conn, reply)
         else:
@@ -5511,6 +6466,22 @@ async def _handle_uvvis_kinetics_measurement(
     return False
 
 
+def _compose_uvvis_step_rejection_reply(step_id: str) -> str:
+    step_id = str(step_id or "").strip()
+    if step_id == _UVVIS_SHARED_DARK_AIR_STEP_ID:
+        return "当前实验图谱还没推进到 UV-Vis 的共享暗电流和空气能量校正，先完成丁达尔现象观察。"
+    if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
+        return "当前实验图谱还没推进到 UV-Vis 的纯水空白校正，先完成共享暗电流和空气能量校正。"
+    if step_id == _UVVIS_SAMPLE_RECORD_STEP_ID:
+        return "当前实验图谱还没推进到 1-5 号样品的批量光谱测量，先完成前面的装样准备。"
+    if step_id in {
+        _UVVIS_KINETICS_SAMPLE2_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE4_STEP_ID,
+    }:
+        return "当前实验图谱还没推进到对应的 400 纳米动力学测量，先完成前面的动力学配液准备。"
+    return _UVVIS_NOT_READY_REPLY
+
+
 async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: str) -> bool:
     step_id = _get_current_experiment_step_id(conn)
     status_query = _looks_like_uvvis_status_query(
@@ -5570,6 +6541,9 @@ async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: st
         return False
 
     state = _get_uvvis_direct_state(conn, step_id)
+
+    if step_id == _UVVIS_SHARED_DARK_AIR_STEP_ID:
+        return await _handle_uvvis_shared_dark_air_prep(conn, original_text, filtered_text)
 
     if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
         return await _handle_uvvis_shared_blank_prep(conn, original_text, filtered_text, state)
