@@ -1,10 +1,13 @@
 import os
+import re
+from pathlib import Path
 import yaml
 from collections.abc import Mapping
 from config.manage_api_client import init_service, get_server_config, get_agent_models
 
 
 DEFAULT_CONFIG_CANDIDATES = ("config.yaml", "config_back.yaml")
+_CONFIG_TEMPLATE_RE = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
 
 
 def get_project_dir():
@@ -35,6 +38,133 @@ def read_config(config_path, required=True):
             f"Config file must contain a mapping at the top level: {config_path}"
         )
     return config
+
+
+def _expand_template_string(value: str, variables: Mapping[str, str]) -> str:
+    text = str(value or "")
+    if not text or "${" not in text:
+        return text
+
+    def _replace(match):
+        key = str(match.group(1) or "").strip()
+        replacement = variables.get(key)
+        if not key or replacement in (None, ""):
+            return match.group(0)
+        return str(replacement)
+
+    return _CONFIG_TEMPLATE_RE.sub(_replace, text)
+
+
+def _join_config_path(base: str, *parts: str) -> str:
+    return Path(base, *parts).as_posix()
+
+
+def _build_experiment_path_variables(config: Mapping) -> dict[str, str]:
+    experiment_paths = config.get("experiment_paths", {}) or {}
+    if not isinstance(experiment_paths, Mapping):
+        experiment_paths = {}
+
+    variables = {
+        "workspace_root": str(experiment_paths.get("workspace_root", "") or "").strip(),
+        "lab_runs_root": str(experiment_paths.get("lab_runs_root", "") or "").strip(),
+        "experiment_name": str(experiment_paths.get("experiment_name", "") or "").strip(),
+        "experiment_root": str(experiment_paths.get("experiment_root", "") or "").strip(),
+        "experiment_config_root": str(
+            experiment_paths.get("experiment_config_root", "") or ""
+        ).strip(),
+        "experiment_data_root": str(
+            experiment_paths.get("experiment_data_root", "") or ""
+        ).strip(),
+        "experiment_yaml_path": str(
+            experiment_paths.get("experiment_yaml_path", "") or ""
+        ).strip(),
+        "prompt_template_path": str(
+            experiment_paths.get("prompt_template_path", "") or ""
+        ).strip(),
+        "uvvis_scan_output_root": str(
+            experiment_paths.get("uvvis_scan_output_root", "") or ""
+        ).strip(),
+    }
+
+    for _ in range(6):
+        variables = {
+            key: _expand_template_string(value, variables)
+            for key, value in variables.items()
+        }
+        if not variables.get("lab_runs_root") and variables.get("workspace_root"):
+            variables["lab_runs_root"] = _join_config_path(
+                variables["workspace_root"], "lab_runs"
+            )
+        if (
+            not variables.get("experiment_root")
+            and variables.get("lab_runs_root")
+            and variables.get("experiment_name")
+        ):
+            variables["experiment_root"] = _join_config_path(
+                variables["lab_runs_root"], variables["experiment_name"]
+            )
+        if not variables.get("experiment_config_root") and variables.get("experiment_root"):
+            variables["experiment_config_root"] = _join_config_path(
+                variables["experiment_root"], "configs"
+            )
+        if not variables.get("experiment_data_root") and variables.get("experiment_root"):
+            variables["experiment_data_root"] = _join_config_path(
+                variables["experiment_root"], "data"
+            )
+        if (
+            not variables.get("experiment_yaml_path")
+            and variables.get("experiment_config_root")
+        ):
+            variables["experiment_yaml_path"] = _join_config_path(
+                variables["experiment_config_root"], "experiments.yaml"
+            )
+        if (
+            not variables.get("prompt_template_path")
+            and variables.get("experiment_config_root")
+        ):
+            variables["prompt_template_path"] = _join_config_path(
+                variables["experiment_config_root"], "local_prompt.txt"
+            )
+        if (
+            not variables.get("uvvis_scan_output_root")
+            and variables.get("experiment_data_root")
+        ):
+            variables["uvvis_scan_output_root"] = _join_config_path(
+                variables["experiment_data_root"], "uv_data_common"
+            )
+
+    return variables
+
+
+def _expand_config_templates(value, variables: Mapping[str, str]):
+    if isinstance(value, Mapping):
+        return {
+            key: _expand_config_templates(sub_value, variables)
+            for key, sub_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_expand_config_templates(item, variables) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_expand_config_templates(item, variables) for item in value)
+    if isinstance(value, str):
+        return _expand_template_string(value, variables)
+    return value
+
+
+def apply_config_path_templates(config: Mapping) -> dict:
+    if not isinstance(config, Mapping):
+        return config
+
+    variables = _build_experiment_path_variables(config)
+    expanded = _expand_config_templates(dict(config), variables)
+
+    if not isinstance(expanded.get("experiment_paths"), Mapping):
+        expanded["experiment_paths"] = {}
+    expanded["experiment_paths"] = {
+        **expanded["experiment_paths"],
+        **{key: value for key, value in variables.items() if value},
+    }
+    return expanded
 
 
 def load_config():
@@ -80,6 +210,7 @@ def load_config():
         else:
             config = default_config
     # 初始化目录
+    config = apply_config_path_templates(config)
     ensure_directories(config)
 
     # 缓存配置
@@ -102,6 +233,8 @@ async def get_config_from_api_async(config):
         "url": config["manager-api"].get("url", ""),
         "secret": config["manager-api"].get("secret", ""),
     }
+    if config.get("experiment_paths"):
+        config_data["experiment_paths"] = config.get("experiment_paths")
     auth_enabled = config_data.get("server", {}).get("auth", {}).get("enabled", False)
     # server的配置以本地为准
     if config.get("server"):

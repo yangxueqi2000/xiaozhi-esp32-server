@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mcp.types import LoggingMessageNotificationParams
@@ -102,12 +103,51 @@ class ServerMCPManager:
         try:
             with open(self.config_path, "r", encoding="utf-8") as handle:
                 config = json.load(handle)
-            return config.get("mcpServers", {})
+            mcp_servers = config.get("mcpServers", {})
+            self._inject_runtime_server_overrides(mcp_servers)
+            return mcp_servers
         except Exception as exc:
             logger.bind(tag=TAG).error(
                 f"Error loading MCP config from {self.config_path}: {exc}"
             )
             return {}
+
+    def _resolve_experiment_yaml_path(self) -> str:
+        yaml_path = str(getattr(self.conn, "experiment_yaml_path", "") or "").strip()
+        if not yaml_path:
+            resolver = getattr(self.conn, "_resolve_experiment_yaml_path", None)
+            if callable(resolver):
+                try:
+                    yaml_path = str(resolver() or "").strip()
+                except Exception as exc:
+                    logger.bind(tag=TAG).warning(
+                        f"Failed to resolve experiment yaml_path from runtime config: {exc}"
+                    )
+                    yaml_path = ""
+        if not yaml_path:
+            return ""
+        try:
+            return str(Path(yaml_path).expanduser().resolve())
+        except Exception:
+            return yaml_path
+
+    def _inject_runtime_server_overrides(self, mcp_servers: Dict[str, Any]) -> None:
+        if not isinstance(mcp_servers, dict):
+            return
+
+        experiment_server = mcp_servers.get("experiment-graph")
+        if not isinstance(experiment_server, dict):
+            return
+
+        experiment_yaml_path = self._resolve_experiment_yaml_path()
+        if not experiment_yaml_path:
+            return
+
+        env = experiment_server.get("env")
+        if not isinstance(env, dict):
+            env = {}
+            experiment_server["env"] = env
+        env["EXPERIMENT_YAML_PATH"] = experiment_yaml_path
 
     @staticmethod
     def _resolve_client_initialize_timeout(srv_config: Dict[str, Any]) -> float:
@@ -293,9 +333,8 @@ class ServerMCPManager:
             return True
         if missing_required_tools:
             logger.bind(tag=TAG).warning(
-                "MCP client %s is missing required tools %s; forcing a refresh",
-                client_name,
-                sorted(missing_required_tools),
+                f"MCP client {client_name} is missing required tools "
+                f"{sorted(missing_required_tools)}; forcing a refresh"
             )
 
         reconnect_lock = self._get_reconnect_lock(client_name)
@@ -335,9 +374,8 @@ class ServerMCPManager:
         missing_required_tools = self._missing_required_tools(client_name)
         if missing_required_tools:
             logger.bind(tag=TAG).warning(
-                "MCP client %s is still missing required tools after refresh: %s",
-                client_name,
-                sorted(missing_required_tools),
+                f"MCP client {client_name} is still missing required tools after "
+                f"refresh: {sorted(missing_required_tools)}"
             )
             return False
         return True

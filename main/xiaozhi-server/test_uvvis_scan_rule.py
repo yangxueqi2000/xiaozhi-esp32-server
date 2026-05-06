@@ -39,6 +39,33 @@ class _FakeConn:
 
 
 class UVVisScanRuleTest(unittest.IsolatedAsyncioTestCase):
+    def test_prepare_arguments_uses_experiment_yaml_data_dir_without_hardcoded_experiment_name(self):
+        conn = _FakeConn()
+        rule = UVVisScanRule(conn, lambda: None)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            experiment_root = Path(tmp_dir) / "lab_runs" / "exp_demo"
+            yaml_path = experiment_root / "configs" / "experiments.yaml"
+            yaml_path.parent.mkdir(parents=True, exist_ok=True)
+            yaml_path.write_text("name: demo\n", encoding="utf-8")
+            conn.experiment_yaml_path = str(yaml_path)
+            arguments = {
+                "sample_positions": [1, 2, 3, 4, 5],
+                "ready_for_samples": True,
+            }
+
+            rule.prepare_arguments("uvvis_measure_spectra", arguments)
+
+        expected = str(
+            (
+                experiment_root
+                / "data"
+                / "uv_data_common"
+                / "94_a9_90_28_ea_58"
+            ).resolve()
+        )
+        self.assertEqual(expected, arguments["output_dir"])
+
     def test_prepare_arguments_routes_shared_pure_water_blank_to_common_output_dir(self):
         conn = _FakeConn()
         conn.experiment_current_step_id = "step_3_uv_vis_shared_dark_blank_prep"

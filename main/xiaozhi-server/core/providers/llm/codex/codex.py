@@ -16,6 +16,9 @@ from core.providers.llm.system_prompt import get_system_prompt_for_function
 
 TAG = __name__
 logger = setup_logging()
+_SERVER_ROOT = Path(__file__).resolve().parents[4]
+_DEFAULT_MCP_SETTINGS_PATH = _SERVER_ROOT / "data" / ".mcp_server_settings.json"
+_DEFAULT_CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 
 
 def _ts() -> str:
@@ -74,6 +77,142 @@ def _decode_stderr_line(line: Any) -> str:
             "big5",
         ),
     )
+
+
+def _resolve_optional_path(path_text: Any, base_dir: Optional[Path] = None) -> Optional[Path]:
+    raw = str(path_text or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute() and base_dir is not None:
+        path = base_dir / path
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _snapshot_file_state(path: Path) -> Optional[Tuple[int, int]]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _snapshot_watched_paths(paths: List[Path]) -> Dict[str, Optional[Tuple[int, int]]]:
+    snapshot: Dict[str, Optional[Tuple[int, int]]] = {}
+    for path in paths:
+        key = str(path)
+        if key in snapshot:
+            continue
+        snapshot[key] = _snapshot_file_state(path)
+    return snapshot
+
+
+def _toml_key(key: str) -> str:
+    text = str(key or "")
+    if re.fullmatch(r"[A-Za-z0-9_-]+", text):
+        return text
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _toml_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        if not (value == value) or value in (float("inf"), float("-inf")):
+            raise ValueError(f"unsupported float value for TOML literal: {value}")
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
+    if isinstance(value, dict):
+        items = []
+        for key, item in value.items():
+            if item is None:
+                continue
+            items.append(f"{_toml_key(str(key))} = {_toml_literal(item)}")
+        return "{ " + ", ".join(items) + " }"
+    raise TypeError(f"unsupported TOML literal type: {type(value).__name__}")
+
+
+def _load_codex_mcp_config_overrides(settings_path: Optional[Path]) -> List[str]:
+    if settings_path is None or not settings_path.exists():
+        return []
+
+    try:
+        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"codex mcp settings load failed: path={settings_path} error={exc}"
+        )
+        return []
+
+    servers = raw.get("mcpServers")
+    if not isinstance(servers, dict):
+        return []
+
+    overrides: List[str] = []
+    for name, server_cfg in servers.items():
+        server_name = str(name or "").strip()
+        if not server_name or not re.fullmatch(r"[A-Za-z0-9_-]+", server_name):
+            logger.bind(tag=TAG).warning(
+                f"codex mcp settings skipped unsupported server name: {server_name or '<empty>'}"
+            )
+            continue
+        if not isinstance(server_cfg, dict):
+            continue
+
+        prefix = f"mcp_servers.{server_name}"
+        url = str(server_cfg.get("url", "") or "").strip()
+        if url:
+            transport = str(server_cfg.get("transport", "") or "streamable-http").strip()
+            overrides.append(f"{prefix}.type={_toml_literal(transport)}")
+            overrides.append(f"{prefix}.url={_toml_literal(url)}")
+
+            headers = server_cfg.get("headers")
+            if isinstance(headers, dict) and headers:
+                overrides.append(
+                    f"{prefix}.headers={_toml_literal({str(k): str(v) for k, v in headers.items() if v is not None})}"
+                )
+            bearer_token_env_var = str(
+                server_cfg.get("bearer_token_env_var", "") or ""
+            ).strip()
+            if bearer_token_env_var:
+                overrides.append(
+                    f"{prefix}.bearer_token_env_var={_toml_literal(bearer_token_env_var)}"
+                )
+            continue
+
+        command = str(server_cfg.get("command", "") or "").strip()
+        if not command:
+            continue
+
+        transport = str(server_cfg.get("transport", "") or "stdio").strip()
+        overrides.append(f"{prefix}.type={_toml_literal(transport)}")
+        overrides.append(f"{prefix}.command={_toml_literal(command)}")
+
+        args = server_cfg.get("args")
+        if isinstance(args, list):
+            overrides.append(
+                f"{prefix}.args={_toml_literal([str(item) for item in args])}"
+            )
+
+        env = server_cfg.get("env")
+        if isinstance(env, dict) and env:
+            overrides.append(
+                f"{prefix}.env={_toml_literal({str(k): str(v) for k, v in env.items() if v is not None})}"
+            )
+
+        cwd = str(server_cfg.get("cwd", "") or "").strip()
+        if cwd:
+            overrides.append(f"{prefix}.cwd={_toml_literal(cwd)}")
+
+    return overrides
 
 
 def _is_server_request(msg: Dict) -> bool:
@@ -315,6 +454,9 @@ def _should_suppress_stderr_warning(text: str) -> bool:
     if _is_benign_process_cleanup_warning(text):
         return True
 
+    if _is_benign_powershell_profile_warning(text):
+        return True
+
     return False
 
 
@@ -356,6 +498,28 @@ def _is_benign_process_cleanup_warning(text: str) -> bool:
         "没有此任务的实例在运行",
     )
     return any(marker in text for marker in chinese_markers)
+
+
+def _is_benign_powershell_profile_warning(text: str) -> bool:
+    normalized = _normalize_whitespace(text).lower()
+    if not normalized:
+        return False
+
+    profile_markers = (
+        "windowspowershell\\profile.ps1",
+        "windowspowershell/profile.ps1",
+        "microsoft.powershell_profile.ps1",
+    )
+    if any(marker in normalized for marker in profile_markers):
+        return True
+
+    if "about_execution_policies" in normalized:
+        return True
+
+    if "pssecurityexception" in normalized and "unauthorizedaccess" in normalized:
+        return True
+
+    return False
 
 
 def _recoverable_stderr_reason(text: str) -> Optional[str]:
@@ -809,6 +973,13 @@ def _experiment_prompt_block(
             "- If you have not called get_step, get_state, get_progress_summary, get_current_progress, start_trial, add_field, add_fields, finish_trial, can_proceed, proceed_to_next_step, redirect_to_step, redo_trial, or modify_record on this turn, stay anchored to the trusted current step instead of improvising later steps from old dialogue, prefetched summaries, or memory."
         )
     parts.append(
+        "MCP execution guard:\n"
+        "- The experiment-graph, UV-Vis, and xiaozhi device capabilities for this runtime are already exposed through connected MCP tools when configured.\n"
+        "- Do not launch local MCP server scripts, wrapper processes, or ad-hoc Python MCP clients from shell commands just to inspect or call those capabilities.\n"
+        "- In particular, do not run local paths such as experimental_graph_mcp.py, experiment_graph_mcp_server.py, uvvis_http_wrapper.py, or device_trigger_mcp_server.py from shell or Python probes; call the connected MCP tools directly instead.\n"
+        "- If a needed MCP tool is unavailable on this turn, continue with non-tool guidance or explain what is missing, but do not bypass the runtime by spawning replacement shell-based MCP sessions."
+    )
+    parts.append(
         "UV-Vis execution guard:\n"
         "- The UV-Vis MCP tools are available in this runtime.\n"
         "- For standalone dark-current preparation, use uvvis_prepare_dark_current first.\n"
@@ -845,6 +1016,21 @@ class _CodexSession:
         self.export_api_key = bool(config.get("export_api_key", False))
         self.env_overrides = config.get("env", {}) or {}
         self.runtime_config = config.get("runtime_config", {}) or {}
+        configured_mcp_settings_path = config.get("mcp_settings_path")
+        self.mcp_settings_path = _resolve_optional_path(
+            configured_mcp_settings_path,
+            _SERVER_ROOT,
+        ) or _DEFAULT_MCP_SETTINGS_PATH
+        configured_codex_config_path = config.get("codex_config_path")
+        self.codex_config_path = _resolve_optional_path(
+            configured_codex_config_path,
+            _SERVER_ROOT,
+        ) or _DEFAULT_CODEX_CONFIG_PATH
+        self.app_server_config_overrides = [
+            str(item).strip()
+            for item in (config.get("app_server_config_overrides") or [])
+            if str(item).strip()
+        ]
         self.emit_events = bool(config.get("emit_events", False))
         self.thinking_mode = (config.get("thinking_mode") or "off").lower()
         self.show_actions = bool(config.get("show_actions", False))
@@ -890,6 +1076,8 @@ class _CodexSession:
         self._restart_required = False
         self._restart_reason: Optional[str] = None
         self._lock = threading.Lock()
+        self._watched_config_paths = self._build_watched_config_paths()
+        self._watched_config_state = _snapshot_watched_paths(self._watched_config_paths)
 
     @staticmethod
     def _looks_like_filesystem_path(path_text: str) -> bool:
@@ -960,6 +1148,52 @@ class _CodexSession:
             if candidate_path.exists():
                 return str(candidate_path)
         return ""
+
+    def _build_watched_config_paths(self) -> List[Path]:
+        candidates = [
+            self.mcp_settings_path,
+            self.codex_config_path,
+            _resolve_optional_path(Path(self.workspace) / ".mcp.json"),
+            _resolve_optional_path(Path(self.workspace) / ".codex" / "config.toml"),
+        ]
+        paths: List[Path] = []
+        seen = set()
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(candidate)
+        return paths
+
+    def _consume_config_change_reason(self) -> Optional[str]:
+        current_state = _snapshot_watched_paths(self._watched_config_paths)
+        changed_paths = [
+            path
+            for path, state in current_state.items()
+            if self._watched_config_state.get(path) != state
+        ]
+        if not changed_paths:
+            return None
+
+        self._watched_config_state = current_state
+        labels = ", ".join(Path(path).name for path in changed_paths[:4])
+        if len(changed_paths) > 4:
+            labels += ", ..."
+        return labels
+
+    def _build_app_server_command(self) -> List[str]:
+        cmd = [self.codex_bin, "app-server"]
+
+        for override in _load_codex_mcp_config_overrides(self.mcp_settings_path):
+            cmd.extend(["-c", override])
+
+        for override in self.app_server_config_overrides:
+            cmd.extend(["-c", override])
+
+        return cmd
 
     def _next_id(self) -> int:
         rid = self._req_id
@@ -1055,14 +1289,16 @@ class _CodexSession:
             env["PATH"] = codex_bin_dir + os.pathsep + env.get("PATH", "")
         env.update(self.env_overrides)
 
+        launch_cmd = self._build_app_server_command()
         self.proc = subprocess.Popen(
-            [self.codex_bin, "app-server"],
+            launch_cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=self.workspace,
             env=env,
         )
+        self._watched_config_state = _snapshot_watched_paths(self._watched_config_paths)
 
         threading.Thread(target=self._pump_stderr, daemon=True).start()
         self.q = queue.Queue()
@@ -1131,7 +1367,14 @@ class _CodexSession:
 
     def start(self) -> None:
         if self.proc and self.proc.poll() is None:
-            if self._restart_required:
+            config_change_reason = self._consume_config_change_reason()
+            if config_change_reason:
+                logger.bind(tag=TAG).info(
+                    "restarting codex session after config change: "
+                    f"session={self.session_key} files={config_change_reason}"
+                )
+                self.close()
+            elif self._restart_required:
                 logger.bind(tag=TAG).info(
                     "restarting codex session after recoverable stderr: "
                     f"session={self.session_key} reason={self._restart_reason or 'unknown'}"

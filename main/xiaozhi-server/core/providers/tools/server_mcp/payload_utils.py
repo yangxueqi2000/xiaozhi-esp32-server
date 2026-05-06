@@ -182,7 +182,7 @@ def _experiment_result_body(payload):
     return {}
 
 
-def _extract_experiment_session_id(payload, arguments: dict | None = None) -> str:
+def extract_experiment_session_id(payload, arguments: dict | None = None) -> str:
     body = _experiment_result_body(payload)
     for key in ("session_id", "sessionId"):
         value = str(body.get(key, "") or "").strip()
@@ -195,6 +195,25 @@ def _extract_experiment_session_id(payload, arguments: dict | None = None) -> st
             if value:
                 return value
     return str((arguments or {}).get("session_id", "") or "").strip()
+
+
+def extract_experiment_message(payload) -> str:
+    body = _experiment_result_body(payload)
+    if not isinstance(body, dict):
+        return ""
+
+    for key in ("message", "error", "detail"):
+        value = str(body.get(key, "") or "").strip()
+        if value:
+            return value
+
+    state = body.get("state")
+    if isinstance(state, dict):
+        for key in ("message", "error", "detail"):
+            value = str(state.get(key, "") or "").strip()
+            if value:
+                return value
+    return ""
 
 
 def _extract_experiment_current_step_id(payload) -> str:
@@ -339,7 +358,7 @@ def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None, ar
         setattr(conn, "_current_turn_server_mcp_tool_names", current_turn_tools)
 
     if actual_tool_name in _EXPERIMENT_GRAPH_TOOLS:
-        session_id = _extract_experiment_session_id(payload, arguments=arguments)
+        session_id = extract_experiment_session_id(payload, arguments=arguments)
         if session_id:
             setattr(conn, "experiment_session_id", session_id)
 

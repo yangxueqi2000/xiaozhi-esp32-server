@@ -55,6 +55,8 @@ from core.utils.experiment_resume import (
     enrich_latest_user_utterance_log,
 )
 from core.providers.tools.server_mcp.payload_utils import (
+    extract_experiment_message,
+    extract_experiment_session_id,
     finalize_server_mcp_payload,
     sync_server_mcp_payload_state,
 )
@@ -1541,15 +1543,7 @@ class ConnectionHandler:
 
     @staticmethod
     def _extract_experiment_session_id(payload: Any) -> str:
-        if isinstance(payload, dict):
-            for key in ("session_id", "sessionId"):
-                value = str(payload.get(key, "")).strip()
-                if value:
-                    return value
-            nested = payload.get("result")
-            if nested is not None:
-                return ConnectionHandler._extract_experiment_session_id(nested)
-        return ""
+        return extract_experiment_session_id(payload)
 
     @staticmethod
     def _experiment_result_body(payload: Any) -> Dict[str, Any]:
@@ -2214,6 +2208,11 @@ class ConnectionHandler:
                     )
                     session_id = self._extract_experiment_session_id(create_payload)
                     if not session_id:
+                        create_message = extract_experiment_message(create_payload)
+                        if create_message:
+                            raise RuntimeError(
+                                f"create_session failed: {create_message}"
+                            )
                         raise RuntimeError("create_session returned empty session_id")
 
                     progress_summary_payload = await self._call_experiment_graph_tool(

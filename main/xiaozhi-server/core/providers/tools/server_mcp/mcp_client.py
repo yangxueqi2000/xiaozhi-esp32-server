@@ -151,6 +151,17 @@ class ServerMCPClient:
 
         worker_task = self._worker_task
         self._shutdown_evt.set()
+        if self._worker_error is not None:
+            try:
+                await asyncio.gather(worker_task, return_exceptions=True)
+            except Exception:
+                pass
+            self._worker_task = None
+            self._reset_runtime_state()
+            self._ready_evt = asyncio.Event()
+            self._shutdown_evt = asyncio.Event()
+            self._worker_error = None
+            return
         try:
             await asyncio.wait_for(asyncio.shield(worker_task), timeout=20)
         except (asyncio.TimeoutError, Exception) as e:

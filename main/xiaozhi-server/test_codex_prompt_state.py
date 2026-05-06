@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import types
@@ -35,6 +36,7 @@ from core.providers.llm.codex.codex import (
     _CodexSession,
     _decode_stderr_line,
     _experiment_prompt_block,
+    _load_codex_mcp_config_overrides,
     _recoverable_stderr_reason,
     _should_suppress_stderr_warning,
 )
@@ -137,6 +139,57 @@ class CodexPromptStateTest(unittest.TestCase):
 
         self.assertEqual('错误: 没有找到进程 "14392"。\r\n', _decode_stderr_line(raw_line))
 
+    def test_powershell_profile_execution_policy_warning_is_suppressed(self):
+        warning_text = (
+            ". : Cannot load file "
+            "C:\\Users\\11979\\Documents\\WindowsPowerShell\\profile.ps1 "
+            "because running scripts is disabled on this system.\n"
+            "    + CategoryInfo          : SecurityError: (:) [], PSSecurityException\n"
+            "    + FullyQualifiedErrorId : UnauthorizedAccess"
+        )
+
+        self.assertTrue(_should_suppress_stderr_warning(warning_text))
+
+    def test_load_codex_mcp_config_overrides_reads_stdio_env_from_settings_json(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            settings_path = Path(tmp_dir) / ".mcp_server_settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "experiment-graph": {
+                                "command": "C:/Python/python.exe",
+                                "args": ["C:/repo/experiment_graph_mcp_server.py"],
+                                "env": {
+                                    "EXPERIMENT_YAML_PATH": "C:/repo/experiments.yaml",
+                                    "PYTHONUTF8": "1",
+                                },
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            overrides = _load_codex_mcp_config_overrides(settings_path)
+
+        self.assertIn(
+            'mcp_servers.experiment-graph.command="C:/Python/python.exe"',
+            overrides,
+        )
+        self.assertIn(
+            'mcp_servers.experiment-graph.args=["C:/repo/experiment_graph_mcp_server.py"]',
+            overrides,
+        )
+        env_override = next(
+            item
+            for item in overrides
+            if item.startswith("mcp_servers.experiment-graph.env=")
+        )
+        self.assertIn('EXPERIMENT_YAML_PATH = "C:/repo/experiments.yaml"', env_override)
+        self.assertIn('PYTHONUTF8 = "1"', env_override)
+
     def test_timeout_without_current_step_uses_operation_template(self):
         prompt_text = self._first_prompt_with_experiment_context(
             "\u6211\u73b0\u5728\u4e0b\u4e00\u6b65\u8be5\u505a\u4ec0\u4e48",
@@ -235,6 +288,9 @@ class CodexPromptStateTest(unittest.TestCase):
             "Do not narrate backend bookkeeping such as '我先记下…'",
             prompt_text,
         )
+        self.assertIn("MCP execution guard:", prompt_text)
+        self.assertIn("Do not launch local MCP server scripts", prompt_text)
+        self.assertIn("call the connected MCP tools directly instead", prompt_text)
         self.assertIn("UV-Vis execution guard:", prompt_text)
         self.assertIn("uvvis_prepare_dark_current", prompt_text)
         self.assertIn("inspect the shared uv_data_common directory", prompt_text)

@@ -37,12 +37,38 @@ sys.modules.setdefault("pydub", fake_pydub_module)
 
 from core.providers.tools.server_mcp.payload_utils import (
     build_server_mcp_spoken_response,
+    extract_experiment_message,
+    extract_experiment_session_id,
     finalize_server_mcp_payload,
     sync_server_mcp_payload_state,
 )
 
 
 class ServerMCPPayloadUtilsTest(unittest.TestCase):
+    def test_extract_experiment_session_id_reads_state_payload(self):
+        payload = {
+            "result": {
+                "state": {
+                    "session_id": "exp-42",
+                }
+            }
+        }
+
+        self.assertEqual("exp-42", extract_experiment_session_id(payload))
+
+    def test_extract_experiment_message_reads_nested_result_message(self):
+        payload = {
+            "result": {
+                "ok": False,
+                "message": "failed to create session: title is required",
+            }
+        }
+
+        self.assertEqual(
+            "failed to create session: title is required",
+            extract_experiment_message(payload),
+        )
+
     def test_export_records_to_yaml_validation_marks_existing_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

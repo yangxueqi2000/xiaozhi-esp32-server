@@ -159,6 +159,21 @@ class PromptManager:
         if yaml_path:
             extra_vars["codex_yaml_path"] = yaml_path
             extra_vars["yaml_path"] = yaml_path
+            try:
+                yaml_file = Path(yaml_path)
+                config_dir = yaml_file.parent
+                experiment_root = (
+                    config_dir.parent
+                    if config_dir.name.lower() == "configs"
+                    else config_dir
+                )
+                extra_vars["experiment_root"] = str(experiment_root)
+                extra_vars["experiment_config_root"] = str(
+                    experiment_root / "configs"
+                )
+                extra_vars["experiment_data_root"] = str(experiment_root / "data")
+            except Exception:
+                pass
         if markdown_path:
             extra_vars["codex_markdown_path"] = markdown_path
             extra_vars["markdown_path"] = markdown_path

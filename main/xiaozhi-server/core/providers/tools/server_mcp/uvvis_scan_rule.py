@@ -22,7 +22,6 @@ from .uvvis_spoken import (
 FAILED_SCAN_STATES = {"failed", "error", "cancelled", "canceled"}
 RUNNING_SCAN_STATE = "running"
 QUEUED_SCAN_STATE = "queued"
-DEFAULT_UVVIS_SCAN_OUTPUT_SUBDIR = Path("lab_runs") / "exp1_AgNPs_synthesis" / "data" / "uv_data_common"
 _UVVIS_SHARED_SPECTRA_STEP_IDS = {
     "step_3_uv_vis_shared_dark_air_prep",
     "step_3_uv_vis_shared_dark_blank_prep",
@@ -402,11 +401,6 @@ class UVVisScanRule:
         experiment_root = _resolve_experiment_uvvis_output_root(self.conn)
         if experiment_root is not None:
             return experiment_root
-
-        llm_cfg = self.conn.config.get("LLM", {}).get("codex_app_server", {}) or {}
-        workspace = str(llm_cfg.get("workspace", "")).strip()
-        if workspace:
-            return (Path(workspace).resolve() / DEFAULT_UVVIS_SCAN_OUTPUT_SUBDIR).resolve()
 
         return (Path("data") / "uv_data_common").resolve()
 

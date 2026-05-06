@@ -4462,17 +4462,6 @@ def _resolve_uvvis_native_output_root(conn) -> Path:
         if candidate.name.lower() == "uv_data_common":
             return candidate
 
-    llm_cfg = conn.config.get("LLM", {}).get("codex_app_server", {}) or {}
-    workspace = str(llm_cfg.get("workspace", "") or "").strip()
-    if workspace:
-        return (
-            Path(workspace).expanduser().resolve()
-            / "lab_runs"
-            / "exp1_AgNPs_synthesis"
-            / "data"
-            / "uv_data_common"
-        ).resolve()
-
     return (Path("data") / "uv_data_common").resolve()
 
 
@@ -4484,15 +4473,6 @@ def _resolve_uvvis_root_candidates(conn) -> list[Path]:
         root = Path(override_root).expanduser().resolve()
         candidates.append(root)
         candidates.append(root.parent)
-
-    llm_cfg = conn.config.get("LLM", {}).get("codex_app_server", {}) or {}
-    workspace = str(llm_cfg.get("workspace", "") or "").strip()
-    if workspace:
-        workspace_root = Path(workspace).expanduser().resolve()
-        candidates.append(workspace_root / "lab_runs" / "exp1_AgNPs_synthesis" / "data")
-        candidates.append(
-            workspace_root / "lab_runs" / "exp1_AgNPs_synthesis" / "data" / "uv_data_common"
-        )
 
     candidates.extend(_resolve_uvvis_experiment_data_dirs(conn))
 
@@ -4521,41 +4501,11 @@ def _resolve_uvvis_runtime_device_dirs(conn) -> list[Path]:
 def _resolve_uvvis_shared_blank_dirs(conn) -> list[Path]:
     candidates: list[Path] = []
 
-    override_root = str(conn.config.get("uvvis_scan_output_root", "") or "").strip()
-    if override_root:
-        root = Path(override_root).expanduser().resolve()
-        candidates.append((root / "uv_data_common").resolve())
-        candidates.append(root)
-
-    llm_cfg = conn.config.get("LLM", {}).get("codex_app_server", {}) or {}
-    workspace = str(llm_cfg.get("workspace", "") or "").strip()
-    if workspace:
-        workspace_root = Path(workspace).expanduser().resolve()
-        candidates.append(
-            (
-                workspace_root
-                / "lab_runs"
-                / "exp1_AgNPs_synthesis"
-                / "data"
-                / "uv_data_common"
-            ).resolve()
-        )
-
-    candidates.extend(_resolve_uvvis_experiment_data_dirs(conn))
-
-    candidates.append(
-        (
-            Path.home()
-            / "Documents"
-            / "GitHub"
-            / "codex_edu"
-            / "lab_runs"
-            / "exp1_AgNPs_synthesis"
-            / "data"
-            / "uv_data_common"
-        ).resolve()
-    )
-    candidates.append((Path("data") / "uv_data_common").resolve())
+    for root in _resolve_uvvis_root_candidates(conn):
+        if root.name.lower() == "uv_data_common":
+            candidates.append(root)
+        else:
+            candidates.append((root / "uv_data_common").resolve())
 
     deduped: list[Path] = []
     seen = set()
