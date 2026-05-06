@@ -150,6 +150,41 @@ class CodexPromptStateTest(unittest.TestCase):
 
         self.assertTrue(_should_suppress_stderr_warning(warning_text))
 
+    def test_powershell_profile_warning_continuation_lines_are_suppressed(self):
+        session = self._make_session()
+
+        self.assertTrue(
+            session._should_suppress_stderr_line(
+                ". : Cannot load file "
+                "C:\\Users\\11979\\Documents\\WindowsPowerShell\\profile.ps1 "
+                "because running scripts is disabled on this system."
+            )
+        )
+        self.assertTrue(
+            session._should_suppress_stderr_line("所在位置 行:1 字符: 3")
+        )
+        self.assertTrue(
+            session._should_suppress_stderr_line(
+                "+ . 'C:\\Users\\11979\\Documents\\WindowsPowerShell\\profile.ps1'"
+            )
+        )
+        self.assertTrue(
+            session._should_suppress_stderr_line(
+                "    + CategoryInfo          : SecurityError: (:) [], PSSecurityException"
+            )
+        )
+        self.assertTrue(
+            session._should_suppress_stderr_line(
+                "    + FullyQualifiedErrorId : UnauthorizedAccess"
+            )
+        )
+        self.assertFalse(session._should_suppress_stderr_line("normal stderr line"))
+
+    def test_default_app_server_config_disables_login_shell(self):
+        session = self._make_session()
+
+        self.assertIn("allow_login_shell=false", session.app_server_config_overrides)
+
     def test_load_codex_mcp_config_overrides_reads_stdio_env_from_settings_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             settings_path = Path(tmp_dir) / ".mcp_server_settings.json"

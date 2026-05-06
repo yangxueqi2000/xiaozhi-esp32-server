@@ -19,6 +19,7 @@ logger = setup_logging()
 _SERVER_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_MCP_SETTINGS_PATH = _SERVER_ROOT / "data" / ".mcp_server_settings.json"
 _DEFAULT_CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
+_DEFAULT_APP_SERVER_CONFIG_OVERRIDES = ("allow_login_shell=false",)
 
 
 def _ts() -> str:
@@ -213,6 +214,37 @@ def _load_codex_mcp_config_overrides(settings_path: Optional[Path]) -> List[str]
             overrides.append(f"{prefix}.cwd={_toml_literal(cwd)}")
 
     return overrides
+
+
+def _override_key(override: str) -> str:
+    text = str(override or "").strip()
+    if not text:
+        return ""
+    return text.split("=", 1)[0].strip()
+
+
+def _merge_app_server_config_overrides(configured_overrides: Any) -> List[str]:
+    items = [
+        str(item).strip()
+        for item in _DEFAULT_APP_SERVER_CONFIG_OVERRIDES
+        if str(item).strip()
+    ]
+    items.extend(
+        str(item).strip()
+        for item in (configured_overrides or [])
+        if str(item).strip()
+    )
+
+    merged_by_key: Dict[str, str] = {}
+    key_order: List[str] = []
+    for item in items:
+        key = _override_key(item)
+        if not key:
+            continue
+        if key not in merged_by_key:
+            key_order.append(key)
+        merged_by_key[key] = item
+    return [merged_by_key[key] for key in key_order]
 
 
 def _is_server_request(msg: Dict) -> bool:
@@ -517,6 +549,29 @@ def _is_benign_powershell_profile_warning(text: str) -> bool:
         return True
 
     if "pssecurityexception" in normalized and "unauthorizedaccess" in normalized:
+        return True
+
+    return False
+
+
+def _is_powershell_profile_warning_continuation(text: str) -> bool:
+    normalized = _normalize_whitespace(text).lower()
+    if not normalized:
+        return False
+
+    continuation_prefixes = (
+        "at line:",
+        "所在位置 行:",
+        "+ . ",
+        "+ ~",
+        "+   ~",
+        "categoryinfo",
+        "fullyqualifiederrorid",
+    )
+    if any(normalized.startswith(prefix) for prefix in continuation_prefixes):
+        return True
+
+    if "pssecurityexception" in normalized or "unauthorizedaccess" in normalized:
         return True
 
     return False
@@ -1027,11 +1082,9 @@ class _CodexSession:
             configured_codex_config_path,
             _SERVER_ROOT,
         ) or _DEFAULT_CODEX_CONFIG_PATH
-        self.app_server_config_overrides = [
-            str(item).strip()
-            for item in (config.get("app_server_config_overrides") or [])
-            if str(item).strip()
-        ]
+        self.app_server_config_overrides = _merge_app_server_config_overrides(
+            config.get("app_server_config_overrides")
+        )
         self.emit_events = bool(config.get("emit_events", False))
         self.thinking_mode = (config.get("thinking_mode") or "off").lower()
         self.show_actions = bool(config.get("show_actions", False))
@@ -1076,6 +1129,7 @@ class _CodexSession:
         self._active_turn_id: Optional[str] = None
         self._restart_required = False
         self._restart_reason: Optional[str] = None
+        self._suppress_powershell_profile_warning_lines = 0
         self._lock = threading.Lock()
         self._watched_config_paths = self._build_watched_config_paths()
         self._watched_config_state = _snapshot_watched_paths(self._watched_config_paths)
@@ -1242,6 +1296,22 @@ class _CodexSession:
         except Exception as exc:
             logger.bind(tag=TAG).warning(f"codex raw log write failed: {exc}")
 
+    def _should_suppress_stderr_line(self, text: str) -> bool:
+        if self._suppress_powershell_profile_warning_lines > 0:
+            if _is_powershell_profile_warning_continuation(text):
+                self._suppress_powershell_profile_warning_lines -= 1
+                return True
+            self._suppress_powershell_profile_warning_lines = 0
+
+        if not _should_suppress_stderr_warning(text):
+            return False
+
+        if _is_benign_powershell_profile_warning(text):
+            # PowerShell execution-policy errors arrive as a short multi-line
+            # block; keep the continuation lines out of warning logs too.
+            self._suppress_powershell_profile_warning_lines = 6
+        return True
+
     def _pump_stderr(self) -> None:
         if not self.proc or not self.proc.stderr:
             return
@@ -1254,7 +1324,7 @@ class _CodexSession:
                 with self._lock:
                     self._restart_required = True
                     self._restart_reason = recovery_reason
-            if _should_suppress_stderr_warning(text):
+            if self._should_suppress_stderr_line(text):
                 logger.bind(tag=TAG).debug(f"codex stderr suppressed: {text}")
                 continue
             logger.bind(tag=TAG).warning(f"codex stderr: {text}")
