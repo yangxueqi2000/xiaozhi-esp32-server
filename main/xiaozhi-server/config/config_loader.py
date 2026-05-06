@@ -4,14 +4,36 @@ from collections.abc import Mapping
 from config.manage_api_client import init_service, get_server_config, get_agent_models
 
 
+DEFAULT_CONFIG_CANDIDATES = ("config.yaml", "config_back.yaml")
+
+
 def get_project_dir():
     """获取项目根目录"""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/"
 
 
-def read_config(config_path):
+def get_default_config_path():
+    project_dir = get_project_dir()
+    for config_name in DEFAULT_CONFIG_CANDIDATES:
+        config_path = os.path.join(project_dir, config_name)
+        if os.path.exists(config_path):
+            return config_path
+    return os.path.join(project_dir, DEFAULT_CONFIG_CANDIDATES[0])
+
+
+def read_config(config_path, required=True):
+    if not os.path.exists(config_path):
+        if required:
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        return {}
+
     with open(config_path, "r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
+        config = yaml.safe_load(file) or {}
+
+    if not isinstance(config, Mapping):
+        raise ValueError(
+            f"Config file must contain a mapping at the top level: {config_path}"
+        )
     return config
 
 
@@ -24,12 +46,19 @@ def load_config():
     if cached_config is not None:
         return cached_config
 
-    default_config_path = get_project_dir() + "config.yaml"
+    default_config_path = get_default_config_path()
     custom_config_path = get_project_dir() + "data/.config.yaml"
+    default_config_exists = os.path.exists(default_config_path)
+    custom_config_exists = os.path.exists(custom_config_path)
+
+    if not custom_config_exists and not default_config_exists:
+        raise FileNotFoundError(
+            "No config file found. Expected data/.config.yaml, config.yaml, or config_back.yaml."
+        )
 
     # 加载默认配置
-    default_config = read_config(default_config_path)
-    custom_config = read_config(custom_config_path)
+    default_config = read_config(default_config_path, required=False)
+    custom_config = read_config(custom_config_path, required=False)
 
     if custom_config.get("manager-api", {}).get("url"):
         import asyncio
@@ -44,7 +73,12 @@ def load_config():
             config = asyncio.run(get_config_from_api_async(custom_config))
     else:
         # 合并配置
-        config = merge_configs(default_config, custom_config)
+        if custom_config_exists and default_config_exists:
+            config = merge_configs(default_config, custom_config)
+        elif custom_config_exists:
+            config = custom_config
+        else:
+            config = default_config
     # 初始化目录
     ensure_directories(config)
 

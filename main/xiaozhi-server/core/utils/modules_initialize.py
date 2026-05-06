@@ -1,6 +1,7 @@
 from typing import Dict, Any
 from config.logger import setup_logging
 from core.utils import tts, llm, intent, memory, vad, asr
+from core.utils.voiceprint_provider import is_voiceprint_feature_enabled
 
 TAG = __name__
 logger = setup_logging()
@@ -169,6 +170,10 @@ def initialize_voiceprint(asr_instance, config):
         return False  
 
     # 应用配置
+    if not is_voiceprint_feature_enabled(voiceprint_config):
+        logger.bind(tag=TAG).info("声纹识别总开关已关闭")
+        return False
+
     if not voiceprint_config.get("url") or not voiceprint_config.get("speakers"):
         logger.bind(tag=TAG).warning("声纹识别配置不完整")
         return False

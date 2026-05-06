@@ -41,7 +41,10 @@ from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
 from config.manage_api_client import DeviceNotFoundException, DeviceBindException
 from core.utils.prompt_manager import PromptManager
-from core.utils.voiceprint_provider import VoiceprintProvider
+from core.utils.voiceprint_provider import (
+    VoiceprintProvider,
+    is_voiceprint_feature_enabled,
+)
 from core.utils.audio_frontend import AudioFrontend
 from core.utils import textUtils
 from core.utils.experiment_resume import (
@@ -3038,32 +3041,40 @@ class ConnectionHandler:
         """为当前连接初始化声纹识别"""
         try:
             voiceprint_config = self.config.get("voiceprint", {})
-            if voiceprint_config:
-                runtime_device_id = str(self.device_id or "").strip()
-                if not runtime_device_id and isinstance(self.headers, dict):
-                    runtime_device_id = str(
-                        self.headers.get("device-id", self.headers.get("client-id", ""))
-                    ).strip()
-                runtime_transport_id = str(self.transport_session_id or self.session_id).strip()
-                if runtime_device_id:
-                    runtime_scope = f"{runtime_device_id}__{runtime_transport_id}"
-                else:
-                    runtime_scope = runtime_transport_id
-                voiceprint_provider = VoiceprintProvider(
-                    voiceprint_config,
-                    runtime_scope=runtime_scope,
-                )
-                if voiceprint_provider is not None and voiceprint_provider.enabled:
-                    self.voiceprint_provider = voiceprint_provider
-                    self.logger.bind(tag=TAG).info(
-                        "声纹识别功能已在连接时动态启用: "
-                        f"runtime_scope={runtime_scope}, "
-                        f"master_speaker_id={voiceprint_provider.dynamic_master_speaker_id}"
-                    )
-                else:
-                    self.logger.bind(tag=TAG).warning("声纹识别功能启用但配置不完整")
-            else:
+            if not voiceprint_config:
                 self.logger.bind(tag=TAG).info("声纹识别功能未启用")
+                return
+
+            if not is_voiceprint_feature_enabled(voiceprint_config):
+                self.logger.bind(tag=TAG).info("声纹识别总开关已关闭")
+                return
+
+            runtime_device_id = str(self.device_id or "").strip()
+            if not runtime_device_id and isinstance(self.headers, dict):
+                runtime_device_id = str(
+                    self.headers.get("device-id", self.headers.get("client-id", ""))
+                ).strip()
+            runtime_transport_id = str(
+                self.transport_session_id or self.session_id
+            ).strip()
+            if runtime_device_id:
+                runtime_scope = f"{runtime_device_id}__{runtime_transport_id}"
+            else:
+                runtime_scope = runtime_transport_id
+
+            voiceprint_provider = VoiceprintProvider(
+                voiceprint_config,
+                runtime_scope=runtime_scope,
+            )
+            if voiceprint_provider is not None and voiceprint_provider.enabled:
+                self.voiceprint_provider = voiceprint_provider
+                self.logger.bind(tag=TAG).info(
+                    "声纹识别功能已在连接时动态启用: "
+                    f"runtime_scope={runtime_scope}, "
+                    f"master_speaker_id={voiceprint_provider.dynamic_master_speaker_id}"
+                )
+            else:
+                self.logger.bind(tag=TAG).warning("声纹识别功能已开启，但配置不完整或服务不可用")
         except Exception as e:
             self.logger.bind(tag=TAG).warning(f"声纹识别初始化失败: {str(e)}")
 

@@ -1,5 +1,6 @@
 import os
 import sys
+from collections.abc import Mapping
 from loguru import logger
 from config.config_loader import load_config
 from config.settings import check_config_file
@@ -49,7 +50,9 @@ def setup_logging():
     check_config_file()
     """从配置文件中读取日志配置，并设置日志输出格式和级别"""
     config = load_config()
-    log_config = config["log"]
+    log_config = config.get("log", {})
+    if not isinstance(log_config, Mapping):
+        raise ValueError("Config key 'log' must be a mapping if provided")
     global _logger_initialized
 
     # 第一次初始化时配置日志

@@ -18,6 +18,20 @@ TAG = __name__
 logger = setup_logging()
 
 
+def is_voiceprint_feature_enabled(config: Optional[dict]) -> bool:
+    if not config:
+        return False
+
+    enabled = config.get("enabled")
+    if enabled is None:
+        return True
+    if isinstance(enabled, bool):
+        return enabled
+    if isinstance(enabled, str):
+        return enabled.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(enabled)
+
+
 @dataclass
 class SpeakerFilterConfig:
     enabled: bool = False
@@ -40,6 +54,7 @@ class VoiceprintProvider:
     """
 
     def __init__(self, config: dict, runtime_scope: str = ""):
+        self.feature_enabled = is_voiceprint_feature_enabled(config)
         self.original_url = config.get("url", "")
         self.speakers = config.get("speakers", [])
         self.speaker_map = self._parse_speakers()
@@ -106,6 +121,9 @@ class VoiceprintProvider:
         self.speaker_ids = []
         self.enabled = False
 
+        if not self.feature_enabled:
+            logger.bind(tag=TAG).info("声纹识别总开关已关闭")
+            return
         if not self.original_url:
             logger.bind(tag=TAG).warning("声纹识别URL未配置，声纹识别将被禁用")
             return
