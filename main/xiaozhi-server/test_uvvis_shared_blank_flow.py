@@ -293,7 +293,7 @@ class UvvisSharedBlankFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(["纯水空白已经准备好了。"], spoken)
 
-    async def test_dark_current_prep_finishes_before_entering_blank_step(self):
+    async def test_dark_current_prep_first_prompts_for_empty_positions(self):
         conn = _FakeConn()
         conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID
         spoken = []
@@ -335,32 +335,18 @@ class UvvisSharedBlankFlowTest(unittest.IsolatedAsyncioTestCase):
                             )
 
         self.assertTrue(handled)
+        self.assertEqual([], executed)
+        self.assertEqual([], completed)
         self.assertEqual(
-            [
-                (
-                    "uvvis_prepare_dark_current",
-                    {"session_key": "lease-1"},
-                )
-            ],
-            executed,
+            {
+                "step_id": intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID,
+                "phase": "await_empty_positions",
+            },
+            getattr(conn, "_uvvis_direct_state", {}),
         )
         self.assertEqual(
             [
-                {
-                    "fields": {
-                        "shared_dark_current_ready": True,
-                        "observations": "共享暗电流校正已完成。",
-                    },
-                    "auto_advance": True,
-                    "fallback_reply": "暗电流校正已经完成。",
-                }
-            ],
-            completed,
-        )
-        self.assertEqual(
-            [
-                "先不要放任何液体，我先进行暗电流校正。",
-                "暗电流校正已经完成。",
+                "先检查1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。",
             ],
             spoken,
         )

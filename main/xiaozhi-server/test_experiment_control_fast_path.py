@@ -582,13 +582,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_3_uv_vis_shared_dark_air_prep",
-                    "title": "1-5鍙锋牱鍝侊細鏆楃數娴佹牎姝?,
+                    "title": "1-5号样品：共享暗电流和空气能量校正",
                     "prompts": {
                         "instruction": (
-                            "鐜板湪寮€濮?UV-Vis 鐨勫叡浜殫鐢垫祦鏍℃銆?
-                            "鍏堟彁绀轰富璇磋瘽浜衡€滃厛涓嶈鏀句换浣曟恫浣擄紝鎴戝厛杩涜鏆楃數娴佹牎姝ｃ€傗€?
-                            "鐒跺悗浣跨敤褰撳墠宸叉寔鏈夌殑 session_key 璋冪敤 "
-                            "`uvvis_prepare_dark_current(session_key=褰撳墠鎸佹湁鐨剆ession_key)`銆?
+                            "先检查 1-5 号样品位都为空，参比位也不要放任何液体。"
+                            "确认后先告诉我都空了。"
                         ),
                     },
                 }
@@ -599,11 +597,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         reply = intentHandler._compose_experiment_step_reply(meta, mode="guide")
         spoken = textUtils.prepare_runtime_spoken_text(reply)
 
-        self.assertIn("鏆楃數娴佹牎姝?, spoken)
-        self.assertIn("鍏堜笉瑕佹斁浠讳綍娑蹭綋", spoken)
+        self.assertIn("都空了", spoken)
+        self.assertIn("参比位", spoken)
         self.assertNotIn("session_key", spoken)
         self.assertNotIn("uvvis_prepare_dark_current", spoken)
-        self.assertNotIn("鍋氬ソ鍚庡憡璇夋垜", spoken)
+        self.assertNotIn("现在做这一步", spoken)
 
     def test_pure_water_blank_step_meta_rewrites_internal_rules_to_student_prompt(self):
         meta = {
@@ -4581,9 +4579,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             spoken,
         )
 
-    async def test_handle_direct_uvvis_shared_dark_air_prep_calls_measurement_and_waits_for_blank(self):
+    async def test_handle_direct_uvvis_shared_dark_air_prep_calls_measurement_after_scan_start(self):
         conn = _FakeConn()
         conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID
+        conn._uvvis_direct_state = {
+            "step_id": intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID,
+            "phase": "await_scan_start",
+        }
         spoken = []
         executed = []
         completed = []
@@ -4593,7 +4595,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         async def fake_execute(_conn, tool_name, arguments):
             executed.append((tool_name, dict(arguments)))
-            return {"message": "pure water blank missing"}
+            return {"success": True}
 
         async def fake_complete(_conn, *, fields, auto_advance, fallback_reply=""):
             completed.append(
@@ -4603,7 +4605,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "fallback_reply": fallback_reply,
                 }
             )
-            return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細绾按绌虹櫧鏍℃銆?
+            return True, "下一步：装入比色皿。"
 
         def fake_speak_txt(_conn, text):
             spoken.append(text)
@@ -4618,17 +4620,19 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "寮€濮嬫祴閲?,
-                            "寮€濮嬫祴閲?,
+                            "开始扫描",
+                            "开始扫描",
                         )
 
         self.assertTrue(handled)
         self.assertEqual(
             [
                 (
-                    "uvvis_prepare_dark_current",
+                    "uvvis_measure_spectra",
                     {
                         "session_key": "lease-1",
+                        "sample_positions": [1, 2, 3, 4, 5],
+                        "ready_for_samples": False,
                     },
                 )
             ],
@@ -4638,22 +4642,18 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {
                 "shared_dark_current_ready": True,
-                "observations": "鍏变韩鏆楃數娴佹牎姝ｅ凡瀹屾垚銆?,
+                "shared_air_baseline_ready": True,
+                "observations": "共享暗电流和空气能量校正已完成。",
             },
             completed[0]["fields"],
         )
         self.assertTrue(completed[0]["auto_advance"])
-        self.assertEqual(
-            [
-                "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾垜鍏堣繘琛屾殫鐢垫祦鏍℃銆?,
-                "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細绾按绌虹櫧鏍℃銆?,
-            ],
-            spoken,
-        )
+        self.assertEqual(["下一步：装入比色皿。"], spoken)
 
     async def test_handle_direct_uvvis_shared_dark_air_prep_accepts_start_scan_phrase(self):
         conn = _FakeConn()
         conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID
+        spoken = []
         executed = []
 
         async def fake_ensure_session_key(_conn):
@@ -4673,24 +4673,25 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "_complete_experiment_step_with_fields",
                     fake_complete,
                 ):
-                    with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
+                    with patch.object(intentHandler, "speak_txt", lambda _conn, text: spoken.append(text)):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "寮€濮嬫壂鎻?,
-                            "寮€濮嬫壂鎻?,
+                            "开始扫描",
+                            "开始扫描",
                         )
 
         self.assertTrue(handled)
+        self.assertEqual([], executed)
         self.assertEqual(
-            [
-                (
-                    "uvvis_prepare_dark_current",
-                    {
-                        "session_key": "lease-1",
-                    },
-                )
-            ],
-            executed,
+            {
+                "step_id": intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID,
+                "phase": "await_empty_positions",
+            },
+            getattr(conn, "_uvvis_direct_state", {}),
+        )
+        self.assertEqual(
+            ["先检查1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。"],
+            spoken,
         )
 
     async def test_handle_direct_uvvis_shared_dark_air_infers_step_from_context_when_graph_stale(self):
@@ -4700,11 +4701,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             Message(
                 role="assistant",
                 content=(
-                    "褰撳墠姝ラ鏄?1-5鍙锋牱鍝侊細鏆楃數娴佹牎姝ｃ€?
-                    "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾垜鍏堣繘琛屾殫鐢垫祦鏍℃銆?
+                    "先检查1到5号样品位都为空，参比位也不要放任何液体。"
+                    "确认后告诉我都空了。"
                 ),
             )
         )
+        spoken = []
         executed = []
         redirected = []
 
@@ -4733,11 +4735,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "_complete_experiment_step_with_fields",
                     fake_complete,
                 ):
-                    with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
+                    with patch.object(intentHandler, "speak_txt", lambda _conn, text: spoken.append(text)):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "寮€濮嬫壂鎻?,
-                            "寮€濮嬫壂鎻?,
+                            "开始扫描",
+                            "开始扫描",
                         )
 
         self.assertTrue(handled)
@@ -4754,16 +4756,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             ],
             redirected,
         )
+        self.assertEqual([], executed)
         self.assertEqual(
-            [
-                (
-                    "uvvis_prepare_dark_current",
-                    {
-                        "session_key": "lease-1",
-                    },
-                )
-            ],
-            executed,
+            {
+                "step_id": intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID,
+                "phase": "await_empty_positions",
+            },
+            getattr(conn, "_uvvis_direct_state", {}),
+        )
+        self.assertEqual(
+            ["先检查1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。"],
+            spoken,
         )
 
     async def test_handle_direct_uvvis_shared_blank_prep_prompts_for_pure_water_when_blank_missing(self):

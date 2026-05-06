@@ -982,7 +982,8 @@ def _experiment_prompt_block(
     parts.append(
         "UV-Vis execution guard:\n"
         "- The UV-Vis MCP tools are available in this runtime.\n"
-        "- For standalone dark-current preparation, use uvvis_prepare_dark_current first.\n"
+        "- If the current experiment step or local prompt explicitly defines shared dark-current and air-baseline preparation through uvvis_measure_spectra with ready_for_samples=false, follow that step definition instead of switching to uvvis_prepare_dark_current.\n"
+        "- Use uvvis_prepare_dark_current only for standalone manual dark-current preparation when the active experiment step does not already specify the shared-preparation uvvis_measure_spectra flow.\n"
         "- Before re-measuring a shared pure-water blank, inspect the shared uv_data_common directory for reusable blank artifacts and skip the blank scan when reusable data already exists there.\n"
         "- If the shared pure-water blank is missing, keep the positions empty and call uvvis_measure_spectra with ready_for_samples=false once to prepare the shared prerequisites in the background before you ask the student to place pure water.\n"
         "- After those shared prerequisites are ready, ask for six pure-water cuvettes only when the shared pure-water blank is still missing, then use uvvis_measure_spectra with ready_for_samples=true to record the pure-water blank.\n"

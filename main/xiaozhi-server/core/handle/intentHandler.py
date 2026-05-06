@@ -636,8 +636,8 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
             "shareddarkcurrent",
     ):
         return (
-            "当前步骤是 1-5号样品：暗电流校正。"
-            "先不要放任何液体，我先进行暗电流校正。"
+            "先检查1到5号样品位都为空，参比位也不要放任何液体。"
+            "确认后告诉我都空了。"
         )
 
     if signature and (
@@ -649,8 +649,7 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
         )
     ):
         return (
-            f"{prefix}1-5号样品：装入比色皿。"
-            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保留纯水，擦净外壁，做好告诉我。"
+            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保持为空，擦净外壁，做好告诉我。"
         )
 
     if signature and (
@@ -668,8 +667,8 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
         )
     ):
         return (
-            f"{prefix}1-5号样品：批量测光谱并记录数据。"
-            "确认1到5号样品位都已放好真实样品、参比位保留纯水，放好了告诉我开始测量。"
+            "确认1到5号样品位都已放好真实样品，参比位保持为空。"
+            "放好了告诉我开始测量。"
         )
 
     if signature and _signature_has_any("统一清洗比色皿", "清洗比色皿", "测量后清洗"):
@@ -722,20 +721,19 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
 
     reply_map = {
         "step_3_uv_vis_shared_dark_air_prep": (
-            "当前步骤是 1-5号样品：暗电流校正。"
-            "先不要放任何液体，我先进行暗电流校正。"
+            "先检查1到5号样品位都为空，参比位也不要放任何液体。"
+            "确认后告诉我都空了。"
         ),
         "step_3_uv_vis_shared_dark_blank_prep": (
             f"{prefix}1-5号样品：纯水空白校正。"
             "请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。"
         ),
         "step_3_uv_vis_sample1-5_load_cuvette": (
-            f"{prefix}1-5号样品：装入比色皿。"
-            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保留纯水，擦净外壁，做好告诉我。"
+            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保持为空，擦净外壁，做好告诉我。"
         ),
         "step_3_uv_vis_sample1-5_record_data": (
-            f"{prefix}1-5号样品：批量测光谱并记录数据。"
-            "确认1到5号样品位都已放好真实样品、参比位保留纯水，放好了告诉我开始测量。"
+            "确认1到5号样品位都已放好真实样品，参比位保持为空。"
+            "放好了告诉我开始测量。"
         ),
         "step_3_uv_vis_sample5_clean_cuvette": (
             f"{prefix}紫外-可见测量后：统一清洗比色皿。"
@@ -4238,6 +4236,29 @@ def _looks_like_uvvis_ready_reply(filtered_text: str) -> bool:
     return _contains_any(norm, ready_tokens)
 
 
+def _looks_like_uvvis_empty_positions_reply(filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    if not norm:
+        return False
+    if _is_negative_short_reply_fixed(filtered_text):
+        return False
+    if _is_affirmative_short_reply_fixed(filtered_text):
+        return True
+    ready_tokens = (
+        "都空了",
+        "已经都空了",
+        "都留空了",
+        "已经留空了",
+        "样品位都空了",
+        "样品位和参比位都空了",
+        "都准备好了",
+        "准备好了",
+        "已经准备好了",
+        "空架准备好了",
+    )
+    return _contains_any(norm, ready_tokens)
+
+
 def _get_current_experiment_step_id(conn) -> str:
     step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
     if step_id:
@@ -5123,6 +5144,10 @@ def _compose_uvvis_status_reply(conn, status: dict, *, inferred_step_id: str = "
     phase = str(state.get("phase", "") or "").strip()
     if phase == "blank_reusable":
         return "UV-Vis 现在没有在工作。这一步已经确认当前批次纯水空白可复用，继续下一步时记得保留或重新放好参比位纯水比色皿。"
+    if phase == "await_empty_positions":
+        return "UV-Vis 现在没有在工作。这一步在等你确认1到5号样品位和参比位都已留空。"
+    if phase == "await_scan_start":
+        return "UV-Vis 现在没有在工作。这一步在等你确认可以开始扫描。"
     if phase == "await_pure_water_blank":
         return "UV-Vis 现在没有在工作。暗电流校正已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"
     if phase == "await_shared_prep_reset":
@@ -6270,11 +6295,111 @@ async def _release_uvvis_session_for_analysis(conn) -> None:
 async def _handle_uvvis_shared_dark_air_prep(
     conn, original_text: str, filtered_text: str
 ) -> bool:
+    if _is_explicit_experiment_start_request(filtered_text):
+        experiment_title = await _load_experiment_overview_title(conn)
+        reply = _prepare_fastpath_spoken_reply(
+            _compose_experiment_start_reply(experiment_title, "")
+        )
+        if not reply:
+            return False
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
+
+    if _assistant_waiting_for_step_start(conn) and _is_explicit_ready_to_start_reply(
+        filtered_text
+    ):
+        await _start_direct_intent_turn(conn, original_text)
+        _set_uvvis_direct_state(
+            conn,
+            step_id=_UVVIS_SHARED_DARK_AIR_STEP_ID,
+            phase="await_empty_positions",
+        )
+        speak_txt(
+            conn,
+            "先检查1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。",
+        )
+        return True
+
+    state = _get_uvvis_direct_state(conn, _UVVIS_SHARED_DARK_AIR_STEP_ID)
+    phase = str(state.get("phase", "") or "").strip()
+
+    if phase == "await_empty_positions":
+        if _is_negative_short_reply_fixed(filtered_text):
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，等你确认样品位和参比位都留空后再告诉我。")
+            return True
+        if not _looks_like_uvvis_empty_positions_reply(filtered_text):
+            if _looks_like_uvvis_ready_reply(filtered_text):
+                await _start_direct_intent_turn(conn, original_text)
+                speak_txt(conn, "先确认1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。")
+                return True
+            return False
+        await _start_direct_intent_turn(conn, original_text)
+        _set_uvvis_direct_state(
+            conn,
+            step_id=_UVVIS_SHARED_DARK_AIR_STEP_ID,
+            phase="await_scan_start",
+        )
+        speak_txt(conn, "可以开始时告诉我“开始扫描”。")
+        return True
+
+    if phase == "await_scan_start":
+        if _is_negative_short_reply_fixed(filtered_text):
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，等你可以开始扫描时再告诉我。")
+            return True
+        if _looks_like_uvvis_empty_positions_reply(filtered_text):
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "可以开始时告诉我“开始扫描”。")
+            return True
+        if not _looks_like_uvvis_ready_reply(filtered_text):
+            return False
+
+        session_key, busy_reply = await _ensure_uvvis_session_key(conn)
+        if not session_key:
+            if busy_reply:
+                await _start_direct_intent_turn(conn, original_text)
+                speak_txt(conn, busy_reply)
+                return True
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_measure_spectra",
+            {
+                "session_key": session_key,
+                "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+                "ready_for_samples": False,
+            },
+        )
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+
+        completed, reply = await _complete_experiment_step_with_fields(
+            conn,
+            fields={
+                "shared_dark_current_ready": True,
+                "shared_air_baseline_ready": True,
+                "observations": "共享暗电流和空气能量校正已完成。",
+            },
+            auto_advance=True,
+            fallback_reply="共享暗电流和空气能量校正已经完成。",
+        )
+        if completed:
+            _clear_uvvis_direct_state(conn)
+        if reply:
+            speak_txt(conn, reply)
+        return True
+
+    control_action = _classify_short_experiment_control(conn, filtered_text)
+    norm = _normalize_text_for_match(filtered_text)
     if not (
-        _is_affirmative_short_reply_fixed(filtered_text)
-        or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
+        (_assistant_recently_prompted_uvvis_action(conn) and control_action in {"guide", "advance", "repeat"})
         or _contains_any(
-            _normalize_text_for_match(filtered_text),
+            norm,
             (
                 "暗电流校正",
                 "暗电流",
@@ -6292,43 +6417,16 @@ async def _handle_uvvis_shared_dark_air_prep(
     ):
         return False
 
-    session_key, busy_reply = await _ensure_uvvis_session_key(conn)
-    if not session_key:
-        if busy_reply:
-            await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, busy_reply)
-            return True
-        return False
-
     await _start_direct_intent_turn(conn, original_text)
-    speak_txt(conn, "先不要放任何液体，我先进行暗电流校正。")
-    payload = await _execute_uvvis_tool_payload(
+    _set_uvvis_direct_state(
         conn,
-        "uvvis_prepare_dark_current",
-        {
-            "session_key": session_key,
-        },
+        step_id=_UVVIS_SHARED_DARK_AIR_STEP_ID,
+        phase="await_empty_positions",
     )
-    if _payload_looks_busy_or_inaccessible(payload):
-        speak_txt(conn, _UVVIS_BUSY_REPLY)
-        return True
-
-    auto_advanced, reply = await _complete_experiment_step_with_fields(
+    speak_txt(
         conn,
-        fields={
-            "shared_dark_current_ready": True,
-            "observations": "共享暗电流校正已完成。",
-        },
-        auto_advance=True,
-        fallback_reply="暗电流校正已经完成。",
+        "先检查1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。",
     )
-    if not auto_advanced:
-        if reply:
-            speak_txt(conn, reply)
-        return True
-
-    if reply:
-        speak_txt(conn, reply)
     return True
 
 
