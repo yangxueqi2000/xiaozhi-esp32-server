@@ -50,6 +50,37 @@ class ServerMCPManager:
         self._acquired = False
 
     @classmethod
+    def _take_shared_clients_snapshot(
+        cls,
+    ) -> list[tuple[str, ServerMCPClient]]:
+        clients = list(cls._shared_clients.items())
+        cls._shared_clients = {}
+        cls._shared_client_tools = {}
+        cls._shared_tool_to_client = {}
+        cls._shared_reconnect_locks = {}
+        cls._shared_initialized = False
+        cls._shared_ref_count = 0
+        return clients
+
+    @classmethod
+    async def force_cleanup_shared_pool(cls) -> None:
+        """Force-close the shared MCP pool regardless of connection ref count."""
+        init_lock = cls._get_init_lock()
+        async with init_lock:
+            clients = cls._take_shared_clients_snapshot()
+
+        for name, client in clients:
+            try:
+                await asyncio.wait_for(client.cleanup(), timeout=20)
+                logger.bind(tag=TAG).info(
+                    f"Force-closed shared server MCP client: {name}"
+                )
+            except (asyncio.TimeoutError, Exception) as exc:
+                logger.bind(tag=TAG).error(
+                    f"Error force-closing server MCP client {name}: {exc}"
+                )
+
+    @classmethod
     def _get_init_lock(cls) -> asyncio.Lock:
         if cls._shared_init_lock is None:
             cls._shared_init_lock = asyncio.Lock()
@@ -435,12 +466,7 @@ class ServerMCPManager:
             if type(self)._shared_ref_count > 0:
                 return
 
-            clients = list(type(self)._shared_clients.items())
-            type(self)._shared_clients = {}
-            type(self)._shared_client_tools = {}
-            type(self)._shared_tool_to_client = {}
-            type(self)._shared_reconnect_locks = {}
-            type(self)._shared_initialized = False
+            clients = type(self)._take_shared_clients_snapshot()
 
         for name, client in clients:
             try:

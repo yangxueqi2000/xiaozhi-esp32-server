@@ -33,6 +33,7 @@ sys.modules.setdefault("config.logger", fake_logger_module)
 
 from core.providers.llm.codex.codex import (
     _CodexSession,
+    _decode_stderr_line,
     _experiment_prompt_block,
     _recoverable_stderr_reason,
     _should_suppress_stderr_warning,
@@ -124,6 +125,17 @@ class CodexPromptStateTest(unittest.TestCase):
 
         self.assertTrue(_should_suppress_stderr_warning(warning_text))
         self.assertEqual("wham_transport_eof", _recoverable_stderr_reason(warning_text))
+
+    def test_windows_localized_process_cleanup_warning_is_suppressed(self):
+        warning_text = '错误: 没有找到进程 "14392"。'
+
+        self.assertTrue(_should_suppress_stderr_warning(warning_text))
+        self.assertIsNone(_recoverable_stderr_reason(warning_text))
+
+    def test_windows_cp936_stderr_decodes_cleanly(self):
+        raw_line = '错误: 没有找到进程 "14392"。\r\n'.encode("gbk")
+
+        self.assertEqual('错误: 没有找到进程 "14392"。\r\n', _decode_stderr_line(raw_line))
 
     def test_timeout_without_current_step_uses_operation_template(self):
         prompt_text = self._first_prompt_with_experiment_context(

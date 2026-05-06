@@ -145,6 +145,13 @@ async def main():
         # 停止全局GC管理器
         await gc_manager.stop()
 
+        try:
+            await ws_server.stop()
+        except Exception as shutdown_error:
+            logger.bind(tag=TAG).error(
+                f"WebSocket server shutdown cleanup failed: {shutdown_error}"
+            )
+
         # 取消所有任务（关键修复点）
         stdin_task.cancel()
         ws_task.cancel()

@@ -8,6 +8,7 @@ from config.config_loader import get_config_from_api_async
 from config.logger import setup_logging
 from core.auth import AuthManager, AuthenticationError
 from core.connection import ConnectionHandler
+from core.providers.tools.server_mcp.mcp_manager import ServerMCPManager
 from core.utils.modules_initialize import initialize_modules
 from core.utils.util import check_asr_update, check_vad_update
 
@@ -210,6 +211,58 @@ class WebSocketServer:
             ping_timeout=ping_timeout,
         ):
             await asyncio.Future()
+
+    async def stop(self):
+        """Best-effort shutdown for active connections and shared MCP clients."""
+        async with self.connections_lock:
+            handlers = []
+            seen = set()
+            for handler in list(self.connections_by_session.values()) + list(
+                self.connections_by_device.values()
+            ):
+                ident = id(handler)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                handlers.append(handler)
+            self.connections_by_session = {}
+            self.connections_by_device = {}
+
+        for handler in handlers:
+            try:
+                if hasattr(handler, "request_final_close"):
+                    handler.request_final_close("websocket server shutdown")
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    f"request_final_close failed during websocket shutdown: {exc}"
+                )
+
+        closable_handlers = [handler for handler in handlers if hasattr(handler, "close")]
+        if closable_handlers:
+            try:
+                close_results = await asyncio.wait_for(
+                    asyncio.gather(
+                        *[
+                            handler.close(getattr(handler, "websocket", None))
+                            for handler in closable_handlers
+                        ],
+                        return_exceptions=True,
+                    ),
+                    timeout=15.0,
+                )
+                for handler, result in zip(closable_handlers, close_results):
+                    if isinstance(result, Exception):
+                        self.logger.bind(tag=TAG).error(
+                            "websocket server shutdown close failed: "
+                            f"session_id={getattr(handler, 'session_id', '')}, "
+                            f"device_id={getattr(handler, 'device_id', '')}, error={result}"
+                        )
+            except asyncio.TimeoutError:
+                self.logger.bind(tag=TAG).warning(
+                    "websocket server shutdown timed out while closing active connections"
+                )
+
+        await ServerMCPManager.force_cleanup_shared_pool()
 
     async def _handle_connection(self, websocket):
         headers = dict(websocket.request.headers)

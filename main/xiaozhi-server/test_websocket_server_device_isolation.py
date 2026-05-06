@@ -83,6 +83,25 @@ fake_util_module.remove_punctuation_and_length = _fake_remove_punctuation_and_le
 fake_util_module.sanitize_tool_name = lambda name: str(name or "").strip()
 sys.modules.setdefault("core.utils.util", fake_util_module)
 
+fake_server_mcp_manager_module = types.ModuleType(
+    "core.providers.tools.server_mcp.mcp_manager"
+)
+
+
+class _FakeServerMCPManager:
+    force_cleanup_calls = 0
+
+    @classmethod
+    async def force_cleanup_shared_pool(cls):
+        cls.force_cleanup_calls += 1
+
+
+fake_server_mcp_manager_module.ServerMCPManager = _FakeServerMCPManager
+sys.modules.setdefault(
+    "core.providers.tools.server_mcp.mcp_manager",
+    fake_server_mcp_manager_module,
+)
+
 from core.websocket_server import WebSocketServer
 
 
@@ -107,6 +126,21 @@ class _FakeWebSocket:
         self.close_calls.append({"code": code, "reason": reason})
 
 
+class _FakeClosableHandler:
+    def __init__(self, *, session_id: str, device_id: str):
+        self.session_id = session_id
+        self.device_id = device_id
+        self.websocket = object()
+        self.close_calls = []
+        self.final_close_reasons = []
+
+    def request_final_close(self, reason: str = ""):
+        self.final_close_reasons.append(reason)
+
+    async def close(self, websocket=None):
+        self.close_calls.append(websocket)
+
+
 class WebSocketServerDeviceIsolationTest(unittest.IsolatedAsyncioTestCase):
     def _build_server(self):
         server = object.__new__(WebSocketServer)
@@ -115,6 +149,9 @@ class WebSocketServerDeviceIsolationTest(unittest.IsolatedAsyncioTestCase):
         server.connections_by_session = {}
         server.connections_by_device = {}
         return server
+
+    def setUp(self):
+        _FakeServerMCPManager.force_cleanup_calls = 0
 
     async def test_duplicate_live_device_connection_is_rejected(self):
         server = self._build_server()
@@ -176,3 +213,26 @@ class WebSocketServerDeviceIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rejected)
         self.assertEqual([], websocket.sent_messages)
         self.assertEqual([], websocket.close_calls)
+
+    async def test_stop_closes_unique_handlers_and_force_cleans_shared_pool(self):
+        server = self._build_server()
+        handler_a = _FakeClosableHandler(session_id="session-a", device_id="device-a")
+        handler_b = _FakeClosableHandler(session_id="session-b", device_id="device-b")
+        server.connections_by_session = {
+            "session-a": handler_a,
+            "session-b": handler_b,
+        }
+        server.connections_by_device = {
+            "device-a": handler_a,
+            "device-b": handler_b,
+        }
+
+        await server.stop()
+
+        self.assertEqual(["websocket server shutdown"], handler_a.final_close_reasons)
+        self.assertEqual(["websocket server shutdown"], handler_b.final_close_reasons)
+        self.assertEqual([handler_a.websocket], handler_a.close_calls)
+        self.assertEqual([handler_b.websocket], handler_b.close_calls)
+        self.assertEqual({}, server.connections_by_session)
+        self.assertEqual({}, server.connections_by_device)
+        self.assertEqual(1, _FakeServerMCPManager.force_cleanup_calls)

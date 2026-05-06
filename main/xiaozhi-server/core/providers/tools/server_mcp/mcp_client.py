@@ -80,11 +80,19 @@ class ServerMCPClient:
         self._ready_evt = asyncio.Event()
         self._shutdown_evt = asyncio.Event()
         self._call_lock: Optional[asyncio.Lock] = None
+        self._worker_error: Optional[BaseException] = None
 
         self.session: Optional[ClientSession] = None
         self.tools: List = []  # 原始工具对象
         self.tools_dict: Dict[str, Any] = {}
         self.name_mapping: Dict[str, str] = {}
+
+    def _reset_runtime_state(self) -> None:
+        self.session = None
+        self.tools = []
+        self.tools_dict = {}
+        self.name_mapping = {}
+        self._call_lock = None
 
     async def initialize(self, read_timeout_seconds: timedelta | None = None,
              sampling_callback: SamplingFnT | None = None,
@@ -95,7 +103,16 @@ class ServerMCPClient:
              client_info: Implementation | None = None):
         """初始化MCP客户端连接"""
         if self._worker_task:
+            if self._worker_error is not None:
+                raise RuntimeError(
+                    f"服务端MCP客户端初始化失败: {self._worker_error}"
+                ) from self._worker_error
             return
+
+        self._ready_evt = asyncio.Event()
+        self._shutdown_evt = asyncio.Event()
+        self._worker_error = None
+        self._reset_runtime_state()
 
         self._worker_task = asyncio.create_task(
             self._worker(read_timeout_seconds=read_timeout_seconds,
@@ -108,6 +125,17 @@ class ServerMCPClient:
         )
         await self._ready_evt.wait()
 
+        if self._worker_error is not None:
+            worker_error = self._worker_error
+            await self.cleanup()
+            raise RuntimeError(
+                f"服务端MCP客户端初始化失败: {worker_error}"
+            ) from worker_error
+
+        if not self.session:
+            await self.cleanup()
+            raise RuntimeError("服务端MCP客户端初始化失败: MCP session unavailable")
+
         self.logger.bind(tag=TAG).info(
             f"服务端MCP客户端已连接，可用工具: {[name for name in self.name_mapping.values()]}"
         )
@@ -115,15 +143,24 @@ class ServerMCPClient:
     async def cleanup(self):
         """清理MCP客户端资源"""
         if not self._worker_task:
+            self._reset_runtime_state()
+            self._ready_evt = asyncio.Event()
+            self._shutdown_evt = asyncio.Event()
+            self._worker_error = None
             return
 
+        worker_task = self._worker_task
         self._shutdown_evt.set()
         try:
-            await asyncio.wait_for(self._worker_task, timeout=20)
+            await asyncio.wait_for(asyncio.shield(worker_task), timeout=20)
         except (asyncio.TimeoutError, Exception) as e:
             self.logger.bind(tag=TAG).error(f"服务端MCP客户端关闭错误: {e}")
         finally:
             self._worker_task = None
+            self._reset_runtime_state()
+            self._ready_evt = asyncio.Event()
+            self._shutdown_evt = asyncio.Event()
+            self._worker_error = None
 
     def has_tool(self, name: str) -> bool:
         """检查是否包含指定工具
@@ -331,6 +368,8 @@ class ServerMCPClient:
 
                 # 获取工具
                 self.tools = (await self.session.list_tools()).tools
+                self.tools_dict = {}
+                self.name_mapping = {}
                 for t in self.tools:
                     sanitized = sanitize_tool_name(t.name)
                     self.tools_dict[sanitized] = t
@@ -342,6 +381,9 @@ class ServerMCPClient:
                 await self._shutdown_evt.wait()
 
             except Exception as e:
+                self._worker_error = e
                 self.logger.bind(tag=TAG).error(f"服务端MCP客户端工作协程错误: {e}")
                 self._ready_evt.set()
                 raise
+            finally:
+                self._reset_runtime_state()

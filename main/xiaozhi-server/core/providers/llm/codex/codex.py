@@ -1,4 +1,5 @@
 import json
+import locale
 import os
 import queue
 import re
@@ -23,8 +24,56 @@ def _ts() -> str:
 
 
 def _send(proc: subprocess.Popen, obj: Dict) -> None:
-    proc.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    proc.stdin.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
     proc.stdin.flush()
+
+
+def _ordered_encodings(*encodings: Optional[str]) -> List[str]:
+    ordered: List[str] = []
+    seen = set()
+    for encoding in encodings:
+        if not encoding:
+            continue
+        normalized = str(encoding).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def _decode_pipe_line(line: Any, encodings: List[str]) -> str:
+    if isinstance(line, str):
+        return line
+    if line is None:
+        return ""
+
+    data = bytes(line)
+    for encoding in encodings:
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _decode_stdout_line(line: Any) -> str:
+    return _decode_pipe_line(line, ["utf-8"])
+
+
+def _decode_stderr_line(line: Any) -> str:
+    return _decode_pipe_line(
+        line,
+        _ordered_encodings(
+            "utf-8",
+            locale.getpreferredencoding(False),
+            getattr(locale, "getencoding", lambda: None)(),
+            "mbcs",
+            "cp936",
+            "gbk",
+            "big5",
+        ),
+    )
 
 
 def _is_server_request(msg: Dict) -> bool:
@@ -73,7 +122,7 @@ class _StdoutReader(threading.Thread):
             if not line:
                 self.q.put({"__eof__": True})
                 return
-            line = line.strip()
+            line = _decode_stdout_line(line).strip()
             if not line:
                 continue
             try:
@@ -261,6 +310,11 @@ def _should_suppress_stderr_warning(text: str) -> bool:
     if _is_recoverable_wham_transport_warning(text):
         return True
 
+    # Windows may emit localized "process not found" stderr when Codex tries
+    # to stop a helper that has already exited. This is noisy but harmless.
+    if _is_benign_process_cleanup_warning(text):
+        return True
+
     return False
 
 
@@ -281,6 +335,27 @@ def _is_recoverable_wham_transport_warning(text: str) -> bool:
         "error sending request for url (https://chatgpt.com/backend-api/wham/apps)",
     )
     return any(marker in normalized for marker in recoverable_markers)
+
+
+def _is_benign_process_cleanup_warning(text: str) -> bool:
+    normalized = _normalize_whitespace(text).lower()
+    if not normalized:
+        return False
+
+    if "cannot find a process with the process identifier" in normalized:
+        return True
+
+    if "the process" in normalized and "not found" in normalized:
+        return True
+
+    chinese_markers = (
+        "没有找到进程",
+        "未能找到进程",
+        "找不到进程",
+        "找不到具有进程标识符",
+        "没有此任务的实例在运行",
+    )
+    return any(marker in text for marker in chinese_markers)
 
 
 def _recoverable_stderr_reason(text: str) -> Optional[str]:
@@ -936,7 +1011,7 @@ class _CodexSession:
         if not self.proc or not self.proc.stderr:
             return
         for line in self.proc.stderr:
-            text = line.rstrip()
+            text = _decode_stderr_line(line).rstrip()
             if not text:
                 continue
             recovery_reason = _recoverable_stderr_reason(text)
@@ -985,10 +1060,6 @@ class _CodexSession:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
             cwd=self.workspace,
             env=env,
         )

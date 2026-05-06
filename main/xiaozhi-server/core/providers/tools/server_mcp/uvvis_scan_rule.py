@@ -30,6 +30,26 @@ _UVVIS_SHARED_SPECTRA_STEP_IDS = {
 _UVVIS_SHARED_BLANK_PHASES = {"await_pure_water_blank"}
 
 
+def _resolve_experiment_uvvis_output_root(conn) -> Path | None:
+    yaml_path = str(getattr(conn, "experiment_yaml_path", "") or "").strip()
+    if not yaml_path and hasattr(conn, "_resolve_experiment_yaml_path"):
+        try:
+            yaml_path = str(conn._resolve_experiment_yaml_path() or "").strip()
+        except Exception:
+            yaml_path = ""
+    if not yaml_path:
+        return None
+
+    try:
+        yaml_file = Path(yaml_path).expanduser().resolve()
+    except Exception:
+        return None
+
+    if yaml_file.name.lower().endswith((".yaml", ".yml")) and yaml_file.parent.name.lower() == "configs":
+        return (yaml_file.parent.parent / "data" / "uv_data_common").resolve()
+    return None
+
+
 def _normalize_bool(value):
     if isinstance(value, bool):
         return value
@@ -378,6 +398,10 @@ class UVVisScanRule:
         override_root = str(self.conn.config.get("uvvis_scan_output_root", "")).strip()
         if override_root:
             return Path(override_root).resolve()
+
+        experiment_root = _resolve_experiment_uvvis_output_root(self.conn)
+        if experiment_root is not None:
+            return experiment_root
 
         llm_cfg = self.conn.config.get("LLM", {}).get("codex_app_server", {}) or {}
         workspace = str(llm_cfg.get("workspace", "")).strip()
