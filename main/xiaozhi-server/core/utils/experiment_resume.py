@@ -910,7 +910,8 @@ def build_resume_tool_message(
     content_lines.append(f"当前设备日志文件：{resume_context['log_path']}")
     if is_record_request:
         content_lines.append(
-            "当前请求涉及实验记录导出；如果当前会话缺少前面断掉步骤的数据，优先继续读取这个设备日志文件的更早内容后再补记录。"
+            "当前请求涉及实验记录导出；先复用最近一次已知 experiment_session_id 直接尝试导出。"
+            "只有当工具明确返回 session_id not found、记录缺失或导出失败时，才继续读取这个设备日志文件的更早内容后再补记录。"
         )
     content_lines.append("当前用户消息：" + _compact_text(query))
     content = "\n".join(content_lines).strip()
