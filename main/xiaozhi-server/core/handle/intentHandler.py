@@ -580,8 +580,6 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
         step_meta.get("step_id", ""),
         step_meta.get("id", ""),
     )
-    if not step_id:
-        return ""
 
     if mode == "repeat":
         prefix = "当前这一步："
@@ -590,14 +588,146 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
     else:
         prefix = "现在做这一步："
 
+    signature = _normalize_text_for_match(
+        " ".join(
+            value
+            for value in (
+                step_id,
+                step_meta.get("title", ""),
+                step_meta.get("instruction", ""),
+                step_meta.get("description", ""),
+            )
+            if str(value or "").strip()
+        )
+    )
+
+    def _signature_has_any(*tokens: str) -> bool:
+        return any(token in signature for token in tokens if token)
+
+    def _signature_has_all(*tokens: str) -> bool:
+        return all(token in signature for token in tokens if token)
+
+    looks_like_pure_water_blank_step = signature and (
+        _signature_has_any("纯水空白校正", "纯水空白")
+        and not _signature_has_any(
+                "装入比色皿",
+                "真实样品",
+                "批量测光谱",
+                "动力学",
+                "反应液",
+                "参比液",
+                "sample1-5record",
+                "sample2",
+                "sample4",
+        )
+    )
+    if looks_like_pure_water_blank_step:
+        return (
+            f"{prefix}1-5号样品：纯水空白校正。"
+            "请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。"
+        )
+
+    if signature and _signature_has_any(
+            "暗电流校正",
+            "暗电流和空气能量校正",
+            "暗电流和空气基线",
+            "共享暗电流和空气能量校正",
+            "共享暗电流和空气基线",
+            "shareddarkcurrent",
+    ):
+        return (
+            "当前步骤是 1-5号样品：暗电流校正。"
+            "先不要放任何液体，我先进行暗电流校正。"
+        )
+
+    if signature and (
+        _signature_has_any("装入比色皿", "样品装杯")
+        or (
+            _signature_has_any("真实样品", "样品位")
+            and _signature_has_any("参比位", "纯水")
+            and _signature_has_any("比色皿", "装入")
+        )
+    ):
+        return (
+            f"{prefix}1-5号样品：装入比色皿。"
+            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保留纯水，擦净外壁，做好告诉我。"
+        )
+
+    if signature and (
+        _signature_has_any(
+            "批量测光谱",
+            "批量光谱测量",
+            "记录数据",
+            "lambda max",
+            "lambdamax",
+        )
+        or (
+            _signature_has_any("1-5号样品", "1到5号样品")
+            and _signature_has_any("测量", "光谱")
+            and _signature_has_any("参比位", "纯水")
+        )
+    ):
+        return (
+            f"{prefix}1-5号样品：批量测光谱并记录数据。"
+            "确认1到5号样品位都已放好真实样品、参比位保留纯水，放好了告诉我开始测量。"
+        )
+
+    if signature and _signature_has_any("统一清洗比色皿", "清洗比色皿", "测量后清洗"):
+        return (
+            f"{prefix}紫外-可见测量后：统一清洗比色皿。"
+            "按规范处理残液并清洗比色皿，为后续动力学实验做准备，做好告诉我。"
+        )
+
+    if signature and _signature_has_all("2号样品", "动力学") and _signature_has_any("参比液", "参比位") and not _signature_has_any("反应液", "400纳米", "吸光度"):
+        return (
+            f"{prefix}2号样品动力学：配制参比液。"
+            "按要求配好2号样品参比液，放入参比位并检查比色皿外壁和透光面，做好告诉我。"
+        )
+
+    if signature and _signature_has_all("2号样品", "动力学") and _signature_has_any("反应液", "样品位") and not _signature_has_any("400纳米", "吸光度"):
+        return (
+            f"{prefix}2号样品动力学：配制反应液。"
+            "按要求配好2号样品反应液，放入样品位并确认参比和样品比色皿都放置正确，做好告诉我。"
+        )
+
+    if signature and _signature_has_all("2号样品", "动力学") and _signature_has_any("400纳米", "吸光度", "动力学测量"):
+        return (
+            f"{prefix}2号样品动力学：开始按时间记录吸光度。"
+            "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
+        )
+
+    if signature and _signature_has_all("4号样品", "动力学") and _signature_has_any("参比液", "参比位") and not _signature_has_any("反应液", "400纳米", "吸光度"):
+        return (
+            f"{prefix}4号样品动力学：配制参比液。"
+            "按要求配好4号样品参比液，放入参比位并检查比色皿外壁和透光面，做好告诉我。"
+        )
+
+    if signature and _signature_has_all("4号样品", "动力学") and _signature_has_any("反应液", "样品位") and not _signature_has_any("400纳米", "吸光度"):
+        return (
+            f"{prefix}4号样品动力学：配制反应液。"
+            "按要求配好4号样品反应液，放入样品位并确认参比和样品比色皿都放置正确，做好告诉我。"
+        )
+
+    if signature and _signature_has_all("4号样品", "动力学") and _signature_has_any("400纳米", "吸光度", "动力学测量"):
+        return (
+            f"{prefix}4号样品动力学：开始按时间记录吸光度。"
+            "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
+        )
+
+    if signature and _signature_has_any("step_6_data_analysis", "uvvis数据分析", "uv-vis数据分析", "紫外可见数据分析") and _signature_has_any("分析", "数据", "图谱"):
+        return "UV-Vis 测量部分已经完成，接下来整理数据结果。"
+
+    if not step_id:
+        return ""
+
     reply_map = {
         "step_3_uv_vis_shared_dark_air_prep": (
-            "当前步骤是 1-5号样品：暗电流和空气能量校正。"
-            "先不要放任何液体，我先进行暗电流和空气能量准备。"
+            "当前步骤是 1-5号样品：暗电流校正。"
+            "先不要放任何液体，我先进行暗电流校正。"
         ),
         "step_3_uv_vis_shared_dark_blank_prep": (
-            f"{prefix}1-5号样品：暗电流和纯水空白校正。"
-            "先不要放任何液体，准备做暗电流和空气基线；需要放纯水比色皿时我再告诉你。"
+            f"{prefix}1-5号样品：纯水空白校正。"
+            "请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。"
         ),
         "step_3_uv_vis_sample1-5_load_cuvette": (
             f"{prefix}1-5号样品：装入比色皿。"
@@ -635,6 +765,7 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
             f"{prefix}4号样品动力学：开始按时间记录吸光度。"
             "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
         ),
+        "step_6_data_analysis": "UV-Vis 测量部分已经完成，接下来整理数据结果。",
     }
     return reply_map.get(step_id, "")
 
@@ -4183,6 +4314,8 @@ def _infer_uvvis_step_id_from_context(
     if _contains_any(
         context_text,
         (
+            "暗电流校正",
+            "共享暗电流校正",
             "暗电流和空气能量校正",
             "共享暗电流和空气能量校正",
             "空气能量准备",
@@ -4307,6 +4440,157 @@ def _resolve_uvvis_runtime_device_dirs(conn) -> list[Path]:
     for root in _resolve_uvvis_root_candidates(conn):
         dirs.append((root / device_id).resolve())
     return dirs
+
+
+def _resolve_uvvis_shared_blank_dirs(conn) -> list[Path]:
+    candidates: list[Path] = []
+
+    override_root = str(conn.config.get("uvvis_scan_output_root", "") or "").strip()
+    if override_root:
+        root = Path(override_root).expanduser().resolve()
+        candidates.append((root / "uv_data_common").resolve())
+        candidates.append(root)
+
+    llm_cfg = conn.config.get("LLM", {}).get("codex_app_server", {}) or {}
+    workspace = str(llm_cfg.get("workspace", "") or "").strip()
+    if workspace:
+        workspace_root = Path(workspace).expanduser().resolve()
+        candidates.append(
+            (
+                workspace_root
+                / "lab_runs"
+                / "exp1_AgNPs_synthesis"
+                / "data"
+                / "uv_data_common"
+            ).resolve()
+        )
+
+    candidates.append(
+        (
+            Path.home()
+            / "Documents"
+            / "GitHub"
+            / "codex_edu"
+            / "lab_runs"
+            / "exp1_AgNPs_synthesis"
+            / "data"
+            / "uv_data_common"
+        ).resolve()
+    )
+    candidates.append((Path("data") / "uv_data_common").resolve())
+
+    deduped: list[Path] = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _path_exists(path_value) -> bool:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return False
+    try:
+        return Path(path_text).expanduser().exists()
+    except Exception:
+        return False
+
+
+def _extract_uvvis_blank_baseline_state(payload) -> dict | None:
+    named = _collect_payload_named_values(
+        payload,
+        (
+            "blank_baseline_exists",
+            "blank_baseline_status",
+            "blank_baseline_csv",
+            "blank_baseline_manifest_json",
+        ),
+    )
+    if not named:
+        return None
+
+    return {
+        "blank_baseline_exists": bool(_normalize_bool(named.get("blank_baseline_exists"))),
+        "blank_baseline_status": str(named.get("blank_baseline_status", "") or "").strip(),
+        "blank_baseline_csv": str(named.get("blank_baseline_csv", "") or "").strip(),
+        "blank_baseline_manifest_json": str(
+            named.get("blank_baseline_manifest_json", "") or ""
+        ).strip(),
+    }
+
+
+def _blank_baseline_state_has_artifact(state) -> bool:
+    if not isinstance(state, dict):
+        return False
+    return any(
+        _path_exists(state.get(key))
+        for key in ("blank_baseline_csv", "blank_baseline_manifest_json")
+    )
+
+
+def _looks_like_uvvis_blank_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    if not name or name.startswith("."):
+        return False
+    if "connection_state" in name:
+        return False
+    if path.suffix.lower() not in {".csv", ".json"}:
+        return False
+    return any(token in name for token in ("blank", "baseline"))
+
+
+def _stat_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except Exception:
+        return 0.0
+
+
+def _read_uvvis_blank_baseline_state_from_shared_dir(conn) -> dict | None:
+    latest_csv: Path | None = None
+    latest_manifest: Path | None = None
+
+    for shared_dir in _resolve_uvvis_shared_blank_dirs(conn):
+        try:
+            if not shared_dir.exists() or not shared_dir.is_dir():
+                continue
+        except Exception:
+            continue
+
+        try:
+            candidates = [path for path in shared_dir.rglob("*") if path.is_file()]
+        except Exception:
+            continue
+
+        for candidate in candidates:
+            if not _looks_like_uvvis_blank_artifact(candidate):
+                continue
+            suffix = candidate.suffix.lower()
+            if suffix == ".csv" and (
+                latest_csv is None or _stat_mtime(candidate) > _stat_mtime(latest_csv)
+            ):
+                latest_csv = candidate
+            if suffix == ".json" and (
+                latest_manifest is None
+                or _stat_mtime(candidate) > _stat_mtime(latest_manifest)
+            ):
+                latest_manifest = candidate
+
+    if latest_csv is None and latest_manifest is None:
+        return None
+
+    return {
+        "blank_baseline_exists": True,
+        "blank_baseline_status": "reused_from_shared_dir",
+        "blank_baseline_csv": str(latest_csv.resolve()) if latest_csv else "",
+        "blank_baseline_manifest_json": (
+            str(latest_manifest.resolve()) if latest_manifest else ""
+        ),
+    }
 
 
 def _collect_payload_strings(payload) -> list[str]:
@@ -4488,11 +4772,23 @@ def _payload_mentions_reusable_blank(payload) -> bool:
 
 
 def _uvvis_blank_baseline_exists(conn, payload=None) -> bool:
-    if payload is not None and _payload_mentions_reusable_blank(payload):
+    disk_state = _read_uvvis_blank_baseline_state_from_shared_dir(conn)
+    if disk_state is not None:
+        setattr(conn, "_last_uvvis_blank_baseline_state", disk_state)
+        return True
+
+    payload_state = _extract_uvvis_blank_baseline_state(payload)
+    if _blank_baseline_state_has_artifact(payload_state):
+        normalized_payload_state = dict(payload_state)
+        normalized_payload_state["blank_baseline_exists"] = True
+        setattr(conn, "_last_uvvis_blank_baseline_state", normalized_payload_state)
         return True
 
     blank_state = getattr(conn, "_last_uvvis_blank_baseline_state", None)
-    return isinstance(blank_state, dict) and bool(blank_state.get("blank_baseline_exists"))
+    if _blank_baseline_state_has_artifact(blank_state):
+        return True
+
+    return False
 
 
 def _payload_has_success_flag(payload) -> bool | None:
@@ -4648,19 +4944,17 @@ def _compose_uvvis_status_reply(conn, status: dict, *, inferred_step_id: str = "
     if phase == "blank_reusable":
         return "UV-Vis 现在没有在工作。这一步已经确认当前批次纯水空白可复用，继续下一步时记得保留或重新放好参比位纯水比色皿。"
     if phase == "await_pure_water_blank":
-        return "UV-Vis 现在没有在工作。暗电流和空气基线已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"
+        return "UV-Vis 现在没有在工作。暗电流校正已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"
     if phase == "await_reaction_sample":
         return "UV-Vis 现在没有在工作，这一步在等你把样品和参比液放好。"
     if phase == "await_liquid_blank":
         return "UV-Vis 现在没有在工作，这一步在等你把指定的空白液放好。"
 
-    blank_state = getattr(conn, "_last_uvvis_blank_baseline_state", None)
     if (
         inferred_step_id == _UVVIS_SHARED_BLANK_STEP_ID
-        and isinstance(blank_state, dict)
-        and blank_state.get("blank_baseline_exists")
+        and _uvvis_blank_baseline_exists(conn)
     ):
-        return "UV-Vis 现在没有在工作。暗电流和空气基线已经完成。"
+        return "UV-Vis 现在没有在工作。暗电流校正已经完成。"
     return "UV-Vis 现在没有在工作。"
 
 
@@ -5764,6 +6058,7 @@ async def _handle_uvvis_shared_dark_air_prep(
         or _contains_any(
             _normalize_text_for_match(filtered_text),
             (
+                "暗电流校正",
                 "暗电流",
                 "空气基线",
                 "空气能量",
@@ -5788,14 +6083,12 @@ async def _handle_uvvis_shared_dark_air_prep(
         return False
 
     await _start_direct_intent_turn(conn, original_text)
-    speak_txt(conn, "先不要放任何液体，我先进行暗电流和空气能量准备。")
+    speak_txt(conn, "先不要放任何液体，我先进行暗电流校正。")
     payload = await _execute_uvvis_tool_payload(
         conn,
-        "uvvis_measure_spectra",
+        "uvvis_prepare_dark_current",
         {
             "session_key": session_key,
-            "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
-            "ready_for_samples": False,
         },
     )
     if _payload_looks_busy_or_inaccessible(payload):
@@ -5806,42 +6099,14 @@ async def _handle_uvvis_shared_dark_air_prep(
         conn,
         fields={
             "shared_dark_current_ready": True,
-            "shared_air_baseline_ready": True,
-            "pure_water_blank_status_checked": True,
-            "observations": "共享暗电流和空气能量校正已完成，并已确认当前批次纯水空白状态。",
+            "observations": "共享暗电流校正已完成。",
         },
         auto_advance=True,
-        fallback_reply="暗电流和空气能量校正已经完成。",
+        fallback_reply="暗电流校正已经完成。",
     )
     if not auto_advanced:
         if reply:
             speak_txt(conn, reply)
-        return True
-
-    if _payload_mentions_missing_blank(payload):
-        _set_uvvis_direct_state(
-            conn,
-            step_id=_UVVIS_SHARED_BLANK_STEP_ID,
-            phase="await_pure_water_blank",
-            session_key=session_key,
-        )
-        speak_txt(
-            conn,
-            "暗电流和空气能量校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好了告诉我，我们再做纯水空白校正。",
-        )
-        return True
-
-    if _uvvis_blank_baseline_exists(conn, payload):
-        _set_uvvis_direct_state(
-            conn,
-            step_id=_UVVIS_SHARED_BLANK_STEP_ID,
-            phase="blank_reusable",
-            session_key=session_key,
-        )
-        speak_txt(
-            conn,
-            "暗电流和空气能量校正已经完成。当前批次纯水空白可复用。继续下一步时参比位保留或重新放好纯水比色皿就行。",
-        )
         return True
 
     if reply:
@@ -5889,7 +6154,7 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
                 phase="await_pure_water_blank",
                 session_key=session_key,
             )
-            speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。")
+            speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿，放好后告诉我可以开始扫描。")
             return True
 
         fields = {
@@ -5948,7 +6213,7 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
         speak_txt(conn, _UVVIS_BUSY_REPLY)
         return True
     if _payload_mentions_missing_blank(payload):
-        speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。")
+        speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿，放好后告诉我可以开始扫描。")
         _set_uvvis_direct_state(
             conn,
             step_id=_UVVIS_SHARED_BLANK_STEP_ID,
@@ -6017,7 +6282,7 @@ async def _handle_uvvis_shared_blank_prep(
                 phase="await_pure_water_blank",
                 session_key=session_key,
             )
-            speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。")
+            speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿，放好后告诉我可以开始扫描。")
             return True
 
         auto_advanced, reply = await _complete_experiment_step_with_fields(
@@ -6082,7 +6347,7 @@ async def _handle_uvvis_shared_blank_prep(
     )
     speak_txt(
         conn,
-        "暗电流和空气能量校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好了告诉我，我们再做纯水空白校正。",
+        "暗电流校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。",
     )
     return True
 
@@ -6469,9 +6734,9 @@ async def _handle_uvvis_kinetics_measurement(
 def _compose_uvvis_step_rejection_reply(step_id: str) -> str:
     step_id = str(step_id or "").strip()
     if step_id == _UVVIS_SHARED_DARK_AIR_STEP_ID:
-        return "当前实验图谱还没推进到 UV-Vis 的共享暗电流和空气能量校正，先完成丁达尔现象观察。"
+        return "当前实验图谱还没推进到 UV-Vis 的暗电流校正，先完成丁达尔现象观察。"
     if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
-        return "当前实验图谱还没推进到 UV-Vis 的纯水空白校正，先完成共享暗电流和空气能量校正。"
+        return "当前实验图谱还没推进到 UV-Vis 的纯水空白校正，先完成暗电流校正。"
     if step_id == _UVVIS_SAMPLE_RECORD_STEP_ID:
         return "当前实验图谱还没推进到 1-5 号样品的批量光谱测量，先完成前面的装样准备。"
     if step_id in {

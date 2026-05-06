@@ -23,6 +23,22 @@ FAILED_SCAN_STATES = {"failed", "error", "cancelled", "canceled"}
 RUNNING_SCAN_STATE = "running"
 QUEUED_SCAN_STATE = "queued"
 DEFAULT_UVVIS_SCAN_OUTPUT_SUBDIR = Path("lab_runs") / "exp1_AgNPs_synthesis" / "data" / "uv_data_common"
+_UVVIS_SHARED_SPECTRA_STEP_IDS = {
+    "step_3_uv_vis_shared_dark_air_prep",
+    "step_3_uv_vis_shared_dark_blank_prep",
+}
+_UVVIS_SHARED_BLANK_PHASES = {"await_pure_water_blank"}
+
+
+def _normalize_bool(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _extract_uvvis_scan_context(
@@ -384,6 +400,39 @@ class UVVisScanRule:
         normalized_device_id = self._normalize_device_id(device_id)
         return (self._resolve_uvvis_output_root_dir() / normalized_device_id).resolve()
 
+    def _resolve_uvvis_shared_output_dir(self) -> Path:
+        return self._resolve_uvvis_output_root_dir()
+
+    def _should_use_shared_uvvis_output_dir(
+        self,
+        actual_tool_name: str,
+        arguments: Dict[str, Any],
+    ) -> bool:
+        ready_for_samples = _normalize_bool(arguments.get("ready_for_samples"))
+        if actual_tool_name == "uvvis_measure_kinetics":
+            return ready_for_samples is False
+
+        if actual_tool_name != "uvvis_measure_spectra":
+            return False
+
+        if ready_for_samples is False:
+            return True
+
+        current_step_id = str(getattr(self.conn, "experiment_current_step_id", "") or "").strip()
+        if current_step_id in _UVVIS_SHARED_SPECTRA_STEP_IDS:
+            return True
+
+        direct_state = getattr(self.conn, "_uvvis_direct_state", None)
+        if not isinstance(direct_state, dict):
+            return False
+
+        direct_step_id = str(direct_state.get("step_id", "") or "").strip()
+        if direct_step_id in _UVVIS_SHARED_SPECTRA_STEP_IDS:
+            return True
+
+        direct_phase = str(direct_state.get("phase", "") or "").strip()
+        return direct_phase in _UVVIS_SHARED_BLANK_PHASES
+
     def _inject_uvvis_native_output_dir(
         self,
         actual_tool_name: str,
@@ -394,7 +443,10 @@ class UVVisScanRule:
         if pick_text(arguments.get("output_dir")):
             return
 
-        target_dir = self._resolve_runtime_device_dir()
+        if self._should_use_shared_uvvis_output_dir(actual_tool_name, arguments):
+            target_dir = self._resolve_uvvis_shared_output_dir()
+        else:
+            target_dir = self._resolve_runtime_device_dir()
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:

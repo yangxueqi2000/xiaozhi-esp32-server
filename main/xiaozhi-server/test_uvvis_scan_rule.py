@@ -2,15 +2,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+import types
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
-
-
-from plugins_func.register import Action
-from core.providers.tools.server_mcp.payload_utils import finalize_server_mcp_payload
-from core.providers.tools.server_mcp.uvvis_scan_rule import UVVisScanRule
 
 
 class _FakeLogger:
@@ -21,6 +17,20 @@ class _FakeLogger:
         return None
 
 
+fake_logger_module = types.ModuleType("config.logger")
+fake_logger_module.setup_logging = lambda: _FakeLogger()
+sys.modules.setdefault("config.logger", fake_logger_module)
+sys.modules.setdefault("opuslib_next", types.ModuleType("opuslib_next"))
+fake_pydub_module = types.ModuleType("pydub")
+fake_pydub_module.AudioSegment = object
+sys.modules.setdefault("pydub", fake_pydub_module)
+
+
+from plugins_func.register import Action
+from core.providers.tools.server_mcp.payload_utils import finalize_server_mcp_payload
+from core.providers.tools.server_mcp.uvvis_scan_rule import UVVisScanRule
+
+
 class _FakeConn:
     def __init__(self):
         self.logger = _FakeLogger()
@@ -29,6 +39,59 @@ class _FakeConn:
 
 
 class UVVisScanRuleTest(unittest.IsolatedAsyncioTestCase):
+    def test_prepare_arguments_routes_shared_pure_water_blank_to_common_output_dir(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_3_uv_vis_shared_dark_blank_prep"
+        rule = UVVisScanRule(conn, lambda: None)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conn.config = {"uvvis_scan_output_root": tmp_dir}
+            arguments = {
+                "sample_positions": [1, 2, 3, 4, 5],
+                "ready_for_samples": True,
+            }
+
+            rule.prepare_arguments("uvvis_measure_spectra", arguments)
+
+        self.assertEqual(str(Path(tmp_dir).resolve()), arguments["output_dir"])
+
+    def test_prepare_arguments_keeps_batch_sample_spectra_in_device_dir(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_3_uv_vis_sample1-5_record_data"
+        rule = UVVisScanRule(conn, lambda: None)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conn.config = {"uvvis_scan_output_root": tmp_dir}
+            arguments = {
+                "sample_positions": [1, 2, 3, 4, 5],
+                "ready_for_samples": True,
+            }
+
+            rule.prepare_arguments("uvvis_measure_spectra", arguments)
+
+        expected = str((Path(tmp_dir).resolve() / "94_a9_90_28_ea_58").resolve())
+        self.assertEqual(expected, arguments["output_dir"])
+
+    def test_prepare_arguments_routes_shared_kinetics_baseline_to_common_output_dir(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_4_kinetics_sample2_measurement"
+        rule = UVVisScanRule(conn, lambda: None)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conn.config = {"uvvis_scan_output_root": tmp_dir}
+            arguments = {
+                "wavelength_nm": 400,
+                "duration_minutes": 34,
+                "interval_seconds": 60,
+                "run_name": "sample2",
+                "ready_for_samples": False,
+                "sample_positions": [1],
+            }
+
+            rule.prepare_arguments("uvvis_measure_kinetics", arguments)
+
+        self.assertEqual(str(Path(tmp_dir).resolve()), arguments["output_dir"])
+
     def test_before_execute_requires_scan_task_context(self):
         conn = _FakeConn()
         rule = UVVisScanRule(conn, lambda: None)

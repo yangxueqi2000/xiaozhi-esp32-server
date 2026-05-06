@@ -1333,14 +1333,28 @@ def _is_spoken_meta_guidance_clause(text: str) -> bool:
 
     scope_prefixes = (
         "只完成",
+        "只给",
         "只讲",
+        "只提醒",
         "只说",
+        "只告诉",
         "只推进",
         "只按",
         "只需要完成",
         "只需要做",
     )
-    scope_topics = ("确认", "共同试剂", "后续", "下一步", "这一步", "当前步骤", "本步")
+    scope_topics = (
+        "确认",
+        "共同试剂",
+        "后续",
+        "下一步",
+        "这一步",
+        "当前步骤",
+        "本步",
+        "主说话人",
+        "当前动作",
+        "同义表达",
+    )
     if clause.startswith(scope_prefixes) and any(token in clause for token in scope_topics):
         return True
 
@@ -1372,8 +1386,61 @@ def _is_spoken_meta_guidance_clause(text: str) -> bool:
         "不要说后续",
         "不需要讲后续",
         "不要预告下一步",
+        "只给主说话人当前动作",
     )
     return any(token in clause for token in explicit_meta_clauses)
+
+
+def _strip_spoken_internal_control_tail(text: str) -> str:
+    clause = normalize_spoken_text(text).strip(" ，,、；;。！？!?")
+    if not clause:
+        return ""
+
+    rewritten = clause
+    lead_in_patterns = (
+        re.compile(r"^(?:先|再)?提示主说话人[“\"']?"),
+        re.compile(r"^(?:先|再)?只需提醒主说话人"),
+        re.compile(r"^(?:先|再)?提醒主说话人"),
+    )
+    for pattern in lead_in_patterns:
+        rewritten = pattern.sub("", rewritten).strip(" “”\"'")
+
+    tail_patterns = (
+        re.compile(
+            r"(?:，|,)?(?:只有在|只有当)[^。！？!?；;]{0,160}"
+            r"(?:主说话人|同义表达|pure water|liquid blank|记录纯水空白|记录液体空白|当前批次|返回结果|session_key|uvvis_measure)"
+            r"[^。！？!?；;]{0,240}$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:，|,)?(?:先|再)?根据上一步[^。！？!?；;]{0,240}"
+            r"(?:返回结果|pure water|liquid blank|记录纯水空白|记录液体空白|可复用|调用|不要再调用)"
+            r"[^。！？!?；;]{0,240}$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:，|,)?(?:先|再)?根据[^。！？!?；;]{0,60}返回结果[^。！？!?；;]{0,240}"
+            r"(?:pure water|liquid blank|可复用|调用|记录)"
+            r"[^。！？!?；;]{0,240}$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:，|,)?(?:若|如果)工具(?:提示|返回)[^。！？!?；;]{0,240}"
+            r"(?:可复用|不要重复测量|读取并记住|pure water|liquid blank|返回结果)"
+            r"[^。！？!?；;]{0,240}$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:，|,)?(?:但|并且|并|然后)?[^。！？!?；;]{0,60}"
+            r"(?:读取并记住|不要再调用|才调用)"
+            r"[^。！？!?；;]{0,240}$",
+            re.IGNORECASE,
+        ),
+    )
+    for pattern in tail_patterns:
+        rewritten = pattern.sub("", rewritten).strip(" ，,、；;")
+
+    return rewritten.strip(" “”\"'")
 
 
 def _strip_spoken_meta_guidance_clauses(text: str) -> str:
@@ -1383,9 +1450,14 @@ def _strip_spoken_meta_guidance_clauses(text: str) -> str:
         terminal = stripped[-1] if stripped and stripped[-1] in "。！？!?；;" else ""
         body = stripped[:-1] if terminal else stripped
         clauses = [part.strip() for part in re.split(r"[，,；;]\s*", body) if part.strip()]
-        kept_clauses = [
-            clause for clause in clauses if not _is_spoken_meta_guidance_clause(clause)
-        ]
+        kept_clauses = []
+        for clause in clauses:
+            rewritten_clause = _strip_spoken_internal_control_tail(clause)
+            if not rewritten_clause:
+                continue
+            if _is_spoken_meta_guidance_clause(rewritten_clause):
+                continue
+            kept_clauses.append(rewritten_clause)
         if not kept_clauses:
             continue
         rebuilt = "，".join(kept_clauses).strip(" ，,、；;")
@@ -1653,6 +1725,7 @@ _EXPERIMENT_ALIGNMENT_TOOL_NAMES = {
     "redo_trial",
     "modify_record",
     "uvvis_session",
+    "uvvis_prepare_dark_current",
     "uvvis_measure_spectra",
     "uvvis_measure_kinetics",
     "uvvis_scan_start",
@@ -1906,6 +1979,10 @@ def _spoken_text_has_step_completion_prompt(text: str) -> bool:
         "做完了告诉我",
         "测完告诉我",
         "扫完告诉我",
+        "放好后告诉我可以开始扫描",
+        "放好后告诉我开始扫描",
+        "告诉我可以开始扫描",
+        "可以开始扫描",
         "结束后告诉我",
         "加完告诉我",
         "加好了告诉我",
@@ -1918,6 +1995,27 @@ def _spoken_text_has_step_completion_prompt(text: str) -> bool:
         "开始时告诉我",
     )
     return any(token in normalized for token in completion_tokens)
+
+
+def _looks_like_student_facing_scan_ready_sentence(text: str) -> bool:
+    normalized = normalize_spoken_text(text)
+    if not normalized:
+        return False
+
+    direct_ready_tokens = (
+        "放好后告诉我可以开始扫描",
+        "放好后告诉我开始扫描",
+        "告诉我可以开始扫描",
+        "告诉我开始扫描",
+        "可以开始扫描时直接告诉我",
+    )
+    if any(token in normalized for token in direct_ready_tokens):
+        return True
+
+    return "可以开始扫描" in normalized and any(
+        token in normalized
+        for token in ("请在", "放入", "放好", "样品位", "参比位", "比色皿")
+    )
 
 
 def _ensure_spoken_step_completion_prompt(text: str) -> str:
@@ -2555,6 +2653,8 @@ def filter_spoken_backstage_text(text):
             return True
         if filler_re.fullmatch(s):
             return True
+        if _looks_like_student_facing_scan_ready_sentence(s):
+            return False
         if _is_full_backstage_sentence(s):
             return True
         if _is_structural_backstage_sentence(s):

@@ -736,9 +736,12 @@ def _experiment_prompt_block(
     parts.append(
         "UV-Vis execution guard:\n"
         "- The UV-Vis MCP tools are available in this runtime.\n"
-        "- For shared dark current, air baseline, and pure-water blank preparation, use uvvis_measure_spectra with ready_for_samples=false.\n"
+        "- For standalone dark-current preparation, use uvvis_prepare_dark_current first.\n"
+        "- Before re-measuring a shared pure-water blank, inspect the shared uv_data_common directory for reusable blank artifacts and skip the blank scan when reusable data already exists there.\n"
+        "- For shared pure-water blank preparation after dark current is ready, use uvvis_measure_spectra with ready_for_samples=true.\n"
         "- For the actual batch spectra measurement after the cuvettes are loaded, use uvvis_measure_spectra with ready_for_samples=true.\n"
         "- For kinetics runs, use uvvis_measure_kinetics. Use uvvis_session when you need to acquire or refresh the UV-Vis lease/session first.\n"
+        "- Do not verbalize internal orchestration rules such as '先根据上一步返回结果判断是否可复用', '只有在主说话人明确回报…后才调用…', '若工具提示…则不要重复测量', or any session/tool-call wording; speak only the student's current physical action or concise readiness prompt.\n"
         "- Do not say you are starting a UV-Vis scan, baseline, or kinetics run unless one of those UV-Vis tools was actually called on the current turn."
     )
     parts.append(reuse_rule)

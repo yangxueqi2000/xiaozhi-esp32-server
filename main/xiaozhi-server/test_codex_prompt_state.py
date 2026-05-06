@@ -224,8 +224,10 @@ class CodexPromptStateTest(unittest.TestCase):
             prompt_text,
         )
         self.assertIn("UV-Vis execution guard:", prompt_text)
-        self.assertIn("uvvis_measure_spectra with ready_for_samples=false", prompt_text)
+        self.assertIn("uvvis_prepare_dark_current", prompt_text)
+        self.assertIn("inspect the shared uv_data_common directory", prompt_text)
         self.assertIn("uvvis_measure_kinetics", prompt_text)
+        self.assertIn("Do not verbalize internal orchestration rules", prompt_text)
 
     def test_recent_photo_confirmation_context_is_included_on_later_turn(self):
         session = self._make_session()

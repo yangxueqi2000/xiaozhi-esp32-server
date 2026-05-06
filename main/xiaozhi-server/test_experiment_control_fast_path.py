@@ -1,4 +1,4 @@
-import csv
+﻿import csv
 import sys
 import time
 import types
@@ -146,7 +146,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         result = textUtils.prepare_runtime_spoken_text(text)
 
         self.assertEqual(
-            "今天我们做《银纳米粒子实验》。你准备好开始了吗？",
+            "浠婂ぉ鎴戜滑鍋氥€婇摱绾崇背绮掑瓙瀹為獙銆嬨€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             result,
         )
 
@@ -164,7 +164,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             log_path = experiment_resume.append_experiment_interaction_log(
                 config,
                 "94:a9:90:27:3c:84",
-                "可以拍照。",
+                "鍙互鎷嶇収銆?,
                 role="USER",
                 source="asr",
                 current_step_id="step_photo_confirm_sample_1",
@@ -179,7 +179,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("[TRANSCRIPT] [USER]", content)
             self.assertIn("[source=asr]", content)
             self.assertIn("[current_step_id=step_photo_confirm_sample_1]", content)
-            self.assertIn("可以拍照。", content)
+            self.assertIn("鍙互鎷嶇収銆?, content)
 
     def test_build_resume_context_extracts_latest_step_from_transcript_log(self):
         with TemporaryDirectory() as temp_dir:
@@ -232,10 +232,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     [
                         "[2026-05-05T14:34:44.431+08:00] [TRANSCRIPT] [USER] [source=asr] "
                         "[experiment_session_id=exp-1] [current_step_id=step_prepare_setup_all] "
-                        "[yaml=C:\\demo\\experiments.yaml] 全部完成。",
+                        "[yaml=C:\\demo\\experiments.yaml] 鍏ㄩ儴瀹屾垚銆?,
                         "[2026-05-05T14:34:57.063+08:00] [TRANSCRIPT] [ASSISTANT] [source=speak_txt] "
                         "[experiment_session_id=exp-1] [current_step_id=step_add_sodium_citrate_all] "
-                        "[yaml=C:\\demo\\experiments.yaml] 现在做这一步。",
+                        "[yaml=C:\\demo\\experiments.yaml] 鐜板湪鍋氳繖涓€姝ャ€?,
                     ]
                 )
                 + "\n",
@@ -247,7 +247,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(2, len(entries))
             self.assertEqual("USER", entries[0]["role"])
             self.assertEqual("step_prepare_setup_all", entries[0]["current_step_id"])
-            self.assertEqual("全部完成。", entries[0]["text"])
+            self.assertEqual("鍏ㄩ儴瀹屾垚銆?, entries[0]["text"])
             self.assertEqual("ASSISTANT", entries[1]["role"])
             self.assertEqual(
                 "step_add_sodium_citrate_all",
@@ -256,44 +256,58 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
     def test_runtime_spoken_text_strips_technical_details(self):
         text = (
-            "实验报告已经生成，pdf_path=C:\\demo\\report.pdf，"
-            "session_id=abc123。"
+            "瀹為獙鎶ュ憡宸茬粡鐢熸垚锛宲df_path=C:\\demo\\report.pdf锛?
+            "session_id=abc123銆?
         )
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
-        self.assertEqual("实验报告已经生成。", result)
+        self.assertEqual("瀹為獙鎶ュ憡宸茬粡鐢熸垚銆?, result)
 
     def test_runtime_spoken_text_strips_uvvis_tool_signature_details(self):
         text = (
-            "现在开始 UV-Vis 前置校正。"
-            "然后使用当前已持有的 session_key 调用 "
-            "`uvvis_measure_spectra(sample_positions=[1,2,3,4,5], ready_for_samples=false)`。"
-            "做好后告诉我。"
+            "鐜板湪寮€濮?UV-Vis 鍓嶇疆鏍℃銆?
+            "鐒跺悗浣跨敤褰撳墠宸叉寔鏈夌殑 session_key 璋冪敤 "
+            "`uvvis_measure_spectra(sample_positions=[1,2,3,4,5], ready_for_samples=false)`銆?
+            "鍋氬ソ鍚庡憡璇夋垜銆?
         )
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
-        self.assertIn("现在开始 UV-Vis 前置校正", result)
+        self.assertIn("鐜板湪寮€濮?UV-Vis 鍓嶇疆鏍℃", result)
         self.assertNotIn("session_key", result)
         self.assertNotIn("sample_positions", result)
         self.assertNotIn("ready_for_samples", result)
         self.assertNotIn("uvvis_measure_spectra", result)
 
-    def test_runtime_spoken_text_limits_to_two_sentences(self):
-        text = "现在做这一步。注意不要污染。做好后告诉我。"
+    def test_runtime_spoken_text_strips_uvvis_internal_confirmation_rules(self):
+        text = (
+            "璇峰湪 1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁鍏ョ函姘存瘮鑹茬毧锛屽叡 6 涓紝"
+            "鍙湁鍦ㄤ富璇磋瘽浜烘槑纭洖鎶モ€滄斁濂戒簡鈥濃€滈兘鏀惧ソ浜嗏€濃€滃凡缁忔斁濂解€濃€滃彲浠ュ紑濮嬩簡鈥濇垨鍚屼箟琛ㄨ揪鍚庯紝"
+            "鎵嶈皟鐢ㄨ褰曠函姘寸┖鐧姐€?
+        )
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
-        self.assertEqual("现在做这一步。注意不要污染，做好后告诉我。", result)
+        self.assertIn("鏀惧叆绾按姣旇壊鐨?, result)
+        self.assertNotIn("涓昏璇濅汉", result)
+        self.assertNotIn("鍚屼箟琛ㄨ揪", result)
+        self.assertNotIn("璁板綍绾按绌虹櫧", result)
+
+    def test_runtime_spoken_text_limits_to_two_sentences(self):
+        text = "鐜板湪鍋氳繖涓€姝ャ€傛敞鎰忎笉瑕佹薄鏌撱€傚仛濂藉悗鍛婅瘔鎴戙€?
+
+        result = textUtils.prepare_runtime_spoken_text(text)
+
+        self.assertEqual("鐜板湪鍋氳繖涓€姝ャ€傛敞鎰忎笉瑕佹薄鏌擄紝鍋氬ソ鍚庡憡璇夋垜銆?, result)
 
     def test_runtime_spoken_text_appends_completion_prompt_to_step_guidance(self):
-        text = "现在做这一步：按顺序加入 AgNO3 并轻轻混匀。注意不要飞溅。"
+        text = "鐜板湪鍋氳繖涓€姝ワ細鎸夐『搴忓姞鍏?AgNO3 骞惰交杞绘贩鍖€銆傛敞鎰忎笉瑕侀婧呫€?
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
         self.assertEqual(
-            "现在做这一步：按顺序加入 AgNO3 并轻轻混匀。注意不要飞溅，做好后告诉我。",
+            "鐜板湪鍋氳繖涓€姝ワ細鎸夐『搴忓姞鍏?AgNO3 骞惰交杞绘贩鍖€銆傛敞鎰忎笉瑕侀婧咃紝鍋氬ソ鍚庡憡璇夋垜銆?,
             result,
         )
 
@@ -306,10 +320,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         result = textUtils.prepare_runtime_spoken_text_for_conn(
             conn,
-            "实验报告已经生成完成。",
+            "瀹為獙鎶ュ憡宸茬粡鐢熸垚瀹屾垚銆?,
         )
 
-        self.assertEqual("实验报告还没有完整生成成功，请稍后再试。", result)
+        self.assertEqual("瀹為獙鎶ュ憡杩樻病鏈夊畬鏁寸敓鎴愭垚鍔燂紝璇风◢鍚庡啀璇曘€?, result)
 
     def test_conn_runtime_spoken_text_rewrites_speculative_uvvis_occupation(self):
         conn = _FakeConn()
@@ -317,10 +331,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         result = textUtils.prepare_runtime_spoken_text_for_conn(
             conn,
-            "这里暂时还没能直接启动校正，你先检查一下光谱仪有没有被别的程序占用，确认后告诉我继续。",
+            "杩欓噷鏆傛椂杩樻病鑳界洿鎺ュ惎鍔ㄦ牎姝ｏ紝浣犲厛妫€鏌ヤ竴涓嬪厜璋变华鏈夋病鏈夎鍒殑绋嬪簭鍗犵敤锛岀‘璁ゅ悗鍛婅瘔鎴戠户缁€?,
         )
 
-        self.assertEqual("UV-Vis 这边还没准备好，请稍后再试。", result)
+        self.assertEqual("UV-Vis 杩欒竟杩樻病鍑嗗濂斤紝璇风◢鍚庡啀璇曘€?, result)
 
     def test_conn_runtime_spoken_text_strips_speculative_interface_outage(self):
         conn = _FakeConn()
@@ -328,7 +342,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         result = textUtils.prepare_runtime_spoken_text_for_conn(
             conn,
-            "实验图谱接口这轮没接通。",
+            "瀹為獙鍥捐氨鎺ュ彛杩欒疆娌℃帴閫氥€?,
         )
 
         self.assertEqual("", result)
@@ -340,23 +354,23 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "先完成 1-5 号烧杯编号和磁转子放置。",
+                        "instruction": "鍏堝畬鎴?1-5 鍙风儳鏉紪鍙峰拰纾佽浆瀛愭斁缃€?,
                     },
                 }
             }
         }
-        conn.dialogue.put(Message(role="user", content="继续下一步。"))
+        conn.dialogue.put(Message(role="user", content="缁х画涓嬩竴姝ャ€?))
 
         result = textUtils.prepare_runtime_spoken_text_for_conn(
             conn,
-            "现在做丁达尔现象观察：把环境调暗，用激光笔从侧面照射样品。看完后告诉我。",
+            "鐜板湪鍋氫竵杈惧皵鐜拌薄瑙傚療锛氭妸鐜璋冩殫锛岀敤婵€鍏夌瑪浠庝晶闈㈢収灏勬牱鍝併€傜湅瀹屽悗鍛婅瘔鎴戙€?,
         )
 
-        self.assertIn("准备烧杯与磁转子", result)
-        self.assertIn("烧杯编号", result)
-        self.assertNotIn("丁达尔", result)
+        self.assertIn("鍑嗗鐑ф澂涓庣杞瓙", result)
+        self.assertIn("鐑ф澂缂栧彿", result)
+        self.assertNotIn("涓佽揪灏?, result)
 
     def test_conn_runtime_spoken_text_reanchors_future_step_even_after_graph_tools_ran(self):
         conn = _FakeConn()
@@ -370,23 +384,23 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_add_h2o2_all",
-                    "title": "1-5号样品：统一加入H2O2",
+                    "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆H2O2",
                     "prompts": {
-                        "instruction": "按 1 到 5 号顺序统一完成 H2O2 加入。",
+                        "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 H2O2 鍔犲叆銆?,
                     },
                 }
             }
         }
-        conn.dialogue.put(Message(role="user", content="继续下一步。"))
+        conn.dialogue.put(Message(role="user", content="缁х画涓嬩竴姝ャ€?))
 
         result = textUtils.prepare_runtime_spoken_text_for_conn(
             conn,
-            "现在做丁达尔现象观察：把环境调暗，用激光笔从侧面照射样品。看完后告诉我。",
+            "鐜板湪鍋氫竵杈惧皵鐜拌薄瑙傚療锛氭妸鐜璋冩殫锛岀敤婵€鍏夌瑪浠庝晶闈㈢収灏勬牱鍝併€傜湅瀹屽悗鍛婅瘔鎴戙€?,
         )
 
-        self.assertIn("统一加入H2O2", result)
+        self.assertIn("缁熶竴鍔犲叆H2O2", result)
         self.assertIn("H2O2", result)
-        self.assertNotIn("丁达尔", result)
+        self.assertNotIn("涓佽揪灏?, result)
 
     def test_conn_runtime_spoken_text_uses_yaml_step_cache_when_graph_snapshot_missing(self):
         conn = _FakeConn()
@@ -395,31 +409,31 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_sample1_2_add_kbr_water_nabh4",
-                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘淬€丯aBH4骞惰鏃惰瀵熼鑹?,
                 "prompts": {
                     "instruction": (
-                        "先加入并混匀 KBr 与纯水，再快速加入 NaBH4。"
-                        "从加入 NaBH4 的瞬间开始计时，持续搅拌并观察颜色变化，待颜色稳定后再汇报结果。"
+                        "鍏堝姞鍏ュ苟娣峰寑 KBr 涓庣函姘达紝鍐嶅揩閫熷姞鍏?NaBH4銆?
+                        "浠庡姞鍏?NaBH4 鐨勭灛闂村紑濮嬭鏃讹紝鎸佺画鎼呮媽骞惰瀵熼鑹插彉鍖栵紝寰呴鑹茬ǔ瀹氬悗鍐嶆眹鎶ョ粨鏋溿€?
                     )
                 },
             }
         ]
-        conn.dialogue.put(Message(role="user", content="全部确认都做好了。"))
+        conn.dialogue.put(Message(role="user", content="鍏ㄩ儴纭閮藉仛濂戒簡銆?))
 
         result = textUtils.prepare_runtime_spoken_text_for_conn(
             conn,
-            "现在做这一步：1号样品：先在加入 NaBH4 的同时开始计时，持续搅拌，持续观察颜色变化。",
+            "鐜板湪鍋氳繖涓€姝ワ細1鍙锋牱鍝侊細鍏堝湪鍔犲叆 NaBH4 鐨勫悓鏃跺紑濮嬭鏃讹紝鎸佺画鎼呮媽锛屾寔缁瀵熼鑹插彉鍖栥€?,
         )
 
         self.assertIn("KBr", result)
-        self.assertIn("纯水", result)
+        self.assertIn("绾按", result)
         self.assertIn("NaBH4", result)
-        self.assertNotIn("只剩后半句", result)
+        self.assertNotIn("鍙墿鍚庡崐鍙?, result)
 
     def test_experiment_step_guidance_detector_accepts_observation_tail_prompt(self):
         guidance = (
-            "二号样品：先在加入 NaBH4 的同时开始计时，持续搅拌，持续观察颜色变化，"
-            "等颜色稳定，再直接告诉我最终颜色和从加入 NaBH4 到稳定一共用了几分钟。"
+            "浜屽彿鏍峰搧锛氬厛鍦ㄥ姞鍏?NaBH4 鐨勫悓鏃跺紑濮嬭鏃讹紝鎸佺画鎼呮媽锛屾寔缁瀵熼鑹插彉鍖栵紝"
+            "绛夐鑹茬ǔ瀹氾紝鍐嶇洿鎺ュ憡璇夋垜鏈€缁堥鑹插拰浠庡姞鍏?NaBH4 鍒扮ǔ瀹氫竴鍏辩敤浜嗗嚑鍒嗛挓銆?
         )
 
         self.assertTrue(textUtils._looks_like_experiment_step_or_scan_guidance(guidance))
@@ -432,28 +446,28 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_sample2_2_add_kbr_water_nabh4",
-                "title": "2号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "title": "2鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘淬€丯aBH4骞惰鏃惰瀵熼鑹?,
                 "prompts": {
                     "instruction": (
-                        "完成 2 号样品 KBr 和纯水加入（KBr 0.80 mL，纯水 2.10 mL）并混匀后，"
-                        "快速加入 NaBH4（2.50 mL 0.005 mol/L）；在加入 NaBH4 的同时开始计时并保持搅拌，"
-                        "持续观察颜色变化，等颜色稳定后直接告诉我最终颜色和从加入 NaBH4 到稳定一共用了几分钟；"
-                        "完成后进入本样品拍照记录步骤。"
+                        "瀹屾垚 2 鍙锋牱鍝?KBr 鍜岀函姘村姞鍏ワ紙KBr 0.80 mL锛岀函姘?2.10 mL锛夊苟娣峰寑鍚庯紝"
+                        "蹇€熷姞鍏?NaBH4锛?.50 mL 0.005 mol/L锛夛紱鍦ㄥ姞鍏?NaBH4 鐨勫悓鏃跺紑濮嬭鏃跺苟淇濇寔鎼呮媽锛?
+                        "鎸佺画瑙傚療棰滆壊鍙樺寲锛岀瓑棰滆壊绋冲畾鍚庣洿鎺ュ憡璇夋垜鏈€缁堥鑹插拰浠庡姞鍏?NaBH4 鍒扮ǔ瀹氫竴鍏辩敤浜嗗嚑鍒嗛挓锛?
+                        "瀹屾垚鍚庤繘鍏ユ湰鏍峰搧鎷嶇収璁板綍姝ラ銆?
                     )
                 },
             }
         ]
-        conn.dialogue.put(Message(role="user", content="继续下一步"))
+        conn.dialogue.put(Message(role="user", content="缁х画涓嬩竴姝?))
 
         result = textUtils.prepare_runtime_spoken_text_for_conn(
             conn,
-            "二号样品：先在加入 NaBH4 的同时开始计时，持续搅拌，持续观察颜色变化，等颜色稳定，再直接告诉我最终颜色和从加入 NaBH4 到稳定一共用了几分钟。",
+            "浜屽彿鏍峰搧锛氬厛鍦ㄥ姞鍏?NaBH4 鐨勫悓鏃跺紑濮嬭鏃讹紝鎸佺画鎼呮媽锛屾寔缁瀵熼鑹插彉鍖栵紝绛夐鑹茬ǔ瀹氾紝鍐嶇洿鎺ュ憡璇夋垜鏈€缁堥鑹插拰浠庡姞鍏?NaBH4 鍒扮ǔ瀹氫竴鍏辩敤浜嗗嚑鍒嗛挓銆?,
         )
 
-        self.assertIn("2号样品", result)
+        self.assertIn("2鍙锋牱鍝?, result)
         self.assertIn("KBr 0.80 mL", result)
-        self.assertIn("纯水 2.10 mL", result)
-        self.assertIn("NaBH4（2.50 mL 0.005 mol/L）", result)
+        self.assertIn("绾按 2.10 mL", result)
+        self.assertIn("NaBH4锛?.50 mL 0.005 mol/L锛?, result)
 
     def test_cached_experiment_step_meta_prefers_yaml_instruction_and_photo_prompt(self):
         conn = _FakeConn()
@@ -461,9 +475,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_sample1_5_photo_confirm",
-                    "title": "1号样品：颜色稳定后拍照记录",
+                    "title": "1鍙锋牱鍝侊細棰滆壊绋冲畾鍚庢媿鐓ц褰?,
                     "prompts": {
-                        "instruction": "拍照记录当前样品颜色。",
+                        "instruction": "鎷嶇収璁板綍褰撳墠鏍峰搧棰滆壊銆?,
                     },
                 }
             }
@@ -471,16 +485,16 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_sample1_5_photo_confirm",
-                "title": "1号样品：颜色稳定后拍照记录",
+                "title": "1鍙锋牱鍝侊細棰滆壊绋冲畾鍚庢媿鐓ц褰?,
                 "prompts": {
-                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                    "instruction": "棰滆壊绋冲畾鍚庢媿鐓ц褰曞綋鍓嶆牱鍝侀鑹诧紝骞惰繘鍏?2 鍙锋牱鍝併€?,
                 },
             },
             {
                 "id": "step_sample1_2_add_kbr_water_nabh4",
-                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘淬€丯aBH4骞惰鏃惰瀵熼鑹?,
                 "prompts": {
-                    "instruction": "先加入并混匀 KBr 与纯水，再快速加入 NaBH4。",
+                    "instruction": "鍏堝姞鍏ュ苟娣峰寑 KBr 涓庣函姘达紝鍐嶅揩閫熷姞鍏?NaBH4銆?,
                 },
             },
         ]
@@ -488,8 +502,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         meta = intentHandler._get_cached_experiment_step_meta(conn)
         reply = intentHandler._compose_experiment_step_reply(meta, mode="next")
 
-        self.assertIn("颜色稳定后拍照", meta["instruction"])
-        self.assertEqual("1号样品颜色已经稳定，现在可以拍照吗？", reply)
+        self.assertIn("棰滆壊绋冲畾鍚庢媿鐓?, meta["instruction"])
+        self.assertEqual("1鍙锋牱鍝侀鑹插凡缁忕ǔ瀹氾紝鐜板湪鍙互鎷嶇収鍚楋紵", reply)
 
     def test_cached_experiment_step_meta_prefers_yaml_instruction_for_sample_step(self):
         conn = _FakeConn()
@@ -497,9 +511,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_sample1_2_add_kbr_water_nabh4",
-                    "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                    "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘淬€丯aBH4骞惰鏃惰瀵熼鑹?,
                     "prompts": {
-                        "instruction": "先在加入 NaBH4 的同时开始计时，持续搅拌，持续观察颜色变化。",
+                        "instruction": "鍏堝湪鍔犲叆 NaBH4 鐨勫悓鏃跺紑濮嬭鏃讹紝鎸佺画鎼呮媽锛屾寔缁瀵熼鑹插彉鍖栥€?,
                     },
                 }
             }
@@ -507,9 +521,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_sample1_2_add_kbr_water_nabh4",
-                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘淬€丯aBH4骞惰鏃惰瀵熼鑹?,
                 "prompts": {
-                    "instruction": "先加入并混匀 KBr 与纯水，再快速加入 NaBH4，从加入 NaBH4 的瞬间开始计时并持续搅拌。",
+                    "instruction": "鍏堝姞鍏ュ苟娣峰寑 KBr 涓庣函姘达紝鍐嶅揩閫熷姞鍏?NaBH4锛屼粠鍔犲叆 NaBH4 鐨勭灛闂村紑濮嬭鏃跺苟鎸佺画鎼呮媽銆?,
                 },
             }
         ]
@@ -518,9 +532,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         reply = intentHandler._compose_experiment_step_reply(meta, mode="guide")
 
         self.assertIn("KBr", meta["instruction"])
-        self.assertIn("纯水", meta["instruction"])
+        self.assertIn("绾按", meta["instruction"])
         self.assertIn("KBr", reply)
-        self.assertIn("纯水", reply)
+        self.assertIn("绾按", reply)
 
     def test_cached_experiment_step_meta_uses_uvvis_spoken_override_for_shared_blank_step(self):
         conn = _FakeConn()
@@ -528,11 +542,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_3_uv_vis_shared_dark_blank_prep",
-                    "title": "1-5号样品：暗电流和纯水空白校正",
+                    "title": "1-5鍙锋牱鍝侊細鏆楃數娴佸拰绾按绌虹櫧鏍℃",
                     "prompts": {
                         "instruction": (
-                            "现在开始 UV-Vis 前置校正。"
-                            "调用 uvvis_measure_spectra(sample_positions=[1,2,3,4,5], ready_for_samples=false)。"
+                            "鐜板湪寮€濮?UV-Vis 鍓嶇疆鏍℃銆?
+                            "璋冪敤 uvvis_measure_spectra(sample_positions=[1,2,3,4,5], ready_for_samples=false)銆?
                         ),
                     },
                 }
@@ -541,11 +555,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_3_uv_vis_shared_dark_blank_prep",
-                "title": "1-5号样品：暗电流和纯水空白校正",
+                "title": "1-5鍙锋牱鍝侊細鏆楃數娴佸拰绾按绌虹櫧鏍℃",
                 "prompts": {
                     "instruction": (
-                        "现在开始 UV-Vis 前置校正。"
-                        "调用 uvvis_measure_spectra(sample_positions=[1,2,3,4,5], ready_for_samples=false)。"
+                        "鐜板湪寮€濮?UV-Vis 鍓嶇疆鏍℃銆?
+                        "璋冪敤 uvvis_measure_spectra(sample_positions=[1,2,3,4,5], ready_for_samples=false)銆?
                     ),
                 },
             }
@@ -554,8 +568,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         meta = intentHandler._get_cached_experiment_step_meta(conn)
         reply = intentHandler._compose_experiment_step_reply(meta, mode="next")
 
-        self.assertIn("暗电流和纯水空白校正", reply)
-        self.assertIn("先不要放任何液体", reply)
+        self.assertIn("绾按绌虹櫧鏍℃", reply)
+        self.assertIn("鏀惧叆绾按姣旇壊鐨?, reply)
+        self.assertIn("鍙互寮€濮嬫壂鎻?, reply)
+        self.assertNotIn("鍏堜笉瑕佹斁浠讳綍娑蹭綋", reply)
         self.assertNotIn("session_key", reply)
         self.assertNotIn("ready_for_samples", reply)
         self.assertNotIn("sample_positions", reply)
@@ -566,15 +582,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_3_uv_vis_shared_dark_air_prep",
-                    "title": "1-5号样品：暗电流和空气能量校正",
+                    "title": "1-5鍙锋牱鍝侊細鏆楃數娴佹牎姝?,
                     "prompts": {
                         "instruction": (
-                            "现在开始 UV-Vis 的共享暗电流和空气能量校正。"
-                            "先提示主说话人“先不要放任何液体，我先进行暗电流和空气能量准备。”"
-                            "然后使用当前已持有的 session_key 调用 "
-                            "`uvvis_measure_spectra(sample_positions=[1,2,3,4,5], ready_for_samples=false)`。"
-                            "若工具提示共享暗电流和空气能量文件已存在且可复用，则不要重复测量；"
-                            "但仍要读取并记住本次返回的 pure water / liquid blank 状态。"
+                            "鐜板湪寮€濮?UV-Vis 鐨勫叡浜殫鐢垫祦鏍℃銆?
+                            "鍏堟彁绀轰富璇磋瘽浜衡€滃厛涓嶈鏀句换浣曟恫浣擄紝鎴戝厛杩涜鏆楃數娴佹牎姝ｃ€傗€?
+                            "鐒跺悗浣跨敤褰撳墠宸叉寔鏈夌殑 session_key 璋冪敤 "
+                            "`uvvis_prepare_dark_current(session_key=褰撳墠鎸佹湁鐨剆ession_key)`銆?
                         ),
                     },
                 }
@@ -585,33 +599,145 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         reply = intentHandler._compose_experiment_step_reply(meta, mode="guide")
         spoken = textUtils.prepare_runtime_spoken_text(reply)
 
-        self.assertIn("暗电流和空气能量校正", spoken)
-        self.assertIn("先不要放任何液体", spoken)
+        self.assertIn("鏆楃數娴佹牎姝?, spoken)
+        self.assertIn("鍏堜笉瑕佹斁浠讳綍娑蹭綋", spoken)
         self.assertNotIn("session_key", spoken)
-        self.assertNotIn("ready_for_samples", spoken)
-        self.assertNotIn("sample_positions", spoken)
+        self.assertNotIn("uvvis_prepare_dark_current", spoken)
+        self.assertNotIn("鍋氬ソ鍚庡憡璇夋垜", spoken)
+
+    def test_pure_water_blank_step_meta_rewrites_internal_rules_to_student_prompt(self):
+        meta = {
+            "step_id": "step_uvvis_pure_water_blank_only",
+            "title": "1-5鍙锋牱鍝侊細绾按绌虹櫧鏍℃",
+            "instruction": (
+                "鏆楃數娴佹牎姝ｅ凡缁忓畬鎴愶紝鐜板湪杩涘叆绾按绌虹櫧鏍℃銆?
+                "璇峰湪 1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁鍏ョ函姘存瘮鑹茬毧锛屽叡 6 涓紝"
+                "鍙湁鍦ㄦ斁濂藉悗鎵嶅紑濮嬭褰曠函姘寸┖鐧姐€?
+            ),
+        }
+
+        reply = intentHandler._compose_experiment_step_reply(meta, mode="guide")
+        spoken = textUtils.prepare_runtime_spoken_text(reply)
+
+        self.assertIn("绾按绌虹櫧鏍℃", spoken)
+        self.assertIn("鏀惧叆绾按姣旇壊鐨?, spoken)
+        self.assertIn("鍙互寮€濮嬫壂鎻?, spoken)
         self.assertNotIn("pure water", spoken)
         self.assertNotIn("liquid blank", spoken)
-        self.assertNotIn("uvvis_measure_spectra", spoken)
-        self.assertNotIn("做好后告诉我", spoken)
+        self.assertNotIn("鍙鐢?, spoken)
+        self.assertNotIn("璁板綍绾按绌虹櫧", spoken)
+
+    def test_uvvis_step_overrides_keep_internal_control_rules_silent(self):
+        cases = [
+            {
+                "meta": {
+                    "step_id": "custom_uvvis_load_step",
+                    "title": "1-5鍙锋牱鍝侊細瑁呭叆姣旇壊鐨?,
+                    "instruction": (
+                        "鍙渶鎻愰啋涓昏璇濅汉鎶?1 鍒?5 鍙风湡瀹炴牱鍝佸垎鍒鍏ユ瘮鑹茬毧锛?
+                        "涓嶈灞曞紑鍚庣画鎵归噺娴嬮噺鐨勮鍒欍€?
+                    ),
+                },
+                "expected": ("瑁呭叆姣旇壊鐨?, "鍙傛瘮浣嶄繚鐣欑函姘?),
+            },
+            {
+                "meta": {
+                    "step_id": "custom_uvvis_record_step",
+                    "title": "1-5鍙锋牱鍝侊細鎵归噺娴嬪厜璋卞苟璁板綍鏁版嵁",
+                    "instruction": (
+                        "鍙湁鍦ㄤ富璇磋瘽浜烘槑纭洖鎶モ€滄斁濂戒簡鈥濃€滈兘鏀惧ソ浜嗏€濃€滃凡缁忔斁濂解€濃€滃彲浠ュ紑濮嬩簡鈥?
+                        "鎴栧悓涔夎〃杈惧悗锛屾墠璋冪敤 uvvis_measure_spectra銆?
+                    ),
+                },
+                "expected": ("鎵归噺娴嬪厜璋卞苟璁板綍鏁版嵁", "寮€濮嬫祴閲?),
+            },
+            {
+                "meta": {
+                    "step_id": "custom_uvvis_clean_step",
+                    "title": "绱-鍙娴嬮噺鍚庯細缁熶竴娓呮礂姣旇壊鐨?,
+                    "instruction": "鍙粰涓昏璇濅汉褰撳墠鍔ㄤ綔锛屼笉瑕佽鍚庣画鍔ㄥ姏瀛﹂厤娑层€?,
+                },
+                "expected": ("缁熶竴娓呮礂姣旇壊鐨?, "鎸夎鑼冨鐞嗘畫娑?),
+            },
+            {
+                "meta": {
+                    "step_id": "custom_uvvis_sample2_reference",
+                    "title": "2鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弬姣旀恫",
+                    "instruction": "鍙渶鎻愰啋涓昏璇濅汉鎸夎姹傞厤濂?2 鍙锋牱鍝佸弬姣旀恫锛屼笉瑕佸睍寮€涓嬩竴姝ャ€?,
+                },
+                "expected": ("2鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弬姣旀恫", "鏀惧叆鍙傛瘮浣?),
+            },
+            {
+                "meta": {
+                    "step_id": "custom_uvvis_sample2_reaction",
+                    "title": "2鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弽搴旀恫",
+                    "instruction": "鍙彁绀轰富璇磋瘽浜哄綋鍓嶅姩浣滐紝涓嶈璁插悗缁祴閲忋€?,
+                },
+                "expected": ("2鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弽搴旀恫", "鏀惧叆鏍峰搧浣?),
+            },
+            {
+                "meta": {
+                    "step_id": "custom_uvvis_sample2_measurement",
+                    "title": "2鍙锋牱鍝佸姩鍔涘锛氬紑濮嬫寜鏃堕棿璁板綍鍚稿厜搴?,
+                    "instruction": (
+                        "鍙湁鍦ㄤ富璇磋瘽浜烘槑纭洖鎶モ€滃彲浠ュ紑濮嬩簡鈥濇垨鍚屼箟琛ㄨ揪鍚庯紝"
+                        "鎵嶈皟鐢?uvvis_measure_kinetics銆?
+                    ),
+                },
+                "expected": ("鍙互寮€濮嬫椂鍛婅瘔鎴?, "400绾崇背鍔ㄥ姏瀛︽祴閲?),
+            },
+            {
+                "meta": {
+                    "step_id": "custom_uvvis_sample4_reference",
+                    "title": "4鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弬姣旀恫",
+                    "instruction": "鍙渶鎻愰啋涓昏璇濅汉鎸夎姹傞厤濂?4 鍙锋牱鍝佸弬姣旀恫锛屼笉瑕佸睍寮€涓嬩竴姝ャ€?,
+                },
+                "expected": ("4鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弬姣旀恫", "鏀惧叆鍙傛瘮浣?),
+            },
+            {
+                "meta": {
+                    "step_id": "custom_uvvis_sample4_measurement",
+                    "title": "4鍙锋牱鍝佸姩鍔涘锛氬紑濮嬫寜鏃堕棿璁板綍鍚稿厜搴?,
+                    "instruction": (
+                        "鍙湁鍦ㄤ富璇磋瘽浜烘槑纭洖鎶モ€滃彲浠ュ紑濮嬩簡鈥濇垨鍚屼箟琛ㄨ揪鍚庯紝"
+                        "鎵嶈皟鐢?uvvis_measure_kinetics銆?
+                    ),
+                },
+                "expected": ("鍙互寮€濮嬫椂鍛婅瘔鎴?, "400绾崇背鍔ㄥ姏瀛︽祴閲?),
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(title=case["meta"]["title"]):
+                reply = intentHandler._compose_experiment_step_reply(case["meta"], mode="guide")
+                spoken = textUtils.prepare_runtime_spoken_text(reply)
+
+                for expected in case["expected"]:
+                    self.assertIn(expected, spoken)
+                self.assertNotIn("涓昏璇濅汉", spoken)
+                self.assertNotIn("鍚屼箟琛ㄨ揪", spoken)
+                self.assertNotIn("session_key", spoken)
+                self.assertNotIn("uvvis_measure", spoken)
+                self.assertNotIn("涓嶈璁插悗缁?, spoken)
+                self.assertNotIn("涓嶈灞曞紑", spoken)
 
     def test_conn_runtime_spoken_text_bypasses_ready_guard_for_same_sentence(self):
         conn = _FakeConn()
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="今天我们做这个实验。你准备好开始了吗？",
+                content="浠婂ぉ鎴戜滑鍋氳繖涓疄楠屻€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             )
         )
         conn.sentence_id = "turn-1"
         conn._experiment_ready_guard_bypass_sentence_id = "turn-1"
 
-        guidance = "现在做这一步：完成 1 到 5 号烧杯编号。做好后告诉我。"
+        guidance = "鐜板湪鍋氳繖涓€姝ワ細瀹屾垚 1 鍒?5 鍙风儳鏉紪鍙枫€傚仛濂藉悗鍛婅瘔鎴戙€?
         first = textUtils.prepare_runtime_spoken_text_for_conn(conn, guidance)
         second = textUtils.prepare_runtime_spoken_text_for_conn(conn, guidance)
 
-        self.assertIn("现在做这一步", first)
-        self.assertIn("现在做这一步", second)
+        self.assertIn("鐜板湪鍋氳繖涓€姝?, first)
+        self.assertIn("鐜板湪鍋氳繖涓€姝?, second)
         self.assertEqual(
             "turn-1",
             getattr(conn, "_experiment_ready_guard_bypass_sentence_id", ""),
@@ -641,39 +767,39 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_normalize_tts_text_reads_decimals_digit_by_digit(self):
-        result = textUtils.normalize_tts_text("加入1.849mL AgNO3。")
+        result = textUtils.normalize_tts_text("鍔犲叆1.849mL AgNO3銆?)
 
-        self.assertIn("一点八四九毫升", result)
-        self.assertIn("硝酸银", result)
+        self.assertIn("涓€鐐瑰叓鍥涗節姣崌", result)
+        self.assertIn("纭濋吀閾?, result)
 
     def test_normalize_tts_text_reads_numeric_time_ranges_as_to(self):
-        result = textUtils.normalize_tts_text("静置1-15分钟后观察。")
+        result = textUtils.normalize_tts_text("闈欑疆1-15鍒嗛挓鍚庤瀵熴€?)
 
-        self.assertEqual("静置1到15分钟后观察。", result)
+        self.assertEqual("闈欑疆1鍒?5鍒嗛挓鍚庤瀵熴€?, result)
 
     def test_normalize_tts_text_reads_decimal_volume_ranges_as_to(self):
-        result = textUtils.normalize_tts_text("加入0.5-1.0mL AgNO3。")
+        result = textUtils.normalize_tts_text("鍔犲叆0.5-1.0mL AgNO3銆?)
 
-        self.assertIn("零点五到一点零毫升", result)
-        self.assertIn("硝酸银", result)
+        self.assertIn("闆剁偣浜斿埌涓€鐐归浂姣崌", result)
+        self.assertIn("纭濋吀閾?, result)
 
     def test_normalize_tts_text_supports_generic_chemistry_pronunciation(self):
         result = textUtils.normalize_tts_text(
-            "Ag（银）纳米粒子的制备及其催化还原4-硝基苯酚的反应动力学探究"
+            "Ag锛堥摱锛夌撼绫崇矑瀛愮殑鍒跺鍙婂叾鍌寲杩樺師4-纭濆熀鑻厷鐨勫弽搴斿姩鍔涘鎺㈢┒"
         )
 
         self.assertEqual(
-            "银纳米粒子的制备及其催化还原对硝基苯酚的反应动力学探究",
+            "閾剁撼绫崇矑瀛愮殑鍒跺鍙婂叾鍌寲杩樺師瀵圭鍩鸿嫰閰氱殑鍙嶅簲鍔ㄥ姏瀛︽帰绌?,
             result,
         )
 
     def test_normalize_tts_text_reads_borohydride_with_peng_pronunciation(self):
-        result = textUtils.normalize_tts_text("加入硼氢化钠后，再补加NaBH4。")
+        result = textUtils.normalize_tts_text("鍔犲叆纭兼阿鍖栭挔鍚庯紝鍐嶈ˉ鍔燦aBH4銆?)
 
-        self.assertEqual("加入彭氢化钠后，再补加彭氢化钠。", result)
+        self.assertEqual("鍔犲叆褰阿鍖栭挔鍚庯紝鍐嶈ˉ鍔犲江姘㈠寲閽犮€?, result)
 
     def test_explicit_completion_report_treats_all_mixed_uniformly_as_done(self):
-        self.assertTrue(intentHandler._looks_like_explicit_completion_report("已经全部混匀"))
+        self.assertTrue(intentHandler._looks_like_explicit_completion_report("宸茬粡鍏ㄩ儴娣峰寑"))
 
     def test_payload_looks_busy_or_inaccessible_ignores_idle_lease_metadata(self):
         payload = {
@@ -688,96 +814,96 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
     def test_normalize_tts_text_reads_numbered_labels_with_erhao(self):
         result = textUtils.normalize_tts_text(
-            "现在做2号样品：在2号烧杯里加入溴化钾0.80毫升，再加入纯水2.10毫升。"
+            "鐜板湪鍋?鍙锋牱鍝侊細鍦?鍙风儳鏉噷鍔犲叆婧村寲閽?.80姣崌锛屽啀鍔犲叆绾按2.10姣崌銆?
         )
 
-        self.assertIn("二号样品", result)
-        self.assertIn("二号烧杯", result)
-        self.assertIn("零点八零毫升", result)
-        self.assertIn("二点一零毫升", result)
+        self.assertIn("浜屽彿鏍峰搧", result)
+        self.assertIn("浜屽彿鐑ф澂", result)
+        self.assertIn("闆剁偣鍏浂姣崌", result)
+        self.assertIn("浜岀偣涓€闆舵鍗?, result)
 
     def test_normalize_tts_text_reads_numbered_label_ranges_with_chinese_digits(self):
-        result = textUtils.normalize_tts_text("请把1-5号样品位和参比位都放好。")
+        result = textUtils.normalize_tts_text("璇锋妸1-5鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥斁濂姐€?)
 
-        self.assertEqual("请把一到五号样品位和参比位都放好。", result)
+        self.assertEqual("璇锋妸涓€鍒颁簲鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥斁濂姐€?, result)
 
     def test_prepare_runtime_spoken_text_strips_meta_scope_clauses(self):
         text = (
-            "接下来做这一步：1到5：同时启动搅拌并混匀。"
-            "只完成1到5的搅拌统一启动和混匀确认，不要重复共同试剂，也不要讲后续加液，"
-            "注意启动搅拌前确认所有烧杯放置平稳。"
-            "注意转速不要过高，避免液体飞溅，做好后告诉我。"
+            "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細1鍒?锛氬悓鏃跺惎鍔ㄦ悈鎷屽苟娣峰寑銆?
+            "鍙畬鎴?鍒?鐨勬悈鎷岀粺涓€鍚姩鍜屾贩鍖€纭锛屼笉瑕侀噸澶嶅叡鍚岃瘯鍓傦紝涔熶笉瑕佽鍚庣画鍔犳恫锛?
+            "娉ㄦ剰鍚姩鎼呮媽鍓嶇‘璁ゆ墍鏈夌儳鏉斁缃钩绋炽€?
+            "娉ㄦ剰杞€熶笉瑕佽繃楂橈紝閬垮厤娑蹭綋椋炴簠锛屽仛濂藉悗鍛婅瘔鎴戙€?
         )
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
         self.assertEqual(
-            "接下来做这一步：1到5：同时启动搅拌并混匀。"
-            "注意启动搅拌前确认所有烧杯放置平稳，注意转速不要过高，避免液体飞溅，做好后告诉我。",
+            "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細1鍒?锛氬悓鏃跺惎鍔ㄦ悈鎷屽苟娣峰寑銆?
+            "娉ㄦ剰鍚姩鎼呮媽鍓嶇‘璁ゆ墍鏈夌儳鏉斁缃钩绋筹紝娉ㄦ剰杞€熶笉瑕佽繃楂橈紝閬垮厤娑蹭綋椋炴簠锛屽仛濂藉悗鍛婅瘔鎴戙€?,
             result,
         )
 
     def test_prepare_runtime_spoken_text_strips_future_step_transition_clauses(self):
         text = (
-            "接下来做这一步：按1到5号顺序统一完成H2O2加入。"
-            "完成这一轮后再回到1号样品开始后续步骤。"
-            "注意加液后轻轻混匀。"
+            "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細鎸?鍒?鍙烽『搴忕粺涓€瀹屾垚H2O2鍔犲叆銆?
+            "瀹屾垚杩欎竴杞悗鍐嶅洖鍒?鍙锋牱鍝佸紑濮嬪悗缁楠ゃ€?
+            "娉ㄦ剰鍔犳恫鍚庤交杞绘贩鍖€銆?
         )
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
         self.assertEqual(
-            "接下来做这一步：按1到5号顺序统一完成H2O2加入。注意加液后轻轻混匀，做好后告诉我。",
+            "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細鎸?鍒?鍙烽『搴忕粺涓€瀹屾垚H2O2鍔犲叆銆傛敞鎰忓姞娑插悗杞昏交娣峰寑锛屽仛濂藉悗鍛婅瘔鎴戙€?,
             result,
         )
 
     def test_prepare_runtime_spoken_text_compacts_long_measured_step(self):
         text = (
-            "接下来做这一步：1号样品：加入溴化钾、纯水并加入硼氢化钠。"
-            "完成1号样品溴化钾和纯水加入（溴化钾零点零零毫升，纯水二点九零毫升）并混匀后，"
-            "快速加入硼氢化钠（二点五零毫升 零点零零五摩尔每升）并保持搅拌，"
-            "记录颜色稳定时间和收尾情况。"
-            "注意继续保持搅拌，避免液体飞溅，硼氢化钠有腐蚀性，注意防护并避免溅出，做好后告诉我。"
+            "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細1鍙锋牱鍝侊細鍔犲叆婧村寲閽俱€佺函姘村苟鍔犲叆纭兼阿鍖栭挔銆?
+            "瀹屾垚1鍙锋牱鍝佹捍鍖栭捑鍜岀函姘村姞鍏ワ紙婧村寲閽鹃浂鐐归浂闆舵鍗囷紝绾按浜岀偣涔濋浂姣崌锛夊苟娣峰寑鍚庯紝"
+            "蹇€熷姞鍏ョ〖姘㈠寲閽狅紙浜岀偣浜旈浂姣崌 闆剁偣闆堕浂浜旀懇灏旀瘡鍗囷級骞朵繚鎸佹悈鎷岋紝"
+            "璁板綍棰滆壊绋冲畾鏃堕棿鍜屾敹灏炬儏鍐点€?
+            "娉ㄦ剰缁х画淇濇寔鎼呮媽锛岄伩鍏嶆恫浣撻婧咃紝纭兼阿鍖栭挔鏈夎厫铓€鎬э紝娉ㄦ剰闃叉姢骞堕伩鍏嶆簠鍑猴紝鍋氬ソ鍚庡憡璇夋垜銆?
         )
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
         self.assertEqual(
-            "接下来做这一步：1号样品：先加入溴化钾零点零零毫升和纯水二点九零毫升并混匀，再快速加入硼氢化钠二点五零毫升，持续搅拌。"
-            "避免液体飞溅，硼氢化钠有腐蚀性，注意防护并避免溅出，做好后告诉我。",
+            "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細1鍙锋牱鍝侊細鍏堝姞鍏ユ捍鍖栭捑闆剁偣闆堕浂姣崌鍜岀函姘翠簩鐐逛節闆舵鍗囧苟娣峰寑锛屽啀蹇€熷姞鍏ョ〖姘㈠寲閽犱簩鐐逛簲闆舵鍗囷紝鎸佺画鎼呮媽銆?
+            "閬垮厤娑蹭綋椋炴簠锛岀〖姘㈠寲閽犳湁鑵愯殌鎬э紝娉ㄦ剰闃叉姢骞堕伩鍏嶆簠鍑猴紝鍋氬ソ鍚庡憡璇夋垜銆?,
             result,
         )
 
     def test_prepare_runtime_spoken_text_keeps_observation_action_while_dropping_reporting_tail(self):
         text = (
-            "接下来做这一步：2号样品：观察颜色变化。"
-            "静置1到2分钟后观察并拍照，记录颜色变化时间和结果，做好后告诉我。"
+            "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細2鍙锋牱鍝侊細瑙傚療棰滆壊鍙樺寲銆?
+            "闈欑疆1鍒?鍒嗛挓鍚庤瀵熷苟鎷嶇収锛岃褰曢鑹插彉鍖栨椂闂村拰缁撴灉锛屽仛濂藉悗鍛婅瘔鎴戙€?
         )
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
         self.assertEqual(
-            "接下来做这一步：2号样品：先静置1到2分钟，再观察并拍照，做好后告诉我。",
+            "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細2鍙锋牱鍝侊細鍏堥潤缃?鍒?鍒嗛挓锛屽啀瑙傚療骞舵媿鐓э紝鍋氬ソ鍚庡憡璇夋垜銆?,
             result,
         )
 
     def test_prepare_runtime_spoken_text_drops_recordkeeping_backstage_sentence(self):
-        text = "我先记下一号样品的最终颜色和稳定时间。现在可以拍照。"
+        text = "鎴戝厛璁颁笅涓€鍙锋牱鍝佺殑鏈€缁堥鑹插拰绋冲畾鏃堕棿銆傜幇鍦ㄥ彲浠ユ媿鐓с€?
 
         result = textUtils.prepare_runtime_spoken_text(text)
 
-        self.assertEqual("现在可以拍照。", result)
+        self.assertEqual("鐜板湪鍙互鎷嶇収銆?, result)
 
     def test_current_step_confirmation_fields_accept_all_added_completion_report(self):
         schema_by_name = {
             "h2o2_added_to_all": {
                 "type": "bool",
-                "description": "已按 1-5 号顺序完成全部 H2O2 加入",
+                "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮?H2O2 鍔犲叆",
             }
         }
 
         result = intentHandler._build_experiment_current_step_confirmation_fields(
-            "全部加好了",
+            "鍏ㄩ儴鍔犲ソ浜?,
             schema_by_name,
             ["h2o2_added_to_all"],
             allow_confirmation_autofill=True,
@@ -788,16 +914,16 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
     def test_repeat_reply_is_direct_and_requests_completion(self):
         reply = intentHandler._compose_experiment_step_reply(
             {
-                "title": "1-5号样品：统一加入柠檬酸钠",
-                "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
-                "safety": "加液时保持移液操作稳定。",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
+                "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?,
+                "safety": "鍔犳恫鏃朵繚鎸佺Щ娑叉搷浣滅ǔ瀹氥€?,
             },
             mode="repeat",
         )
 
-        self.assertNotIn("我再简短说一遍", reply)
-        self.assertIn("当前这一步", reply)
-        self.assertIn("做好后告诉我", reply)
+        self.assertNotIn("鎴戝啀绠€鐭涓€閬?, reply)
+        self.assertIn("褰撳墠杩欎竴姝?, reply)
+        self.assertIn("鍋氬ソ鍚庡憡璇夋垜", reply)
 
     def test_experiment_fast_path_actions_can_be_limited_by_config(self):
         conn = _FakeConn()
@@ -818,10 +944,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
     def test_neutral_ack_follows_completion_context(self):
         conn = _FakeConn()
         conn.dialogue.put(
-            Message(role="assistant", content="现在做这一步。做好后告诉我。")
+            Message(role="assistant", content="鐜板湪鍋氳繖涓€姝ャ€傚仛濂藉悗鍛婅瘔鎴戙€?)
         )
 
-        action = intentHandler._classify_short_experiment_control(conn, "好了")
+        action = intentHandler._classify_short_experiment_control(conn, "濂戒簡")
         self.assertEqual("advance", action)
 
     def test_continue_follows_start_context(self):
@@ -829,11 +955,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="今天我们做这个实验。你准备好开始了吗？",
+                content="浠婂ぉ鎴戜滑鍋氳繖涓疄楠屻€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             )
         )
 
-        action = intentHandler._classify_short_experiment_control(conn, "继续")
+        action = intentHandler._classify_short_experiment_control(conn, "缁х画")
         self.assertEqual("guide", action)
 
     def test_ready_reply_wins_while_waiting_for_start(self):
@@ -841,11 +967,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="你准备好后告诉我准备好了，我再带你开始第一步。",
+                content="浣犲噯澶囧ソ鍚庡憡璇夋垜鍑嗗濂戒簡锛屾垜鍐嶅甫浣犲紑濮嬬涓€姝ャ€?,
             )
         )
 
-        action = intentHandler._classify_short_experiment_control(conn, "准备好了")
+        action = intentHandler._classify_short_experiment_control(conn, "鍑嗗濂戒簡")
         self.assertEqual("guide", action)
 
     def test_step_guidance_clears_waiting_for_start_context(self):
@@ -853,13 +979,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="浠婂ぉ鎴戜滑鍋氳繖涓疄楠屻€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
+                content="娴犲﹤銇夐幋鎴滄粦閸嬫俺绻栨稉顏勭杽妤犲被鈧倷缍橀崙鍡楊槵婵傝棄绱戞慨瀣╃啊閸氭绱?,
             )
         )
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="鐜板湪缁欎簲鍙锋牱鍝佸姞鍏ョ〖姘㈠寲閽犮€傚姞瀹屽憡璇夋垜銆?",
+                content="閻滄澘婀紒娆庣安閸欓攱鐗遍崫浣稿閸忋儳銆栧銏犲闁界姰鈧倸濮炵€瑰苯鎲＄拠澶嬪灉閵?",
             )
         )
 
@@ -870,11 +996,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="现在给五号样品加入硼氢化钠。加完告诉我。",
+                content="鐜板湪缁欎簲鍙锋牱鍝佸姞鍏ョ〖姘㈠寲閽犮€傚姞瀹屽憡璇夋垜銆?,
             )
         )
 
-        action = intentHandler._classify_short_experiment_control(conn, "已经加好了")
+        action = intentHandler._classify_short_experiment_control(conn, "宸茬粡鍔犲ソ浜?)
         self.assertEqual("advance", action)
 
     def test_mixed_completion_report_does_not_shortcut(self):
@@ -882,13 +1008,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="现在给五号样品加入硼氢化钠。加完告诉我。",
+                content="鐜板湪缁欎簲鍙锋牱鍝佸姞鍏ョ〖姘㈠寲閽犮€傚姞瀹屽憡璇夋垜銆?,
             )
         )
 
         action = intentHandler._classify_short_experiment_control(
             conn,
-            "已经加好了是浅黄色一分钟",
+            "宸茬粡鍔犲ソ浜嗘槸娴呴粍鑹蹭竴鍒嗛挓",
         )
         self.assertEqual("", action)
 
@@ -897,12 +1023,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "beakers_labeled": {
                 "name": "beakers_labeled",
                 "type": "bool",
-                "description": "已完成 1-5 号烧杯编号",
+                "description": "宸插畬鎴?1-5 鍙风儳鏉紪鍙?,
             },
             "stir_bars_added_to_all": {
                 "name": "stir_bars_added_to_all",
                 "type": "bool",
-                "description": "已为 1-5 号烧杯全部放入磁转子",
+                "description": "宸蹭负 1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
             },
         }
 
@@ -918,12 +1044,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "photo_taken": {
                 "name": "photo_taken",
                 "type": "bool",
-                "description": "已通过 MCP 直接拍照记录当前样品颜色",
+                "description": "宸查€氳繃 MCP 鐩存帴鎷嶇収璁板綍褰撳墠鏍峰搧棰滆壊",
             },
             "color_confirmed_by_photo": {
                 "name": "color_confirmed_by_photo",
                 "type": "bool",
-                "description": "已基于照片确认当前样品颜色稳定",
+                "description": "宸插熀浜庣収鐗囩‘璁ゅ綋鍓嶆牱鍝侀鑹茬ǔ瀹?,
             },
         }
 
@@ -942,7 +1068,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "properties": {
                         "sodium_citrate_added_to_all": {
                             "type": "boolean",
-                            "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                            "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                         }
                     },
                     "required": ["sodium_citrate_added_to_all"],
@@ -961,7 +1087,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "shared_round_confirmed": {
                 "name": "shared_round_confirmed",
                 "type": "bool",
-                "description": "本轮共同操作记录",
+                "description": "鏈疆鍏卞悓鎿嶄綔璁板綍",
             }
         }
 
@@ -978,7 +1104,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "sodium_citrate_added_to_all": {
                 "name": "sodium_citrate_added_to_all",
                 "type": "bool",
-                "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
             }
         }
 
@@ -1012,8 +1138,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         ):
             handled = await intentHandler.handle_pending_server_photo_confirmation(
                 conn,
-                "可以拍照",
-                "可以拍照",
+                "鍙互鎷嶇収",
+                "鍙互鎷嶇収",
             )
 
         self.assertFalse(handled)
@@ -1025,11 +1151,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="今天我们做《银纳米粒子实验》。你准备好开始了吗？",
+                content="浠婂ぉ鎴戜滑鍋氥€婇摱绾崇背绮掑瓙瀹為獙銆嬨€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             )
         )
 
-        handled = await intentHandler.handle_user_intent(conn, "准备好了")
+        handled = await intentHandler.handle_user_intent(conn, "鍑嗗濂戒簡")
 
         self.assertFalse(handled)
         self.assertEqual(
@@ -1074,7 +1200,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         ):
                             handled = await intentHandler.handle_user_intent(
                                 conn,
-                                "拍照",
+                                "鎷嶇収",
                             )
 
         self.assertTrue(handled)
@@ -1082,7 +1208,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
     async def test_handle_user_intent_routes_photo_confirmation_reply_directly(self):
         conn = _FakeConn()
         conn.intent_type = "function_call"
-        conn.dialogue.put(Message(role="assistant", content="可以拍照吗？"))
+        conn.dialogue.put(Message(role="assistant", content="鍙互鎷嶇収鍚楋紵"))
         conn._server_photo_capture_granted = False
 
         async def return_false(*args, **kwargs):
@@ -1111,7 +1237,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "handle_direct_photo_intent",
                         return_false,
                     ):
-                        handled = await intentHandler.handle_user_intent(conn, "可以拍照")
+                        handled = await intentHandler.handle_user_intent(conn, "鍙互鎷嶇収")
 
         self.assertTrue(handled)
         self.assertTrue(getattr(conn, "_server_photo_capture_granted", False))
@@ -1173,7 +1299,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             ):
                                 handled = await intentHandler.handle_user_intent(
                                     conn,
-                                    "可以拍照",
+                                    "鍙互鎷嶇収",
                                 )
 
         self.assertTrue(handled)
@@ -1222,12 +1348,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             ):
                                 handled = await intentHandler.handle_user_intent(
                                     conn,
-                                    "鍏ㄩ儴鍔犲ソ浜?",
+                                    "閸忋劑鍎撮崝鐘层偨娴?",
                                 )
 
         self.assertTrue(handled)
         self.assertEqual(
-            [("鍏ㄩ儴鍔犲ソ浜?", "鍏ㄩ儴鍔犲ソ浜")],
+            [("閸忋劑鍎撮崝鐘层偨娴?", "閸忋劑鍎撮崝鐘层偨娴?)],
             seen,
         )
 
@@ -1281,11 +1407,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                                 ):
                                     handled = await intentHandler.handle_user_intent(
                                         conn,
-                                        "继续下一步",
+                                        "缁х画涓嬩竴姝?,
                                     )
 
         self.assertTrue(handled)
-        self.assertEqual([("继续下一步", "继续下一步")], seen)
+        self.assertEqual([("缁х画涓嬩竴姝?, "缁х画涓嬩竴姝?)], seen)
 
     async def test_handle_user_intent_routes_imperative_photo_confirmation_to_server_photo(self):
         conn = _FakeConn()
@@ -1300,7 +1426,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="先把2号样品单独摆好、颜色区域露清楚，再说一声“拍吧”。",
+                content="鍏堟妸2鍙锋牱鍝佸崟鐙憜濂姐€侀鑹插尯鍩熼湶娓呮锛屽啀璇翠竴澹扳€滄媿鍚р€濄€?,
             )
         )
 
@@ -1353,16 +1479,16 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             ):
                                 handled = await intentHandler.handle_user_intent(
                                     conn,
-                                    "可以拍照",
+                                    "鍙互鎷嶇収",
                                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["可以拍照"], sent)
+        self.assertEqual(["鍙互鎷嶇収"], sent)
         self.assertEqual(["server_photo_confirmation"], waits)
         self.assertEqual(1, len(executed))
-        self.assertEqual("2号样品", executed[0]["photo_name"])
+        self.assertEqual("2鍙锋牱鍝?, executed[0]["photo_name"])
         self.assertEqual(
-            "请拍摄2号样品当前状态的照片。",
+            "璇锋媿鎽?鍙锋牱鍝佸綋鍓嶇姸鎬佺殑鐓х墖銆?,
             executed[0]["question"],
         )
 
@@ -1415,8 +1541,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "_build_pending_server_photo_request_fixed",
                             return_value={
                                 "device_id": conn.device_id,
-                                "question": "请拍摄一号样品当前状态的照片。",
-                                "photo_name": "一号样品",
+                                "question": "璇锋媿鎽勪竴鍙锋牱鍝佸綋鍓嶇姸鎬佺殑鐓х墖銆?,
+                                "photo_name": "涓€鍙锋牱鍝?,
                             },
                         ):
                             with patch.object(
@@ -1426,12 +1552,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             ):
                                 handled = await intentHandler.handle_pending_server_photo_confirmation(
                                     conn,
-                                    "可以拍照",
-                                    "可以拍照",
+                                    "鍙互鎷嶇収",
+                                    "鍙互鎷嶇収",
                                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["可以拍照"], sent)
+        self.assertEqual(["鍙互鎷嶇収"], sent)
         self.assertEqual(
             [
                 ("delay", "server_photo_confirmation"),
@@ -1439,8 +1565,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "execute",
                     {
                         "device_id": conn.device_id,
-                        "question": "请拍摄一号样品当前状态的照片。",
-                        "photo_name": "一号样品",
+                        "question": "璇锋媿鎽勪竴鍙锋牱鍝佸綋鍓嶇姸鎬佺殑鐓х墖銆?,
+                        "photo_name": "涓€鍙锋牱鍝?,
                     },
                 ),
             ],
@@ -1453,10 +1579,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
-                        "safety": ["使用洁净烧杯和磁转子。"],
+                        "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
+                        "safety": ["浣跨敤娲佸噣鐑ф澂鍜岀杞瓙銆?],
                     },
                 }
             }
@@ -1474,16 +1600,16 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "没听懂",
-                    "没听懂",
+                    "娌″惉鎳?,
+                    "娌″惉鎳?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["没听懂"], sent)
+        self.assertEqual(["娌″惉鎳?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("当前这一步", spoken[0])
-        self.assertIn("烧杯编号和磁转子放置", spoken[0])
-        self.assertIn("做好后告诉我", spoken[0])
+        self.assertIn("褰撳墠杩欎竴姝?, spoken[0])
+        self.assertIn("鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆", spoken[0])
+        self.assertIn("鍋氬ソ鍚庡憡璇夋垜", spoken[0])
 
     async def test_explicit_start_guide_reply_includes_experiment_title(self):
         conn = _FakeConn()
@@ -1491,10 +1617,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
-                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                        "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
+                        "safety": ["浣跨敤娲佸噣鐑ф澂鍜屾磥鍑€纾佽浆瀛愶紝閬垮厤姹℃煋銆?],
                     },
                 }
             }
@@ -1502,7 +1628,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.experiment_overview = {
             "result": {
                 "experiment": {
-                    "title": "Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究"
+                    "title": "Ag 绾崇背绮掑瓙鐨勫埗澶囧強鍏跺偓鍖栬繕鍘?4-纭濆熀鑻厷鐨勫弽搴斿姩鍔涘鎺㈢┒"
                 }
             }
         }
@@ -1533,7 +1659,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["\u5f00\u59cb\u4eca\u5929\u7684\u5b9e\u9a8c"], sent)
         self.assertEqual(1, len(spoken))
         self.assertEqual(
-            "今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+            "浠婂ぉ鎴戜滑鍋氥€夾g 绾崇背绮掑瓙鐨勫埗澶囧強鍏跺偓鍖栬繕鍘?4-纭濆熀鑻厷鐨勫弽搴斿姩鍔涘鎺㈢┒銆嬨€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             spoken[0],
         )
 
@@ -1662,10 +1788,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     [
                         "[2026-05-05T14:35:16.192+08:00] [TRANSCRIPT] [USER] [source=asr] "
                         "[experiment_session_id=exp-old] [current_step_id=step_prepare_setup_all] "
-                        "[yaml=C:\\demo\\experiments.yaml] 全部完成。",
+                        "[yaml=C:\\demo\\experiments.yaml] 鍏ㄩ儴瀹屾垚銆?,
                         "[2026-05-05T14:36:16.192+08:00] [TRANSCRIPT] [USER] [source=asr] "
                         "[experiment_session_id=exp-old] [current_step_id=step_add_sodium_citrate_all] "
-                        "[yaml=C:\\demo\\experiments.yaml] 柠檬酸钠都加好了。",
+                        "[yaml=C:\\demo\\experiments.yaml] 鏌犳閰搁挔閮藉姞濂戒簡銆?,
                     ]
                 )
                 + "\n",
@@ -1684,14 +1810,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             ]
 
             step_titles = {
-                "step_prepare_setup_all": "1-5号样品：准备烧杯与磁转子",
-                "step_add_sodium_citrate_all": "1-5号样品：统一加入柠檬酸钠",
-                "step_add_agno3_all": "1-5号样品：统一加入AgNO3",
+                "step_prepare_setup_all": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
+                "step_add_sodium_citrate_all": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
+                "step_add_agno3_all": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
             }
             step_instructions = {
-                "step_prepare_setup_all": "完成 1-5 号烧杯编号和磁转子放置。",
-                "step_add_sodium_citrate_all": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
-                "step_add_agno3_all": "按 1 到 5 号顺序统一完成 AgNO3 加入。",
+                "step_prepare_setup_all": "瀹屾垚 1-5 鍙风儳鏉紪鍙峰拰纾佽浆瀛愭斁缃€?,
+                "step_add_sodium_citrate_all": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?,
+                "step_add_agno3_all": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 AgNO3 鍔犲叆銆?,
             }
             required_fields = {
                 "step_prepare_setup_all": [
@@ -1706,13 +1832,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     {
                         "name": "magnetic_stirrers_placed",
                         "type": "bool",
-                        "description": "为 1-5 号烧杯全部放入磁转子",
+                        "description": "涓?1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
                         "required": True,
                     },
                     {
                         "name": "beakers_labeled",
                         "type": "bool",
-                        "description": "完成 1-5 号烧杯编号",
+                        "description": "瀹屾垚 1-5 鍙风儳鏉紪鍙?,
                         "required": True,
                     },
                 ],
@@ -1720,7 +1846,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     {
                         "name": "sodium_citrate_added",
                         "type": "bool",
-                        "description": "1-5 号样品统一加入柠檬酸钠",
+                        "description": "1-5 鍙锋牱鍝佺粺涓€鍔犲叆鏌犳閰搁挔",
                         "required": True,
                     }
                 ],
@@ -1878,17 +2004,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+                content="浠婂ぉ鎴戜滑鍋氥€夾g 绾崇背绮掑瓙鐨勫埗澶囧強鍏跺偓鍖栬繕鍘?4-纭濆熀鑻厷鐨勫弽搴斿姩鍔涘鎺㈢┒銆嬨€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             )
         )
         conn.experiment_current_step = {
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
-                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                        "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
+                        "safety": ["浣跨敤娲佸噣鐑ф澂鍜屾磥鍑€纾佽浆瀛愶紝閬垮厤姹℃煋銆?],
                     },
                 }
             }
@@ -1906,22 +2032,22 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "我准备好了",
-                    "我准备好了",
+                    "鎴戝噯澶囧ソ浜?,
+                    "鎴戝噯澶囧ソ浜?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["我准备好了"], sent)
+        self.assertEqual(["鎴戝噯澶囧ソ浜?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("现在做这一步", spoken[0])
-        self.assertIn("烧杯编号和磁转子放置", spoken[0])
+        self.assertIn("鐜板湪鍋氳繖涓€姝?, spoken[0])
+        self.assertIn("鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆", spoken[0])
 
     async def test_ready_reply_after_start_prompt_does_not_advance_with_session_id(self):
         conn = _FakeConn()
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+                content="浠婂ぉ鎴戜滑鍋氥€夾g 绾崇背绮掑瓙鐨勫埗澶囧強鍏跺偓鍖栬繕鍘?4-纭濆熀鑻厷鐨勫弽搴斿姩鍔涘鎺㈢┒銆嬨€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             )
         )
         conn.experiment_session_id = "exp-ready-1"
@@ -1929,10 +2055,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
-                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                        "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
+                        "safety": ["浣跨敤娲佸噣鐑ф澂鍜屾磥鍑€纾佽浆瀛愶紝閬垮厤姹℃煋銆?],
                     },
                 }
             }
@@ -1960,14 +2086,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_experiment_control_fast_intent(
                             conn,
-                            "准备好了",
-                            "准备好了",
+                            "鍑嗗濂戒簡",
+                            "鍑嗗濂戒簡",
                         )
 
         self.assertTrue(handled)
-        self.assertEqual(["准备好了"], sent)
+        self.assertEqual(["鍑嗗濂戒簡"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("现在做这一步", spoken[0])
+        self.assertIn("鐜板湪鍋氳繖涓€姝?, spoken[0])
         self.assertEqual(
             conn.sentence_id,
             getattr(conn, "_experiment_ready_guard_bypass_sentence_id", ""),
@@ -1978,7 +2104,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+                content="浠婂ぉ鎴戜滑鍋氥€夾g 绾崇背绮掑瓙鐨勫埗澶囧強鍏跺偓鍖栬繕鍘?4-纭濆熀鑻厷鐨勫弽搴斿姩鍔涘鎺㈢┒銆嬨€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             )
         )
         conn.experiment_session_id = "exp-ready-2"
@@ -1986,10 +2112,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
-                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                        "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
+                        "safety": ["浣跨敤娲佸噣鐑ф澂鍜屾磥鍑€纾佽浆瀛愶紝閬垮厤姹℃煋銆?],
                     },
                 }
             }
@@ -2017,15 +2143,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_experiment_control_fast_intent(
                             conn,
-                            "开始第一步",
-                            "开始第一步",
+                            "寮€濮嬬涓€姝?,
+                            "寮€濮嬬涓€姝?,
                         )
 
         self.assertTrue(handled)
-        self.assertEqual(["开始第一步"], sent)
+        self.assertEqual(["寮€濮嬬涓€姝?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("现在做这一步", spoken[0])
-        self.assertIn("烧杯编号和磁转子放置", spoken[0])
+        self.assertIn("鐜板湪鍋氳繖涓€姝?, spoken[0])
+        self.assertIn("鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆", spoken[0])
         self.assertEqual(
             conn.sentence_id,
             getattr(conn, "_experiment_ready_guard_bypass_sentence_id", ""),
@@ -2036,17 +2162,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="今天我们做《Ag 纳米粒子的制备及其催化还原 4-硝基苯酚的反应动力学探究》。你准备好开始了吗？",
+                content="浠婂ぉ鎴戜滑鍋氥€夾g 绾崇背绮掑瓙鐨勫埗澶囧強鍏跺偓鍖栬繕鍘?4-纭濆熀鑻厷鐨勫弽搴斿姩鍔涘鎺㈢┒銆嬨€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵",
             )
         )
         conn.experiment_current_step = {
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
-                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                        "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
+                        "safety": ["浣跨敤娲佸噣鐑ф澂鍜屾磥鍑€纾佽浆瀛愶紝閬垮厤姹℃煋銆?],
                     },
                 }
             }
@@ -2064,32 +2190,32 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "继续",
-                    "继续",
+                    "缁х画",
+                    "缁х画",
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["继续"], sent)
+        self.assertEqual(["缁х画"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("现在做这一步", spoken[0])
-        self.assertIn("烧杯编号和磁转子放置", spoken[0])
+        self.assertIn("鐜板湪鍋氳繖涓€姝?, spoken[0])
+        self.assertIn("鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆", spoken[0])
 
     async def test_repeat_current_step_does_not_sync_graph(self):
         conn = _FakeConn()
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="现在做这一步：完成 1-5 号样品的烧杯编号和磁转子放置。做好后告诉我。",
+                content="鐜板湪鍋氳繖涓€姝ワ細瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆傚仛濂藉悗鍛婅瘔鎴戙€?,
             )
         )
         conn.experiment_current_step = {
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
-                        "safety": ["使用洁净烧杯和洁净磁转子，避免污染。"],
+                        "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
+                        "safety": ["浣跨敤娲佸噣鐑ф澂鍜屾磥鍑€纾佽浆瀛愶紝閬垮厤姹℃煋銆?],
                     },
                 }
             }
@@ -2117,15 +2243,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_experiment_control_fast_intent(
                             conn,
-                            "再说一遍",
-                            "再说一遍",
+                            "鍐嶈涓€閬?,
+                            "鍐嶈涓€閬?,
                         )
 
         self.assertTrue(handled)
-        self.assertEqual(["再说一遍"], sent)
+        self.assertEqual(["鍐嶈涓€閬?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("当前这一步", spoken[0])
-        self.assertIn("烧杯编号", spoken[0])
+        self.assertIn("褰撳墠杩欎竴姝?, spoken[0])
+        self.assertIn("鐑ф澂缂栧彿", spoken[0])
 
     async def test_generic_done_after_current_step_advances_one_step_without_context_sync(self):
         conn = _FakeConn()
@@ -2135,9 +2261,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             "result": {
                 "step": {
                     "id": "step_prepare_setup_all",
-                    "title": "1-5号样品：准备烧杯与磁转子",
+                    "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                     "prompts": {
-                        "instruction": "先完成 1-5 号样品的烧杯编号和磁转子放置，做好后告诉我。",
+                        "instruction": "鍏堝畬鎴?1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆锛屽仛濂藉悗鍛婅瘔鎴戙€?,
                     },
                 }
             }
@@ -2145,7 +2271,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="现在做这一步：1-5号样品：准备烧杯与磁转子。先完成 1-5 号样品的烧杯编号和磁转子放置，做好后告诉我。",
+                content="鐜板湪鍋氳繖涓€姝ワ細1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙銆傚厛瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆锛屽仛濂藉悗鍛婅瘔鎴戙€?,
             )
         )
         spoken = []
@@ -2160,7 +2286,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         async def fake_advance(_conn, session_id):
             advanced.append(session_id)
-            return "现在做这一步：1-5号样品：统一加入枸橼酸钠。按 1 到 5 号顺序加入 0.50 mL 0.05 mol/L 枸橼酸钠，做好后告诉我。"
+            return "鐜板湪鍋氳繖涓€姝ワ細1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏋告┘閰搁挔銆傛寜 1 鍒?5 鍙烽『搴忓姞鍏?0.50 mL 0.05 mol/L 鏋告┘閰搁挔锛屽仛濂藉悗鍛婅瘔鎴戙€?
 
         with patch.object(
             intentHandler,
@@ -2176,15 +2302,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_experiment_control_fast_intent(
                             conn,
-                            "做好了",
-                            "做好了",
+                            "鍋氬ソ浜?,
+                            "鍋氬ソ浜?,
                         )
 
         self.assertTrue(handled)
-        self.assertEqual(["做好了"], sent)
+        self.assertEqual(["鍋氬ソ浜?], sent)
         self.assertEqual(["exp-generic-done-1"], advanced)
         self.assertEqual(1, len(spoken))
-        self.assertIn("统一加入枸橼酸钠", spoken[0])
+        self.assertIn("缁熶竴鍔犲叆鏋告┘閰搁挔", spoken[0])
 
     async def test_advance_fast_path_records_and_moves_to_next_step(self):
         conn = _FakeConn()
@@ -2209,9 +2335,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_prepare_setup_all",
-                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                                 "prompts": {
-                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                                 },
                             },
                         }
@@ -2221,9 +2347,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_add_sodium_citrate_all",
-                            "title": "1-5号样品：统一加入柠檬酸钠",
+                            "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                             "prompts": {
-                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?1.00 mL 鏌犳閰搁挔銆?,
                             },
                         },
                     }
@@ -2238,19 +2364,19 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "beakers_labeled",
                                 "type": "bool",
-                                "description": "已完成 1-5 号烧杯编号",
+                                "description": "宸插畬鎴?1-5 鍙风儳鏉紪鍙?,
                             },
                             {
                                 "name": "stir_bars_added_to_all",
                                 "type": "bool",
-                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                                "description": "宸蹭负 1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
                             },
                         ],
                     }
                 }
             if tool_name == "can_proceed":
                 state["can_proceed_calls"] += 1
-                return {"result": {"ok": False, "message": "尚未完成"}}
+                return {"result": {"ok": False, "message": "灏氭湭瀹屾垚"}}
             if tool_name == "start_trial":
                 return {
                     "result": {
@@ -2276,10 +2402,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_add_sodium_citrate_all",
-                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                             },
                             "current_step_details": {
-                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?1.00 mL 鏌犳閰搁挔銆?,
                             },
                         },
                     }
@@ -2292,16 +2418,16 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "当前步骤已完成",
-                    "当前步骤已完成",
+                    "褰撳墠姝ラ宸插畬鎴?,
+                    "褰撳墠姝ラ宸插畬鎴?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["当前步骤已完成"], sent)
+        self.assertEqual(["褰撳墠姝ラ宸插畬鎴?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("这几个确认", spoken[0])
-        self.assertIn("烧杯编号", spoken[0])
-        self.assertIn("磁转子", spoken[0])
+        self.assertIn("杩欏嚑涓‘璁?, spoken[0])
+        self.assertIn("鐑ф澂缂栧彿", spoken[0])
+        self.assertIn("纾佽浆瀛?, spoken[0])
         self.assertTrue(conn.enriched)
         self.assertNotIn("add_fields", [name for name, _args, _priority in tool_calls])
         self.assertNotIn(
@@ -2332,13 +2458,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_add_sodium_citrate_all",
-                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                                 "interaction": {
                                     "fast_path_mode": "confirmation_step",
                                     "capabilities": ["procedural_guidance", "step_confirmation"],
                                 },
                                 "prompts": {
-                                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?,
                                 },
                             },
                         }
@@ -2348,9 +2474,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_add_agno3_all",
-                            "title": "1-5号样品：统一加入AgNO3",
+                            "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                             "prompts": {
-                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?5.00 mL AgNO3銆?,
                             },
                         },
                     }
@@ -2374,7 +2500,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "sodium_citrate_added_to_all",
                                 "type": "bool",
-                                "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                                "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                             }
                         ],
                     }
@@ -2384,7 +2510,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 return {
                     "result": {
                         "ok": state["reported"],
-                        "message": None if state["reported"] else "尚未完成",
+                        "message": None if state["reported"] else "灏氭湭瀹屾垚",
                     }
                 }
             if tool_name == "add_fields":
@@ -2406,10 +2532,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_add_agno3_all",
-                                "title": "1-5号样品：统一加入AgNO3",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                             },
                             "current_step_details": {
-                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?5.00 mL AgNO3銆?,
                             },
                         },
                     }
@@ -2422,15 +2548,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "按一到五号顺序完成全部柠檬酸钠加入",
-                    "按一到五号顺序完成全部柠檬酸钠加入",
+                    "鎸変竴鍒颁簲鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
+                    "鎸変竴鍒颁簲鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["按一到五号顺序完成全部柠檬酸钠加入"], sent)
+        self.assertEqual(["鎸変竴鍒颁簲鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("一个确认", spoken[0])
-        self.assertIn("柠檬酸钠加入", spoken[0])
+        self.assertIn("涓€涓‘璁?, spoken[0])
+        self.assertIn("鏌犳閰搁挔鍔犲叆", spoken[0])
         self.assertNotIn("add_fields", [name for name, _args, _priority in tool_calls])
         self.assertNotIn(
             "proceed_to_next_step",
@@ -2460,9 +2586,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_add_sodium_citrate_all",
-                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                                 "prompts": {
-                                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?,
                                 },
                             },
                         }
@@ -2472,9 +2598,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_add_agno3_all",
-                            "title": "1-5号样品：统一加入AgNO3",
+                            "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                             "prompts": {
-                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?5.00 mL AgNO3銆?,
                             },
                         },
                     }
@@ -2496,14 +2622,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "sodium_citrate_added_to_all",
                                 "type": "bool",
-                                "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                                "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                             }
                         ],
                     }
                 }
             if tool_name == "can_proceed":
                 state["can_proceed_calls"] += 1
-                return {"result": {"ok": False, "message": "尚未完成"}}
+                return {"result": {"ok": False, "message": "灏氭湭瀹屾垚"}}
             if tool_name == "add_fields":
                 raise AssertionError("missing confirmation field should not be autofilled")
             if tool_name == "finish_trial":
@@ -2517,10 +2643,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_add_agno3_all",
-                                "title": "1-5号样品：统一加入AgNO3",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                             },
                             "current_step_details": {
-                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?5.00 mL AgNO3銆?,
                             },
                         },
                     }
@@ -2533,15 +2659,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "按一到五号顺序全部加入柠檬酸钠",
-                    "按一到五号顺序全部加入柠檬酸钠",
+                    "鎸変竴鍒颁簲鍙烽『搴忓叏閮ㄥ姞鍏ユ煚妾吀閽?,
+                    "鎸変竴鍒颁簲鍙烽『搴忓叏閮ㄥ姞鍏ユ煚妾吀閽?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["按一到五号顺序全部加入柠檬酸钠"], sent)
+        self.assertEqual(["鎸変竴鍒颁簲鍙烽『搴忓叏閮ㄥ姞鍏ユ煚妾吀閽?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("一个确认", spoken[0])
-        self.assertIn("柠檬酸钠加入", spoken[0])
+        self.assertIn("涓€涓‘璁?, spoken[0])
+        self.assertIn("鏌犳閰搁挔鍔犲叆", spoken[0])
         self.assertNotIn("add_fields", [name for name, _args, _priority in tool_calls])
 
     def test_infer_experiment_step_id_from_natural_assistant_reagent_instruction(self):
@@ -2550,44 +2676,44 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_prepare_setup_all",
-                "title": "1-5号样品：准备烧杯与磁转子",
+                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                 "prompts": {
-                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                 },
             },
             {
                 "id": "step_add_sodium_citrate_all",
-                "title": "1-5号样品：统一加入柠檬酸钠",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                 "prompts": {
-                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?,
                 },
             },
             {
                 "id": "step_add_agno3_all",
-                "title": "1-5号样品：统一加入AgNO3",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                 "prompts": {
-                    "instruction": "按 1 到 5 号顺序统一完成 AgNO3 加入（每个烧杯均为 5.00 mL）。",
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 AgNO3 鍔犲叆锛堟瘡涓儳鏉潎涓?5.00 mL锛夈€?,
                 },
             },
             {
                 "id": "step_add_h2o2_all",
-                "title": "1-5号样品：统一加入H2O2",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆H2O2",
                 "prompts": {
-                    "instruction": "按 1 到 5 号顺序统一完成 H2O2 加入。",
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 H2O2 鍔犲叆銆?,
                 },
             },
         ]
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="按1到5号顺序，给每个烧杯各加入五点零零毫升硝酸银溶液，注意不要溅出、编号别弄混，全部加完告诉我。",
+                content="鎸?鍒?鍙烽『搴忥紝缁欐瘡涓儳鏉悇鍔犲叆浜旂偣闆堕浂姣崌纭濋吀閾舵憾娑诧紝娉ㄦ剰涓嶈婧呭嚭銆佺紪鍙峰埆寮勬贩锛屽叏閮ㄥ姞瀹屽憡璇夋垜銆?,
             )
         )
 
         inferred = intentHandler._infer_experiment_step_id_from_context(
             conn,
-            original_text="全部加好了",
-            filtered_text="全部加好了",
+            original_text="鍏ㄩ儴鍔犲ソ浜?,
+            filtered_text="鍏ㄩ儴鍔犲ソ浜?,
         )
 
         self.assertEqual("step_add_agno3_all", inferred)
@@ -2598,51 +2724,51 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_prepare_setup_all",
-                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
+                "title": "1-5閸欓攱鐗遍崫渚婄窗閸戝棗顦悜褎婢傛稉搴ｎ梿鏉烆剙鐡?,
                 "prompts": {
-                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?",
+                    "instruction": "鐎瑰本鍨?1-5 閸欓攱鐗遍崫浣烘畱閻懷勬緜缂傛牕褰块崪宀€顥嗘潪顒€鐡欓弨鍓х枂閵?",
                 },
             },
             {
                 "id": "step_add_sodium_citrate_all",
-                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
+                "title": "1-5閸欓攱鐗遍崫渚婄窗缂佺喍绔撮崝鐘插弳閺岀姵顎嬮柊鎼佹寯",
                 "prompts": {
-                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?",
+                    "instruction": "閹?1 閸?5 閸欑兘銆庢惔蹇曠埠娑撯偓鐎瑰本鍨氶弻鐘愁€嬮柊鎼佹寯閸旂姴鍙嗛妴?",
                 },
             },
             {
                 "id": "step_add_agno3_all",
-                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
+                "title": "1-5閸欓攱鐗遍崫渚婄窗缂佺喍绔撮崝鐘插弳AgNO3",
                 "prompts": {
-                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 AgNO3 鍔犲叆銆?",
+                    "instruction": "閹?1 閸?5 閸欑兘銆庢惔蹇曠埠娑撯偓鐎瑰本鍨?AgNO3 閸旂姴鍙嗛妴?",
                 },
             },
             {
                 "id": "step_add_h2o2_all",
-                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆H2O2",
+                "title": "1-5閸欓攱鐗遍崫渚婄窗缂佺喍绔撮崝鐘插弳H2O2",
                 "prompts": {
-                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 H2O2 鍔犲叆銆?",
+                    "instruction": "閹?1 閸?5 閸欑兘銆庢惔蹇曠埠娑撯偓鐎瑰本鍨?H2O2 閸旂姴鍙嗛妴?",
                 },
             },
             {
                 "id": "step_sample1_2_add_kbr_water_nabh4",
-                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘村苟鍔犲叆NaBH4",
+                "title": "1閸欓攱鐗遍崫渚婄窗閸旂姴鍙咾Br閵嗕胶鍑藉鏉戣嫙閸旂姴鍙哊aBH4",
                 "prompts": {
-                    "instruction": "瀹屾垚 1 鍙锋牱鍝?KBr 鍜岀函姘村姞鍏ュ苟娣峰寑鍚庯紝蹇€熷姞鍏?NaBH4銆?",
+                    "instruction": "鐎瑰本鍨?1 閸欓攱鐗遍崫?KBr 閸滃瞼鍑藉鏉戝閸忋儱鑻熷ǎ宄板瘧閸氬函绱濊箛顐︹偓鐔峰閸?NaBH4閵?",
                 },
             },
         ]
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="鐜板湪鍋氳繖涓€姝ワ細瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆傚仛濂藉悗鍛婅瘔鎴戙€?",
+                content="閻滄澘婀崑姘崇箹娑撯偓濮濄儻绱扮€瑰本鍨?1-5 閸欓攱鐗遍崫浣烘畱閻懷勬緜缂傛牕褰块崪宀€顥嗘潪顒€鐡欓弨鍓х枂閵嗗倸浠涙總钘夋倵閸涘﹨鐦旈幋鎴欌偓?",
             )
         )
 
         inferred = intentHandler._infer_experiment_step_id_from_context(
             conn,
-            original_text="缁х画涓嬩竴姝?",
-            filtered_text="缁х画涓嬩竴姝?",
+            original_text="缂佈呯敾娑撳绔村?",
+            filtered_text="缂佈呯敾娑撳绔村?",
         )
 
         self.assertEqual("", inferred)
@@ -2660,7 +2786,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         steps = [
             {
                 "id": "step_prepare_setup_all",
-                "title": "1-5号样品：准备烧杯与磁转子",
+                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2668,20 +2794,20 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "beakers_labeled": {
                         "type": "bool",
-                        "description": "已完成 1-5 号烧杯编号",
+                        "description": "宸插畬鎴?1-5 鍙风儳鏉紪鍙?,
                     },
                     "stir_bars_added_to_all": {
                         "type": "bool",
-                        "description": "已为 1-5 号烧杯全部放入磁转子",
+                        "description": "宸蹭负 1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
                     },
                 },
                 "prompts": {
-                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                 },
             },
             {
                 "id": "step_add_sodium_citrate_all",
-                "title": "1-5号样品：统一加入柠檬酸钠",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2689,16 +2815,16 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "sodium_citrate_added_to_all": {
                         "type": "bool",
-                        "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                        "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                     },
                 },
                 "prompts": {
-                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?,
                 },
             },
             {
                 "id": "step_add_agno3_all",
-                "title": "1-5号样品：统一加入AgNO3",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2706,16 +2832,16 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "agno3_added_to_all": {
                         "type": "bool",
-                        "description": "已按 1-5 号顺序完成全部 AgNO3 加入",
+                        "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮?AgNO3 鍔犲叆",
                     },
                 },
                 "prompts": {
-                    "instruction": "按 1 到 5 号顺序统一完成 AgNO3 加入。",
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 AgNO3 鍔犲叆銆?,
                 },
             },
             {
                 "id": "step_add_h2o2_all",
-                "title": "1-5号样品：统一加入H2O2",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆H2O2",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2723,11 +2849,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "h2o2_added_to_all": {
                         "type": "bool",
-                        "description": "已按 1-5 号顺序完成全部 H2O2 加入",
+                        "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮?H2O2 鍔犲叆",
                     },
                 },
                 "prompts": {
-                    "instruction": "按 1 到 5 号顺序统一完成 H2O2 加入。",
+                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 H2O2 鍔犲叆銆?,
                 },
             },
         ]
@@ -2737,7 +2863,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="按1到5号顺序，给每个烧杯各加入五点零零毫升硝酸银溶液，注意不要溅出、编号别弄混，全部加完告诉我。",
+                content="鎸?鍒?鍙烽『搴忥紝缁欐瘡涓儳鏉悇鍔犲叆浜旂偣闆堕浂姣崌纭濋吀閾舵憾娑诧紝娉ㄦ剰涓嶈婧呭嚭銆佺紪鍙峰埆寮勬贩锛屽叏閮ㄥ姞瀹屽憡璇夋垜銆?,
             )
         )
 
@@ -2787,7 +2913,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 return {
                     "result": {
                         "ok": step["id"] in state["completed"],
-                        "message": None if step["id"] in state["completed"] else "尚未完成",
+                        "message": None if step["id"] in state["completed"] else "灏氭湭瀹屾垚",
                     }
                 }
             if tool_name == "start_trial":
@@ -2840,9 +2966,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["\u5168\u90e8\u52a0\u597d\u4e86"], sent)
         self.assertEqual("step_prepare_setup_all", conn.experiment_current_step_id)
         self.assertEqual(1, len(spoken))
-        self.assertIn("这几个确认", spoken[0])
-        self.assertIn("烧杯编号", spoken[0])
-        self.assertIn("磁转子", spoken[0])
+        self.assertIn("杩欏嚑涓‘璁?, spoken[0])
+        self.assertIn("鐑ф澂缂栧彿", spoken[0])
+        self.assertIn("纾佽浆瀛?, spoken[0])
         self.assertNotIn(
             "proceed_to_next_step",
             [name for name, _args, _priority in tool_calls],
@@ -2861,7 +2987,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         steps = [
             {
                 "id": "step_prepare_setup_all",
-                "title": "1-5号样品：准备烧杯与磁转子",
+                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2869,18 +2995,18 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "beakers_labeled": {
                         "type": "bool",
-                        "description": "已完成 1-5 号烧杯编号",
+                        "description": "宸插畬鎴?1-5 鍙风儳鏉紪鍙?,
                     },
                     "stir_bars_added_to_all": {
                         "type": "bool",
-                        "description": "已为 1-5 号烧杯全部放入磁转子",
+                        "description": "宸蹭负 1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
                     },
                 },
-                "prompts": {"instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。"},
+                "prompts": {"instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?},
             },
             {
                 "id": "step_add_sodium_citrate_all",
-                "title": "1-5号样品：统一加入柠檬酸钠",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2888,14 +3014,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "sodium_citrate_added_to_all": {
                         "type": "bool",
-                        "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                        "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                     },
                 },
-                "prompts": {"instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。"},
+                "prompts": {"instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?},
             },
             {
                 "id": "step_add_agno3_all",
-                "title": "1-5号样品：统一加入AgNO3",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2903,14 +3029,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "agno3_added_to_all": {
                         "type": "bool",
-                        "description": "已按 1-5 号顺序完成全部 AgNO3 加入",
+                        "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮?AgNO3 鍔犲叆",
                     },
                 },
-                "prompts": {"instruction": "按 1 到 5 号顺序统一完成 AgNO3 加入。"},
+                "prompts": {"instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 AgNO3 鍔犲叆銆?},
             },
             {
                 "id": "step_add_h2o2_all",
-                "title": "1-5号样品：统一加入H2O2",
+                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆H2O2",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2918,14 +3044,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "h2o2_added_to_all": {
                         "type": "bool",
-                        "description": "已按 1-5 号顺序完成全部 H2O2 加入",
+                        "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮?H2O2 鍔犲叆",
                     },
                 },
-                "prompts": {"instruction": "按 1 到 5 号顺序统一完成 H2O2 加入。"},
+                "prompts": {"instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚 H2O2 鍔犲叆銆?},
             },
             {
                 "id": "step_stirring_all",
-                "title": "1-5号样品：同时启动搅拌并混匀",
+                "title": "1-5鍙锋牱鍝侊細鍚屾椂鍚姩鎼呮媽骞舵贩鍖€",
                 "interaction": {
                     "fast_path_mode": "confirmation_step",
                     "capabilities": ["step_confirmation"],
@@ -2933,14 +3059,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "all_samples_stirring": {
                         "type": "bool",
-                        "description": "已同时启动 1-5 号样品搅拌并确认混匀",
+                        "description": "宸插悓鏃跺惎鍔?1-5 鍙锋牱鍝佹悈鎷屽苟纭娣峰寑",
                     },
                 },
-                "prompts": {"instruction": "同时启动 1-5 号样品搅拌并确认混匀。"},
+                "prompts": {"instruction": "鍚屾椂鍚姩 1-5 鍙锋牱鍝佹悈鎷屽苟纭娣峰寑銆?},
             },
             {
                 "id": "step_sample1_2_add_kbr_water_nabh4",
-                "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘村苟鍔犲叆NaBH4",
                 "interaction": {
                     "fast_path_mode": "observation_record_step",
                     "capabilities": ["step_confirmation", "observation_capture"],
@@ -2948,39 +3074,39 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "record_schema": {
                     "KBr_volume": {
                         "type": "bool",
-                        "description": "已按当前样品目标用量加入 KBr",
+                        "description": "宸叉寜褰撳墠鏍峰搧鐩爣鐢ㄩ噺鍔犲叆 KBr",
                     },
                     "H2O_volume": {
                         "type": "bool",
-                        "description": "已按当前样品目标用量加入纯水",
+                        "description": "宸叉寜褰撳墠鏍峰搧鐩爣鐢ㄩ噺鍔犲叆绾按",
                     },
                     "mixed_uniformly": {
                         "type": "bool",
-                        "description": "加入 KBr 和纯水后已搅拌均匀",
+                        "description": "鍔犲叆 KBr 鍜岀函姘村悗宸叉悈鎷屽潎鍖€",
                     },
                     "nabh4_volume": {
                         "type": "bool",
-                        "description": "已准确加入 2.50 mL NaBH4",
+                        "description": "宸插噯纭姞鍏?2.50 mL NaBH4",
                     },
                     "added_quickly": {
                         "type": "bool",
-                        "description": "已快速完成 NaBH4 加入",
+                        "description": "宸插揩閫熷畬鎴?NaBH4 鍔犲叆",
                     },
                     "color": {
                         "type": "string",
-                        "description": "当前样品最终颜色",
+                        "description": "褰撳墠鏍峰搧鏈€缁堥鑹?,
                     },
                     "reaction_time": {
                         "type": "float",
-                        "description": "当前样品颜色稳定所用时间",
+                        "description": "褰撳墠鏍峰搧棰滆壊绋冲畾鎵€鐢ㄦ椂闂?,
                     },
                     "color_stable": {
                         "type": "bool",
-                        "description": "已确认颜色稳定",
+                        "description": "宸茬‘璁ら鑹茬ǔ瀹?,
                     },
                 },
                 "prompts": {
-                    "instruction": "完成 1 号样品 KBr 和纯水加入并混匀后，快速加入 NaBH4 并保持搅拌，记录颜色稳定时间和收尾情况。",
+                    "instruction": "瀹屾垚 1 鍙锋牱鍝?KBr 鍜岀函姘村姞鍏ュ苟娣峰寑鍚庯紝蹇€熷姞鍏?NaBH4 骞朵繚鎸佹悈鎷岋紝璁板綍棰滆壊绋冲畾鏃堕棿鍜屾敹灏炬儏鍐点€?,
                 },
             },
         ]
@@ -2989,7 +3115,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="接着做1号样品：向1号烧杯加入二点五零毫升硼氢化钠，保持搅拌，注意它有腐蚀性、现配后容易分解，尽量快加，做好告诉我已经做好了。",
+                content="鎺ョ潃鍋?鍙锋牱鍝侊細鍚?鍙风儳鏉姞鍏ヤ簩鐐逛簲闆舵鍗囩〖姘㈠寲閽狅紝淇濇寔鎼呮媽锛屾敞鎰忓畠鏈夎厫铓€鎬с€佺幇閰嶅悗瀹规槗鍒嗚В锛屽敖閲忓揩鍔狅紝鍋氬ソ鍛婅瘔鎴戝凡缁忓仛濂戒簡銆?,
             )
         )
 
@@ -3052,7 +3178,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 return {
                     "result": {
                         "ok": step["id"] in state["completed"],
-                        "message": None if step["id"] in state["completed"] else "尚未完成",
+                        "message": None if step["id"] in state["completed"] else "灏氭湭瀹屾垚",
                     }
                 }
             if tool_name == "start_trial":
@@ -3097,15 +3223,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "已经做好了",
-                    "已经做好了",
+                    "宸茬粡鍋氬ソ浜?,
+                    "宸茬粡鍋氬ソ浜?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["已经做好了"], sent)
+        self.assertEqual(["宸茬粡鍋氬ソ浜?], sent)
         self.assertEqual("step_sample1_2_add_kbr_water_nabh4", conn.experiment_current_step_id)
         self.assertEqual(1, len(spoken))
-        self.assertIn("一整组关键记录", spoken[0])
+        self.assertIn("涓€鏁寸粍鍏抽敭璁板綍", spoken[0])
         self.assertNotIn(
             "proceed_to_next_step",
             [name for name, _args, _priority in tool_calls],
@@ -3128,9 +3254,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_photo_confirm_sample_5",
-                                "title": "五号样品拍照确认",
+                                "title": "浜斿彿鏍峰搧鎷嶇収纭",
                                 "prompts": {
-                                    "instruction": "确认五号样品颜色稳定后拍照。",
+                                    "instruction": "纭浜斿彿鏍峰搧棰滆壊绋冲畾鍚庢媿鐓с€?,
                                 },
                             },
                         }
@@ -3140,9 +3266,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_tyndall_observation",
-                            "title": "丁达尔现象观察",
+                            "title": "涓佽揪灏旂幇璞¤瀵?,
                             "prompts": {
-                                "instruction": "用激光笔从侧面观察 1 到 5 号样品的光路。",
+                                "instruction": "鐢ㄦ縺鍏夌瑪浠庝晶闈㈣瀵?1 鍒?5 鍙锋牱鍝佺殑鍏夎矾銆?,
                             },
                         },
                     }
@@ -3178,8 +3304,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     {
                         "photo_taken": True,
                         "color_confirmed_by_photo": True,
-                        "photo_file_name": "五号样品_20260428_175720.png",
-                        "photo_path": "C:/demo/五号样品_20260428_175720.png",
+                        "photo_file_name": "浜斿彿鏍峰搧_20260428_175720.png",
+                        "photo_path": "C:/demo/浜斿彿鏍峰搧_20260428_175720.png",
                     },
                     arguments["data"],
                 )
@@ -3202,10 +3328,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_tyndall_observation",
-                                "title": "丁达尔现象观察",
+                                "title": "涓佽揪灏旂幇璞¤瀵?,
                             },
                             "current_step_details": {
-                                "instruction": "用激光笔从侧面观察 1 到 5 号样品的光路。",
+                                "instruction": "鐢ㄦ縺鍏夌瑪浠庝晶闈㈣瀵?1 鍒?5 鍙锋牱鍝佺殑鍏夎矾銆?,
                             },
                         },
                     }
@@ -3218,17 +3344,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             {
                 "photo_meta": {
                     "found": True,
-                    "file_name": "五号样品_20260428_175720.png",
-                    "mirrored_path": "C:/demo/五号样品_20260428_175720.png",
+                    "file_name": "浜斿彿鏍峰搧_20260428_175720.png",
+                    "mirrored_path": "C:/demo/浜斿彿鏍峰搧_20260428_175720.png",
                 }
             },
-            fallback_reply="拍好了。",
+            fallback_reply="鎷嶅ソ浜嗐€?,
         )
 
-        self.assertIn("拍好了", reply)
-        self.assertIn("我接着带你做下一步", reply)
-        self.assertIn("接下来做这一步", reply)
-        self.assertIn("丁达尔现象观察", reply)
+        self.assertIn("鎷嶅ソ浜?, reply)
+        self.assertIn("鎴戞帴鐫€甯︿綘鍋氫笅涓€姝?, reply)
+        self.assertIn("鎺ヤ笅鏉ュ仛杩欎竴姝?, reply)
+        self.assertIn("涓佽揪灏旂幇璞¤瀵?, reply)
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
         self.assertIn(
             "proceed_to_next_step",
@@ -3256,9 +3382,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_prepare_setup_all",
-                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                                 "prompts": {
-                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                                 },
                             },
                         }
@@ -3270,12 +3396,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_sample1_5_photo_confirm",
-                                "title": "1号样品：颜色稳定后拍照记录",
+                                "title": "1鍙锋牱鍝侊細棰滆壊绋冲畾鍚庢媿鐓ц褰?,
                                 "interaction": {
                                     "fast_path_mode": "photo_confirmation_step",
                                 },
                                 "prompts": {
-                                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                                    "instruction": "棰滆壊绋冲畾鍚庢媿鐓ц褰曞綋鍓嶆牱鍝侀鑹诧紝骞惰繘鍏?2 鍙锋牱鍝併€?,
                                 },
                             },
                         }
@@ -3285,9 +3411,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_sample2_add_kbr_water_nabh4",
-                            "title": "2号样品：加入溴化钾、纯水并加入硼氢化钠",
+                            "title": "2鍙锋牱鍝侊細鍔犲叆婧村寲閽俱€佺函姘村苟鍔犲叆纭兼阿鍖栭挔",
                             "prompts": {
-                                "instruction": "现在做 2 号样品，先加溴化钾和纯水，再加入硼氢化钠。",
+                                "instruction": "鐜板湪鍋?2 鍙锋牱鍝侊紝鍏堝姞婧村寲閽惧拰绾按锛屽啀鍔犲叆纭兼阿鍖栭挔銆?,
                             },
                         },
                     }
@@ -3345,8 +3471,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     {
                         "photo_taken": True,
                         "color_confirmed_by_photo": True,
-                        "photo_file_name": "1号样品_20260430_195415.png",
-                        "photo_path": "C:/demo/1号样品_20260430_195415.png",
+                        "photo_file_name": "1鍙锋牱鍝乢20260430_195415.png",
+                        "photo_path": "C:/demo/1鍙锋牱鍝乢20260430_195415.png",
                     },
                     arguments["data"],
                 )
@@ -3369,10 +3495,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_sample2_add_kbr_water_nabh4",
-                                "title": "2号样品：加入溴化钾、纯水并加入硼氢化钠",
+                                "title": "2鍙锋牱鍝侊細鍔犲叆婧村寲閽俱€佺函姘村苟鍔犲叆纭兼阿鍖栭挔",
                             },
                             "current_step_details": {
-                                "instruction": "现在做 2 号样品，先加溴化钾和纯水，再加入硼氢化钠。",
+                                "instruction": "鐜板湪鍋?2 鍙锋牱鍝侊紝鍏堝姞婧村寲閽惧拰绾按锛屽啀鍔犲叆纭兼阿鍖栭挔銆?,
                             },
                         },
                     }
@@ -3391,18 +3517,18 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "photo_meta": {
                         "found": True,
-                        "file_name": "1号样品_20260430_195415.png",
-                        "mirrored_path": "C:/demo/1号样品_20260430_195415.png",
+                        "file_name": "1鍙锋牱鍝乢20260430_195415.png",
+                        "mirrored_path": "C:/demo/1鍙锋牱鍝乢20260430_195415.png",
                     }
                 },
-                fallback_reply="拍好了，已经保存。",
-                requested_arguments={"photo_name": "1号样品"},
+                fallback_reply="鎷嶅ソ浜嗭紝宸茬粡淇濆瓨銆?,
+                requested_arguments={"photo_name": "1鍙锋牱鍝?},
             )
 
         self.assertEqual("step_sample1_5_photo_confirm", state["redirect_step_id"])
-        self.assertIn("拍好了", reply)
-        self.assertIn("我接着带你做下一步", reply)
-        self.assertIn("2号样品", reply)
+        self.assertIn("鎷嶅ソ浜?, reply)
+        self.assertIn("鎴戞帴鐫€甯︿綘鍋氫笅涓€姝?, reply)
+        self.assertIn("2鍙锋牱鍝?, reply)
         self.assertIn(
             "redirect_to_step",
             [name for name, _args, _priority in tool_calls],
@@ -3434,9 +3560,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_prepare_setup_all",
-                            "title": "1-5号样品：准备烧杯与磁子",
+                            "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣瀛?,
                             "prompts": {
-                                "instruction": "先完成 1-5 号样品的烧杯编号和磁子放置。",
+                                "instruction": "鍏堝畬鎴?1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀瀛愭斁缃€?,
                             },
                         },
                     }
@@ -3467,10 +3593,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_prepare_setup_all",
-                                "title": "1-5号样品：准备烧杯与磁子",
+                                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣瀛?,
                             },
                             "current_step_details": {
-                                "instruction": "先完成 1-5 号样品的烧杯编号和磁子放置。",
+                                "instruction": "鍏堝畬鎴?1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀瀛愭斁缃€?,
                             },
                         },
                     }
@@ -3489,12 +3615,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "photo_meta": {
                         "found": True,
-                        "file_name": "1号样品_20260504_145218.png",
-                        "mirrored_path": "C:/demo/1号样品_20260504_145218.png",
+                        "file_name": "1鍙锋牱鍝乢20260504_145218.png",
+                        "mirrored_path": "C:/demo/1鍙锋牱鍝乢20260504_145218.png",
                     }
                 },
-                fallback_reply="拍好了，已经保存。",
-                requested_arguments={"photo_name": "1号样品"},
+                fallback_reply="鎷嶅ソ浜嗭紝宸茬粡淇濆瓨銆?,
+                requested_arguments={"photo_name": "1鍙锋牱鍝?},
             )
 
         self.assertTrue(state["redirected"])
@@ -3504,9 +3630,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             [name for name, _args, _priority in tool_calls],
         )
         self.assertEqual("step_prepare_setup_all", conn.experiment_current_step_id)
-        self.assertIn("拍好了", reply)
-        self.assertIn("当前实验图谱还停在这一步", reply)
-        self.assertIn("烧杯编号和磁子放置", reply)
+        self.assertIn("鎷嶅ソ浜?, reply)
+        self.assertIn("褰撳墠瀹為獙鍥捐氨杩樺仠鍦ㄨ繖涓€姝?, reply)
+        self.assertIn("鐑ф澂缂栧彿鍜岀瀛愭斁缃?, reply)
         recent_state = getattr(conn, "_recent_server_photo_confirmation", {})
         self.assertFalse(recent_state.get("graph_advanced"))
         self.assertEqual(
@@ -3518,7 +3644,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             recent_state.get("current_step_id"),
         )
         self.assertEqual(
-            "1-5号样品：准备烧杯与磁子",
+            "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣瀛?,
             recent_state.get("current_step_title"),
         )
         self.assertGreater(recent_state.get("graph_refresh_checked_at", 0.0), 0.0)
@@ -3540,9 +3666,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_prepare_setup_all",
-                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                                 "prompts": {
-                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                                 },
                             },
                         }
@@ -3552,9 +3678,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_sample1_2_add_kbr_water_nabh4",
-                            "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                            "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘村苟鍔犲叆NaBH4",
                             "prompts": {
-                                "instruction": "先加入 KBr 和纯水，再快速加入 NaBH4 并持续搅拌。",
+                                "instruction": "鍏堝姞鍏?KBr 鍜岀函姘达紝鍐嶅揩閫熷姞鍏?NaBH4 骞舵寔缁悈鎷屻€?,
                             },
                         },
                     }
@@ -3578,7 +3704,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 return {
                     "result": {
                         "ok": False,
-                        "message": "无法跳转到 step_sample1_5_photo_confirm：前置步骤未完成: step_sample1_2_add_kbr_water_nabh4",
+                        "message": "鏃犳硶璺宠浆鍒?step_sample1_5_photo_confirm锛氬墠缃楠ゆ湭瀹屾垚: step_sample1_2_add_kbr_water_nabh4",
                     }
                 }
             if tool_name == "get_progress_summary":
@@ -3588,10 +3714,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_sample1_2_add_kbr_water_nabh4",
-                                "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘村苟鍔犲叆NaBH4",
                             },
                             "current_step_details": {
-                                "instruction": "先加入 KBr 和纯水，再快速加入 NaBH4 并持续搅拌。",
+                                "instruction": "鍏堝姞鍏?KBr 鍜岀函姘达紝鍐嶅揩閫熷姞鍏?NaBH4 骞舵寔缁悈鎷屻€?,
                             },
                         },
                     }
@@ -3610,19 +3736,19 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "photo_meta": {
                         "found": True,
-                        "file_name": "1号样品_20260505_171900.png",
-                        "mirrored_path": "C:/demo/1号样品_20260505_171900.png",
+                        "file_name": "1鍙锋牱鍝乢20260505_171900.png",
+                        "mirrored_path": "C:/demo/1鍙锋牱鍝乢20260505_171900.png",
                     }
                 },
-                fallback_reply="拍好了，已经保存。",
-                requested_arguments={"photo_name": "1号样品"},
+                fallback_reply="鎷嶅ソ浜嗭紝宸茬粡淇濆瓨銆?,
+                requested_arguments={"photo_name": "1鍙锋牱鍝?},
             )
 
-        self.assertIn("拍好了", reply)
-        self.assertIn("当前实验图谱还停在这一步", reply)
+        self.assertIn("鎷嶅ソ浜?, reply)
+        self.assertIn("褰撳墠瀹為獙鍥捐氨杩樺仠鍦ㄨ繖涓€姝?, reply)
         self.assertIn("KBr", reply)
         self.assertIn("NaBH4", reply)
-        self.assertNotIn("前置步骤未完成", reply)
+        self.assertNotIn("鍓嶇疆姝ラ鏈畬鎴?, reply)
         self.assertNotIn("step_sample1_5_photo_confirm", reply)
         self.assertEqual("step_sample1_2_add_kbr_water_nabh4", conn.experiment_current_step_id)
         self.assertIn(
@@ -3635,14 +3761,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_sample1_2_add_kbr_water_nabh4",
-                "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘村苟鍔犲叆NaBH4",
                 "interaction": {
                     "fast_path_mode": "observation_record_step",
                 },
                 "prompts": {
                     "instruction": (
-                        "完成 1 号样品 KBr 和纯水加入并混匀后，快速加入 NaBH4；"
-                        "完成后进入本样品拍照记录步骤。"
+                        "瀹屾垚 1 鍙锋牱鍝?KBr 鍜岀函姘村姞鍏ュ苟娣峰寑鍚庯紝蹇€熷姞鍏?NaBH4锛?
+                        "瀹屾垚鍚庤繘鍏ユ湰鏍峰搧鎷嶇収璁板綍姝ラ銆?
                     ),
                 },
                 "record_schema": {
@@ -3651,12 +3777,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "id": "step_sample1_5_photo_confirm",
-                "title": "1号样品：颜色稳定后拍照记录",
+                "title": "1鍙锋牱鍝侊細棰滆壊绋冲畾鍚庢媿鐓ц褰?,
                 "interaction": {
                     "fast_path_mode": "photo_confirmation_step",
                 },
                 "prompts": {
-                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                    "instruction": "棰滆壊绋冲畾鍚庢媿鐓ц褰曞綋鍓嶆牱鍝侀鑹诧紝骞惰繘鍏?2 鍙锋牱鍝併€?,
                 },
                 "record_schema": {
                     "photo_taken": {"type": "bool"},
@@ -3667,7 +3793,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="1号样品颜色已经稳定，现在可以拍照吗？",
+                content="1鍙锋牱鍝侀鑹插凡缁忕ǔ瀹氾紝鐜板湪鍙互鎷嶇収鍚楋紵",
             )
         )
 
@@ -3675,10 +3801,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             conn,
             {
                 "photo_meta": {
-                    "file_name": "1号样品_20260504_145218.png",
+                    "file_name": "1鍙锋牱鍝乢20260504_145218.png",
                 }
             },
-            requested_arguments={"photo_name": "1号样品照片"},
+            requested_arguments={"photo_name": "1鍙锋牱鍝佺収鐗?},
         )
 
         self.assertEqual("step_sample1_5_photo_confirm", inferred)
@@ -3688,12 +3814,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_sample1_5_photo_confirm",
-                "title": "1号样品：颜色稳定后拍照记录",
+                "title": "1鍙锋牱鍝侊細棰滆壊绋冲畾鍚庢媿鐓ц褰?,
                 "interaction": {
                     "fast_path_mode": "photo_confirmation_step",
                 },
                 "prompts": {
-                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                    "instruction": "棰滆壊绋冲畾鍚庢媿鐓ц褰曞綋鍓嶆牱鍝侀鑹诧紝骞惰繘鍏?2 鍙锋牱鍝併€?,
                 },
                 "record_schema": {
                     "photo_taken": {"type": "bool"},
@@ -3702,10 +3828,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             },
         ]
         conn.dialogue.put(
-            Message(role="user", content="1号样品颜色已经稳定了。")
+            Message(role="user", content="1鍙锋牱鍝侀鑹插凡缁忕ǔ瀹氫簡銆?)
         )
         conn.dialogue.put(
-            Message(role="assistant", content="现在可以拍照吗？")
+            Message(role="assistant", content="鐜板湪鍙互鎷嶇収鍚楋紵")
         )
 
         inferred = intentHandler._infer_photo_confirmation_step_id_from_context(
@@ -3715,7 +3841,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "file_name": "capture.png",
                 }
             },
-            requested_arguments={"question": "请拍摄当前样品的照片。"},
+            requested_arguments={"question": "璇锋媿鎽勫綋鍓嶆牱鍝佺殑鐓х墖銆?},
         )
 
         self.assertEqual("step_sample1_5_photo_confirm", inferred)
@@ -3724,16 +3850,16 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn = _FakeConn()
         conn.device_id = "94:a9:90:27:3c:84"
         conn.dialogue.put(
-            Message(role="user", content="1号样品颜色已经稳定了。")
+            Message(role="user", content="1鍙锋牱鍝侀鑹插凡缁忕ǔ瀹氫簡銆?)
         )
         conn.dialogue.put(
-            Message(role="assistant", content="现在可以拍照吗？")
+            Message(role="assistant", content="鐜板湪鍙互鎷嶇収鍚楋紵")
         )
 
         request = intentHandler._build_pending_server_photo_request_fixed(conn)
 
         self.assertEqual("94:a9:90:27:3c:84", request["device_id"])
-        self.assertEqual("1号样品", request.get("photo_name"))
+        self.assertEqual("1鍙锋牱鍝?, request.get("photo_name"))
 
     async def test_server_photo_timeout_recovery_uses_latest_photo_and_continues(self):
         conn = _FakeConn()
@@ -3756,7 +3882,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     return {
                         "success": True,
                         "photo_meta": {
-                            "file_name": "旧照片.png",
+                            "file_name": "鏃х収鐗?png",
                             "local_path": "C:/demo/old.png",
                             "mtime": 100.0,
                         },
@@ -3764,7 +3890,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 return {
                     "success": True,
                     "photo_meta": {
-                        "file_name": "一号样品_20260430_105937.png",
+                        "file_name": "涓€鍙锋牱鍝乢20260430_105937.png",
                         "local_path": "C:/demo/new.png",
                         "mtime": 101.0,
                     },
@@ -3783,10 +3909,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         ):
             photo_meta = intentHandler._extract_photo_result_meta(payload)
             self.assertTrue(photo_meta["found"])
-            self.assertIn("一号样品", photo_meta["file_name"])
-            self.assertEqual("一号样品", photo_meta["requested_photo_name"])
-            self.assertEqual("一号样品", requested_arguments["photo_name"])
-            return "接下来做这一步：观察颜色。做好后告诉我。"
+            self.assertIn("涓€鍙锋牱鍝?, photo_meta["file_name"])
+            self.assertEqual("涓€鍙锋牱鍝?, photo_meta["requested_photo_name"])
+            self.assertEqual("涓€鍙锋牱鍝?, requested_arguments["photo_name"])
+            return "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細瑙傚療棰滆壊銆傚仛濂藉悗鍛婅瘔鎴戙€?
 
         def fake_speak_txt(_conn, text):
             spoken.append(text)
@@ -3812,14 +3938,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                                 conn,
                                 {
                                     "device_id": conn.device_id,
-                                    "question": "请拍摄一号样品当前状态的照片。",
-                                    "photo_name": "一号样品",
+                                    "question": "璇锋媿鎽勪竴鍙锋牱鍝佸綋鍓嶇姸鎬佺殑鐓х墖銆?,
+                                    "photo_name": "涓€鍙锋牱鍝?,
                                 },
                             )
 
         self.assertTrue(handled)
         self.assertEqual(
-            ["接下来做这一步：观察颜色。做好后告诉我。"],
+            ["鎺ヤ笅鏉ュ仛杩欎竴姝ワ細瑙傚療棰滆壊銆傚仛濂藉悗鍛婅瘔鎴戙€?],
             spoken,
         )
         self.assertEqual(
@@ -3831,13 +3957,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn = _FakeConn()
         conn.device_id = "94:a9:90:27:3c:84"
         conn.dialogue.put(
-            Message(role="assistant", content="现在给1号样品拍照确认。现在可以拍照吗？")
+            Message(role="assistant", content="鐜板湪缁?鍙锋牱鍝佹媿鐓х‘璁ゃ€傜幇鍦ㄥ彲浠ユ媿鐓у悧锛?)
         )
         conn._recent_server_photo_confirmation = {
             "captured_at": time.time(),
             "sample_index": 1,
-            "sample_name": "1号样品",
-            "next_step_reply": "接下来做这一步：2号样品先加入溴化钾和纯水。",
+            "sample_name": "1鍙锋牱鍝?,
+            "next_step_reply": "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細2鍙锋牱鍝佸厛鍔犲叆婧村寲閽惧拰绾按銆?,
         }
         sent = []
         spoken = []
@@ -3863,8 +3989,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "_build_pending_server_photo_request_fixed",
                     return_value={
                         "device_id": conn.device_id,
-                        "question": "请拍摄1号样品当前状态的照片。",
-                        "photo_name": "1号样品",
+                        "question": "璇锋媿鎽?鍙锋牱鍝佸綋鍓嶇姸鎬佺殑鐓х墖銆?,
+                        "photo_name": "1鍙锋牱鍝?,
                     },
                 ):
                     with patch.object(
@@ -3885,14 +4011,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                                 ):
                                     handled = await intentHandler.handle_pending_server_photo_confirmation(
                                         conn,
-                                        "可以拍照",
-                                        "可以拍照",
+                                        "鍙互鎷嶇収",
+                                        "鍙互鎷嶇収",
                                     )
 
         self.assertTrue(handled)
-        self.assertEqual(["可以拍照"], sent)
+        self.assertEqual(["鍙互鎷嶇収"], sent)
         self.assertEqual(
-            ["接下来做这一步：2号样品先加入溴化钾和纯水。"],
+            ["鎺ヤ笅鏉ュ仛杩欎竴姝ワ細2鍙锋牱鍝佸厛鍔犲叆婧村寲閽惧拰绾按銆?],
             spoken,
         )
 
@@ -3917,8 +4043,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "开始测量",
-                        "开始测量",
+                        "寮€濮嬫祴閲?,
+                        "寮€濮嬫祴閲?,
                     )
 
         self.assertTrue(handled)
@@ -3945,8 +4071,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [
-                "先不要放任何液体，我先进行暗电流和空气基线准备。",
-                "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。",
+                "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾垜鍏堣繘琛屾殫鐢垫祦鍜岀┖姘斿熀绾垮噯澶囥€?,
+                "杩欎竴姝ヨ繕缂虹函姘寸┖鐧斤紝璇峰厛鎶?1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥斁鍏ョ函姘存瘮鑹茬毧锛屾斁濂藉悗鍛婅瘔鎴戝彲浠ュ紑濮嬫壂鎻忋€?,
             ],
             spoken,
         )
@@ -3968,8 +4094,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "开始扫描。",
-                        "开始扫描。",
+                        "寮€濮嬫壂鎻忋€?,
+                        "寮€濮嬫壂鎻忋€?,
                     )
 
         self.assertTrue(handled)
@@ -4014,7 +4140,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "fallback_reply": fallback_reply,
                 }
             )
-            return True, "接下来做这一步：记录 1-5 号样品光谱。"
+            return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細璁板綍 1-5 鍙锋牱鍝佸厜璋便€?
 
         def fake_speak_txt(_conn, text):
             spoken.append(text)
@@ -4029,8 +4155,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "都放好了",
-                            "都放好了",
+                            "閮芥斁濂戒簡",
+                            "閮芥斁濂戒簡",
                         )
 
         self.assertTrue(handled)
@@ -4054,12 +4180,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "shared_air_baseline_ready": True,
                 "pure_water_blank_ready": True,
                 "reference_cuvette_ready": True,
-                "observations": "共享暗电流、空气基线和纯水空白已准备完成",
+                "observations": "鍏变韩鏆楃數娴併€佺┖姘斿熀绾垮拰绾按绌虹櫧宸插噯澶囧畬鎴?,
             },
             completed[0]["fields"],
         )
         self.assertTrue(completed[0]["auto_advance"])
-        self.assertEqual(["接下来做这一步：记录 1-5 号样品光谱。"], spoken)
+        self.assertEqual(["鎺ヤ笅鏉ュ仛杩欎竴姝ワ細璁板綍 1-5 鍙锋牱鍝佸厜璋便€?], spoken)
 
     async def test_handle_direct_uvvis_shared_blank_followup_accepts_start_scan_phrase(self):
         conn = _FakeConn()
@@ -4083,8 +4209,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "开始扫描",
-                        "开始扫描",
+                        "寮€濮嬫壂鎻?,
+                        "寮€濮嬫壂鎻?,
                     )
 
         self.assertTrue(handled)
@@ -4109,8 +4235,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             Message(
                 role="assistant",
                 content=(
-                    "先不要放任何液体，把样品位和参比位都留空，"
-                    "准备做暗电流和空气基线。做好了告诉我。"
+                    "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾妸鏍峰搧浣嶅拰鍙傛瘮浣嶉兘鐣欑┖锛?
+                    "鍑嗗鍋氭殫鐢垫祦鍜岀┖姘斿熀绾裤€傚仛濂戒簡鍛婅瘔鎴戙€?
                 ),
             )
         )
@@ -4141,8 +4267,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "已经放好了，可以开始了。",
-                        "已经放好了，可以开始了。",
+                        "宸茬粡鏀惧ソ浜嗭紝鍙互寮€濮嬩簡銆?,
+                        "宸茬粡鏀惧ソ浜嗭紝鍙互寮€濮嬩簡銆?,
                     )
 
         self.assertTrue(handled)
@@ -4183,8 +4309,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(intentHandler._UVVIS_SHARED_BLANK_STEP_ID, conn.experiment_current_step_id)
         self.assertEqual(
             [
-                "先不要放任何液体，我先进行暗电流和空气基线准备。",
-                "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿。放好了告诉我。",
+                "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾垜鍏堣繘琛屾殫鐢垫祦鍜岀┖姘斿熀绾垮噯澶囥€?,
+                "杩欎竴姝ヨ繕缂虹函姘寸┖鐧斤紝璇峰厛鎶?1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥斁鍏ョ函姘存瘮鑹茬毧锛屾斁濂藉悗鍛婅瘔鎴戝彲浠ュ紑濮嬫壂鎻忋€?,
             ],
             spoken,
         )
@@ -4196,8 +4322,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             Message(
                 role="assistant",
                 content=(
-                    "先不要放任何液体，把样品位和参比位都留空，准备做暗电流和空气基线。"
-                    "可以开始扫描时直接告诉我开始扫描。"
+                    "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾妸鏍峰搧浣嶅拰鍙傛瘮浣嶉兘鐣欑┖锛屽噯澶囧仛鏆楃數娴佸拰绌烘皵鍩虹嚎銆?
+                    "鍙互寮€濮嬫壂鎻忔椂鐩存帴鍛婅瘔鎴戝紑濮嬫壂鎻忋€?
                 ),
             )
         )
@@ -4224,8 +4350,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "开始扫描。",
-                        "开始扫描。",
+                        "寮€濮嬫壂鎻忋€?,
+                        "寮€濮嬫壂鎻忋€?,
                     )
 
         self.assertTrue(handled)
@@ -4287,14 +4413,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "Uvvis现在正在工作吗？",
-                        "Uvvis现在正在工作吗？",
+                        "Uvvis鐜板湪姝ｅ湪宸ヤ綔鍚楋紵",
+                        "Uvvis鐜板湪姝ｅ湪宸ヤ綔鍚楋紵",
                     )
 
         self.assertTrue(handled)
-        self.assertEqual(["Uvvis现在正在工作吗？"], started)
+        self.assertEqual(["Uvvis鐜板湪姝ｅ湪宸ヤ綔鍚楋紵"], started)
         self.assertEqual(
-            ["UV-Vis 现在没有在工作。暗电流和空气基线已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"],
+            ["UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣溿€傛殫鐢垫祦鏍℃宸茬粡瀹屾垚锛岃繖涓€姝ュ湪绛変綘鎶婁竴鍒颁簲鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁涓€涓函姘存瘮鑹茬毧銆?],
             spoken,
         )
 
@@ -4310,7 +4436,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 return {
                     "result": {
                         "ok": False,
-                        "message": "无法跳转到 step_3_uv_vis_shared_dark_blank_prep：前置步骤未完成: step_2_tyndall_effect",
+                        "message": "鏃犳硶璺宠浆鍒?step_3_uv_vis_shared_dark_blank_prep锛氬墠缃楠ゆ湭瀹屾垚: step_2_tyndall_effect",
                     }
                 }
             raise AssertionError(f"unexpected graph tool call: {tool_name}")
@@ -4328,8 +4454,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_direct_uvvis_intent(
                     conn,
-                    "开始 UV-Vis 前置校正。",
-                    "开始 UV-Vis 前置校正。",
+                    "寮€濮?UV-Vis 鍓嶇疆鏍℃銆?,
+                    "寮€濮?UV-Vis 鍓嶇疆鏍℃銆?,
                 )
 
         self.assertTrue(handled)
@@ -4347,7 +4473,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             graph_calls,
         )
         self.assertEqual(
-            ["当前实验图谱还没推进到 UV-Vis 前置校正，先完成丁达尔现象观察。"],
+            ["褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒?UV-Vis 鍓嶇疆鏍℃锛屽厛瀹屾垚涓佽揪灏旂幇璞¤瀵熴€?],
             spoken,
         )
 
@@ -4364,14 +4490,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn.dialogue.put(
             Message(
                 role="assistant",
-                content="拍好了，已经保存。当前实验图谱还停在这一步，先按这一步继续。",
+                content="鎷嶅ソ浜嗭紝宸茬粡淇濆瓨銆傚綋鍓嶅疄楠屽浘璋辫繕鍋滃湪杩欎竴姝ワ紝鍏堟寜杩欎竴姝ョ户缁€?,
             )
         )
 
         handled = await intentHandler.handle_direct_uvvis_intent(
             conn,
-            "继续下一步。",
-            "继续下一步。",
+            "缁х画涓嬩竴姝ャ€?,
+            "缁х画涓嬩竴姝ャ€?,
         )
 
         self.assertFalse(handled)
@@ -4402,7 +4528,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "fallback_reply": fallback_reply,
                 }
             )
-            return True, "接下来做这一步：装入比色皿。"
+            return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細瑁呭叆姣旇壊鐨裤€?
 
         def fake_speak_txt(_conn, text):
             spoken.append(text)
@@ -4417,8 +4543,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "开始测量",
-                            "开始测量",
+                            "寮€濮嬫祴閲?,
+                            "寮€濮嬫祴閲?,
                         )
 
         self.assertTrue(handled)
@@ -4442,15 +4568,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "shared_air_baseline_ready": True,
                 "pure_water_blank_ready": True,
                 "reference_cuvette_ready": True,
-                "observations": "共享暗电流、空气基线和纯水空白已完成或可复用",
+                "observations": "鍏变韩鏆楃數娴併€佺┖姘斿熀绾垮拰绾按绌虹櫧宸插畬鎴愭垨鍙鐢?,
             },
             completed[0]["fields"],
         )
         self.assertTrue(completed[0]["auto_advance"])
         self.assertEqual(
             [
-                "先不要放任何液体，我先进行暗电流和空气基线准备。",
-                "接下来做这一步：装入比色皿。",
+                "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾垜鍏堣繘琛屾殫鐢垫祦鍜岀┖姘斿熀绾垮噯澶囥€?,
+                "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細瑁呭叆姣旇壊鐨裤€?,
             ],
             spoken,
         )
@@ -4477,7 +4603,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "fallback_reply": fallback_reply,
                 }
             )
-            return True, "接下来做这一步：纯水空白校正。"
+            return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細绾按绌虹櫧鏍℃銆?
 
         def fake_speak_txt(_conn, text):
             spoken.append(text)
@@ -4492,19 +4618,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "开始测量",
-                            "开始测量",
+                            "寮€濮嬫祴閲?,
+                            "寮€濮嬫祴閲?,
                         )
 
         self.assertTrue(handled)
         self.assertEqual(
             [
                 (
-                    "uvvis_measure_spectra",
+                    "uvvis_prepare_dark_current",
                     {
                         "session_key": "lease-1",
-                        "sample_positions": [1, 2, 3, 4, 5],
-                        "ready_for_samples": False,
                     },
                 )
             ],
@@ -4514,25 +4638,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {
                 "shared_dark_current_ready": True,
-                "shared_air_baseline_ready": True,
-                "pure_water_blank_status_checked": True,
-                "observations": "共享暗电流和空气能量校正已完成，并已确认当前批次纯水空白状态。",
+                "observations": "鍏变韩鏆楃數娴佹牎姝ｅ凡瀹屾垚銆?,
             },
             completed[0]["fields"],
         )
         self.assertTrue(completed[0]["auto_advance"])
         self.assertEqual(
-            {
-                "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
-                "phase": "await_pure_water_blank",
-                "session_key": "lease-1",
-            },
-            getattr(conn, "_uvvis_direct_state", {}),
-        )
-        self.assertEqual(
             [
-                "先不要放任何液体，我先进行暗电流和空气能量准备。",
-                "暗电流和空气能量校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好了告诉我，我们再做纯水空白校正。",
+                "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾垜鍏堣繘琛屾殫鐢垫祦鏍℃銆?,
+                "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細绾按绌虹櫧鏍℃銆?,
             ],
             spoken,
         )
@@ -4562,19 +4676,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "开始扫描",
-                            "开始扫描",
+                            "寮€濮嬫壂鎻?,
+                            "寮€濮嬫壂鎻?,
                         )
 
         self.assertTrue(handled)
         self.assertEqual(
             [
                 (
-                    "uvvis_measure_spectra",
+                    "uvvis_prepare_dark_current",
                     {
                         "session_key": "lease-1",
-                        "sample_positions": [1, 2, 3, 4, 5],
-                        "ready_for_samples": False,
                     },
                 )
             ],
@@ -4588,8 +4700,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             Message(
                 role="assistant",
                 content=(
-                    "当前步骤是 1-5号样品：暗电流和空气能量校正。"
-                    "先不要放任何液体，我先进行暗电流和空气能量准备。"
+                    "褰撳墠姝ラ鏄?1-5鍙锋牱鍝侊細鏆楃數娴佹牎姝ｃ€?
+                    "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾垜鍏堣繘琛屾殫鐢垫祦鏍℃銆?
                 ),
             )
         )
@@ -4624,8 +4736,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "开始扫描",
-                            "开始扫描",
+                            "寮€濮嬫壂鎻?,
+                            "寮€濮嬫壂鎻?,
                         )
 
         self.assertTrue(handled)
@@ -4645,11 +4757,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [
                 (
-                    "uvvis_measure_spectra",
+                    "uvvis_prepare_dark_current",
                     {
                         "session_key": "lease-1",
-                        "sample_positions": [1, 2, 3, 4, 5],
-                        "ready_for_samples": False,
                     },
                 )
             ],
@@ -4671,8 +4781,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_direct_uvvis_intent(
                     conn,
-                    "开始扫描",
-                    "开始扫描",
+                    "寮€濮嬫壂鎻?,
+                    "寮€濮嬫壂鎻?,
                 )
 
         self.assertTrue(handled)
@@ -4686,7 +4796,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [
-                "暗电流和空气能量校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好了告诉我，我们再做纯水空白校正。",
+                "鏆楃數娴佹牎姝ｅ凡缁忓畬鎴愩€傝鍦?1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁鍏ョ函姘存瘮鑹茬毧锛屽叡 6 涓紝鏀惧ソ鍚庡憡璇夋垜鍙互寮€濮嬫壂鎻忋€?,
             ],
             spoken,
         )
@@ -4718,7 +4828,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "fallback_reply": fallback_reply,
                 }
             )
-            return True, "接下来做这一步：记录 1-5 号样品光谱。"
+            return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細璁板綍 1-5 鍙锋牱鍝佸厜璋便€?
 
         def fake_speak_txt(_conn, text):
             spoken.append(text)
@@ -4733,8 +4843,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "都放好了",
-                            "都放好了",
+                            "閮芥斁濂戒簡",
+                            "閮芥斁濂戒簡",
                         )
 
         self.assertTrue(handled)
@@ -4757,15 +4867,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "fields": {
                         "pure_water_blank_ready": True,
                         "reference_cuvette_ready": True,
-                        "observations": "当前批次纯水空白已记录完成，参比位纯水比色皿可继续用于后续测量。",
+                        "observations": "褰撳墠鎵规绾按绌虹櫧宸茶褰曞畬鎴愶紝鍙傛瘮浣嶇函姘存瘮鑹茬毧鍙户缁敤浜庡悗缁祴閲忋€?,
                     },
                     "auto_advance": True,
-                    "fallback_reply": "纯水空白已经准备好了。",
+                    "fallback_reply": "绾按绌虹櫧宸茬粡鍑嗗濂戒簡銆?,
                 }
             ],
             completed,
         )
-        self.assertEqual(["接下来做这一步：记录 1-5 号样品光谱。"], spoken)
+        self.assertEqual(["鎺ヤ笅鏉ュ仛杩欎竴姝ワ細璁板綍 1-5 鍙锋牱鍝佸厜璋便€?], spoken)
 
     async def test_handle_direct_uvvis_intent_stops_when_redirect_is_rejected(self):
         conn = _FakeConn()
@@ -4779,7 +4889,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 return {
                     "result": {
                         "ok": False,
-                        "message": "无法跳转到 step_3_uv_vis_shared_dark_blank_prep：前置步骤未完成: step_3_uv_vis_shared_dark_air_prep",
+                        "message": "鏃犳硶璺宠浆鍒?step_3_uv_vis_shared_dark_blank_prep锛氬墠缃楠ゆ湭瀹屾垚: step_3_uv_vis_shared_dark_air_prep",
                     }
                 }
             raise AssertionError(f"unexpected graph tool call: {tool_name}")
@@ -4797,8 +4907,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_direct_uvvis_intent(
                     conn,
-                    "开始 UV-Vis 纯水空白校正。",
-                    "开始 UV-Vis 纯水空白校正。",
+                    "寮€濮?UV-Vis 绾按绌虹櫧鏍℃銆?,
+                    "寮€濮?UV-Vis 绾按绌虹櫧鏍℃銆?,
                 )
 
         self.assertTrue(handled)
@@ -4816,14 +4926,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             graph_calls,
         )
         self.assertEqual(
-            ["当前实验图谱还没推进到 UV-Vis 的纯水空白校正，先完成共享暗电流和空气能量校正。"],
+            ["褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒?UV-Vis 鐨勭函姘寸┖鐧芥牎姝ｏ紝鍏堝畬鎴愭殫鐢垫祦鏍℃銆?],
             spoken,
         )
 
     async def test_handle_direct_uvvis_shared_blank_prep_reuses_blank_and_advances(self):
         conn = _FakeConn()
         conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_BLANK_STEP_ID
-        conn._last_uvvis_blank_baseline_state = {"blank_baseline_exists": True}
+        conn._last_uvvis_blank_baseline_state = {
+            "blank_baseline_exists": True,
+            "blank_baseline_csv": str(Path(__file__).resolve()),
+        }
         spoken = []
         completed = []
 
@@ -4838,7 +4951,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "fallback_reply": fallback_reply,
                 }
             )
-            return True, "接下来做这一步：装入比色皿。"
+            return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細瑁呭叆姣旇壊鐨裤€?
 
         def fake_speak_txt(_conn, text):
             spoken.append(text)
@@ -4852,8 +4965,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "继续下一步",
-                        "继续下一步",
+                        "缁х画涓嬩竴姝?,
+                        "缁х画涓嬩竴姝?,
                     )
 
         self.assertTrue(handled)
@@ -4863,16 +4976,126 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "fields": {
                         "pure_water_blank_ready": True,
                         "reference_cuvette_ready": True,
-                        "observations": "当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
+                        "observations": "褰撳墠鎵规绾按绌虹櫧宸茬‘璁ゅ彲澶嶇敤锛屽悗缁祴閲忓皢淇濈暀鎴栭噸鏂版斁濂藉弬姣斾綅绾按姣旇壊鐨裤€?,
                     },
                     "auto_advance": True,
-                    "fallback_reply": "当前批次纯水空白可复用，接下来装入样品比色皿。",
+                    "fallback_reply": "褰撳墠鎵规绾按绌虹櫧鍙鐢紝鎺ヤ笅鏉ヨ鍏ユ牱鍝佹瘮鑹茬毧銆?,
                 }
             ],
             completed,
         )
         self.assertEqual({}, getattr(conn, "_uvvis_direct_state", {}))
-        self.assertEqual(["接下来做这一步：装入比色皿。"], spoken)
+        self.assertEqual(["鎺ヤ笅鏉ュ仛杩欎竴姝ワ細瑁呭叆姣旇壊鐨裤€?], spoken)
+
+    async def test_handle_direct_uvvis_shared_blank_prep_reuses_blank_from_shared_dir(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_BLANK_STEP_ID
+        spoken = []
+        completed = []
+
+        with TemporaryDirectory() as workspace_dir:
+            shared_dir = (
+                Path(workspace_dir)
+                / "lab_runs"
+                / "exp1_AgNPs_synthesis"
+                / "data"
+                / "uv_data_common"
+            )
+            shared_dir.mkdir(parents=True, exist_ok=True)
+            shared_blank_csv = shared_dir / "pure_water_blank_latest.csv"
+            shared_blank_csv.write_text("wavelength_nm,absorbance\n", encoding="utf-8")
+            conn.config = {
+                "LLM": {
+                    "codex_app_server": {
+                        "workspace": workspace_dir,
+                    }
+                }
+            }
+
+            async def fake_ensure_session_key(_conn):
+                return "lease-1", ""
+
+            async def fake_complete(_conn, *, fields, auto_advance, fallback_reply=""):
+                completed.append(
+                    {
+                        "fields": dict(fields),
+                        "auto_advance": auto_advance,
+                        "fallback_reply": fallback_reply,
+                    }
+                )
+                return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細瑁呭叆姣旇壊鐨裤€?
+                return True, "閹恒儰绗呴弶銉ヤ粵鏉╂瑤绔村銉窗鐟佸懎鍙嗗В鏃囧閻ㄨ￥鈧?"
+
+            def fake_speak_txt(_conn, text):
+                spoken.append(text)
+
+            with patch.object(
+                intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key
+            ):
+                with patch.object(
+                    intentHandler,
+                    "_complete_experiment_step_with_fields",
+                    fake_complete,
+                ):
+                    with patch.object(
+                        intentHandler,
+                        "_execute_uvvis_tool_payload",
+                        AsyncMock(),
+                    ) as fake_execute:
+                        with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                            handled = await intentHandler.handle_direct_uvvis_intent(
+                                conn,
+                                "缂佈呯敾娑撳绔村?",
+                                "缂佈呯敾娑撳绔村?",
+                            )
+
+            if not handled:
+                with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
+                    with patch.object(
+                        intentHandler,
+                        "_complete_experiment_step_with_fields",
+                        fake_complete,
+                    ):
+                        with patch.object(
+                            intentHandler,
+                            "_execute_uvvis_tool_payload",
+                            AsyncMock(),
+                        ) as fallback_execute:
+                            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                                handled = await intentHandler._handle_uvvis_shared_blank_prep(
+                                    conn,
+                                    "开始扫描",
+                                    "开始扫描",
+                                    {},
+                                )
+                        fallback_execute.assert_not_awaited()
+            self.assertTrue(handled)
+            fake_execute.assert_not_awaited()
+
+        self.assertEqual(
+            [
+                {
+                    "fields": {
+                        "pure_water_blank_ready": True,
+                        "reference_cuvette_ready": True,
+                        "observations": "瑜版挸澧犻幍瑙勵偧缁绢垱鎸夌粚铏规瀹歌尙鈥樼拋銈呭讲婢跺秶鏁ら敍灞芥倵缂侇厽绁撮柌蹇撶殺娣囨繄鏆€閹存牠鍣搁弬鐗堟杹婵傝棄寮В鏂剧秴缁绢垱鎸夊В鏃囧閻ㄨ￥鈧?",
+                    },
+                    "auto_advance": True,
+                    "fallback_reply": "瑜版挸澧犻幍瑙勵偧缁绢垱鎸夌粚铏规閸欘垰顦查悽顭掔礉閹恒儰绗呴弶銉棅閸忋儲鐗遍崫浣圭槷閼硅尙姣ч妴?",
+                }
+            ],
+            completed,
+        )
+        self.assertEqual(
+            str(shared_blank_csv.resolve()),
+            getattr(conn, "_last_uvvis_blank_baseline_state", {}).get("blank_baseline_csv"),
+        )
+        self.assertEqual(
+            "reused_from_shared_dir",
+            getattr(conn, "_last_uvvis_blank_baseline_state", {}).get("blank_baseline_status"),
+        )
+        self.assertEqual({}, getattr(conn, "_uvvis_direct_state", {}))
+        self.assertEqual(["閹恒儰绗呴弶銉ヤ粵鏉╂瑤绔村銉窗鐟佸懎鍙嗗В鏃囧閻ㄨ￥鈧?"], spoken)
 
     async def test_handle_direct_uvvis_spectra_measurement_records_all_samples(self):
         conn = _FakeConn()
@@ -4944,7 +5167,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "fallback_reply": fallback_reply,
                     }
                 )
-                return True, "接下来做这一步：清洗比色皿。"
+                return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細娓呮礂姣旇壊鐨裤€?
 
             def fake_speak_txt(_conn, text):
                 spoken.append(text)
@@ -4959,8 +5182,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                             handled = await intentHandler.handle_direct_uvvis_intent(
                                 conn,
-                                "都放好了",
-                                "都放好了",
+                                "閮芥斁濂戒簡",
+                                "閮芥斁濂戒簡",
                             )
 
             self.assertTrue(handled)
@@ -4978,7 +5201,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "sample_4_absorbance_max": 0.4,
                     "sample_5_absorbance_max": 0.5,
                     "spectrum_saved": True,
-                    "observations": "1-5号样品批量扫描完成，1号样品λmax=410.0nm；2号样品λmax=420.0nm；3号样品λmax=430.0nm；4号样品λmax=440.0nm；5号样品λmax=450.0nm；400-700nm（10nm步长）的校正吸光度结果和光谱图已保存",
+                    "observations": "1-5鍙锋牱鍝佹壒閲忔壂鎻忓畬鎴愶紝1鍙锋牱鍝佄籱ax=410.0nm锛?鍙锋牱鍝佄籱ax=420.0nm锛?鍙锋牱鍝佄籱ax=430.0nm锛?鍙锋牱鍝佄籱ax=440.0nm锛?鍙锋牱鍝佄籱ax=450.0nm锛?00-700nm锛?0nm姝ラ暱锛夌殑鏍℃鍚稿厜搴︾粨鏋滃拰鍏夎氨鍥惧凡淇濆瓨",
                 },
                 completed[0]["fields"],
             )
@@ -4994,10 +5217,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("400", combined_csv_text)
             self.assertIn("700", combined_csv_text)
             self.assertEqual(1, len(spoken))
-            self.assertIn("1号410.0纳米", spoken[0])
-            self.assertIn("5号450.0纳米", spoken[0])
-            self.assertIn("400到700纳米每隔10纳米的校正吸光度结果和光谱图已保存", spoken[0])
-            self.assertIn("接下来做这一步：清洗比色皿。", spoken[0])
+            self.assertIn("1鍙?10.0绾崇背", spoken[0])
+            self.assertIn("5鍙?50.0绾崇背", spoken[0])
+            self.assertIn("400鍒?00绾崇背姣忛殧10绾崇背鐨勬牎姝ｅ惛鍏夊害缁撴灉鍜屽厜璋卞浘宸蹭繚瀛?, spoken[0])
+            self.assertIn("鎺ヤ笅鏉ュ仛杩欎竴姝ワ細娓呮礂姣旇壊鐨裤€?, spoken[0])
 
     async def test_handle_direct_uvvis_spectra_measurement_skips_negative_absorbance(self):
         conn = _FakeConn()
@@ -5090,8 +5313,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         with patch.object(intentHandler, "speak_txt", lambda *_args, **_kwargs: None):
                             handled = await intentHandler.handle_direct_uvvis_intent(
                                 conn,
-                                "都放好了",
-                                "都放好了",
+                                "閮芥斁濂戒簡",
+                                "閮芥斁濂戒簡",
                             )
 
             self.assertTrue(handled)
@@ -5133,8 +5356,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "都放好了",
-                            "都放好了",
+                            "閮芥斁濂戒簡",
+                            "閮芥斁濂戒簡",
                         )
 
         self.assertTrue(handled)
@@ -5152,7 +5375,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             graph_calls,
         )
         self.assertEqual(
-            ["这一步缺少纯水空白，我先退回前置校正。请先把样品位和参比位都清空，再告诉我开始。"],
+            ["杩欎竴姝ョ己灏戠函姘寸┖鐧斤紝鎴戝厛閫€鍥炲墠缃牎姝ｃ€傝鍏堟妸鏍峰搧浣嶅拰鍙傛瘮浣嶉兘娓呯┖锛屽啀鍛婅瘔鎴戝紑濮嬨€?],
             spoken,
         )
 
@@ -5207,8 +5430,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "开始动力学测量",
-                        "开始动力学测量",
+                        "寮€濮嬪姩鍔涘娴嬮噺",
+                        "寮€濮嬪姩鍔涘娴嬮噺",
                     )
 
         self.assertTrue(handled)
@@ -5241,8 +5464,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [
-                "先保持样品位为空，我先做暗电流和 400 纳米空气基线准备。",
-                "这一步指定的参比液/化学空白液还没放好，请把样品位和参比位同时放入该步骤指定的空白液，不是纯水。放好了告诉我。",
+                "鍏堜繚鎸佹牱鍝佷綅涓虹┖锛屾垜鍏堝仛鏆楃數娴佸拰 400 绾崇背绌烘皵鍩虹嚎鍑嗗銆?,
+                "杩欎竴姝ユ寚瀹氱殑鍙傛瘮娑?鍖栧绌虹櫧娑茶繕娌℃斁濂斤紝璇锋妸鏍峰搧浣嶅拰鍙傛瘮浣嶅悓鏃舵斁鍏ヨ姝ラ鎸囧畾鐨勭┖鐧芥恫锛屼笉鏄函姘淬€傛斁濂戒簡鍛婅瘔鎴戙€?,
             ],
             spoken,
         )
@@ -5274,8 +5497,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                     handled = await intentHandler.handle_direct_uvvis_intent(
                         conn,
-                        "2号位放好了",
-                        "2号位放好了",
+                        "2鍙蜂綅鏀惧ソ浜?,
+                        "2鍙蜂綅鏀惧ソ浜?,
                     )
 
         self.assertTrue(handled)
@@ -5307,7 +5530,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             getattr(conn, "_uvvis_direct_state", {}),
         )
         self.assertEqual(
-            ["液体空白已经记录好了。请把参比位保持不变，把2号样品位换成真实反应液，放好了告诉我。"],
+            ["娑蹭綋绌虹櫧宸茬粡璁板綍濂戒簡銆傝鎶婂弬姣斾綅淇濇寔涓嶅彉锛屾妸2鍙锋牱鍝佷綅鎹㈡垚鐪熷疄鍙嶅簲娑诧紝鏀惧ソ浜嗗憡璇夋垜銆?],
             spoken,
         )
 
@@ -5370,14 +5593,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                             handled = await intentHandler.handle_direct_uvvis_intent(
                                 conn,
-                                "可以开始了",
-                                "可以开始了",
+                                "鍙互寮€濮嬩簡",
+                                "鍙互寮€濮嬩簡",
                             )
 
             self.assertTrue(handled)
             self.assertEqual(1, len(completed))
             self.assertFalse(completed[0]["auto_advance"])
-            self.assertEqual("我记录好了，可以继续进行下一步了吗？", completed[0]["fallback_reply"])
+            self.assertEqual("鎴戣褰曞ソ浜嗭紝鍙互缁х画杩涜涓嬩竴姝ヤ簡鍚楋紵", completed[0]["fallback_reply"])
             for index in range(35):
                 self.assertEqual(
                     record_fields[f"t{index}_absorbance"],
@@ -5385,7 +5608,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertTrue(completed[0]["fields"]["bubble_observed"])
             self.assertEqual(
-                "3号样品400纳米动力学测量完成，共记录35个时间点。；0-34min 每分钟一个点的校正吸光度结果和动力学曲线已保存",
+                "3鍙锋牱鍝?00绾崇背鍔ㄥ姏瀛︽祴閲忓畬鎴愶紝鍏辫褰?5涓椂闂寸偣銆傦紱0-34min 姣忓垎閽熶竴涓偣鐨勬牎姝ｅ惛鍏夊害缁撴灉鍜屽姩鍔涘鏇茬嚎宸蹭繚瀛?,
                 completed[0]["fields"]["observations"],
             )
             artifacts = getattr(conn, "_last_uvvis_kinetics_artifacts", {})
@@ -5399,7 +5622,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("34,", kinetics_csv_text)
             self.assertEqual("done", getattr(conn, "_uvvis_direct_state", {}).get("phase"))
             self.assertEqual(
-                ["我记录好了，可以继续进行下一步了吗？0到34分钟每分钟一个点的校正吸光度结果和动力学曲线也已经保存。"],
+                ["鎴戣褰曞ソ浜嗭紝鍙互缁х画杩涜涓嬩竴姝ヤ簡鍚楋紵0鍒?4鍒嗛挓姣忓垎閽熶竴涓偣鐨勬牎姝ｅ惛鍏夊害缁撴灉鍜屽姩鍔涘鏇茬嚎涔熷凡缁忎繚瀛樸€?],
                 spoken,
             )
 
@@ -5421,7 +5644,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         async def fake_advance(_conn, *, fallback_reply=""):
             conn.experiment_current_step_id = intentHandler._UVVIS_ANALYSIS_STEP_ID
-            return True, "接下来做这一步：数据分析。"
+            return True, "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細鏁版嵁鍒嗘瀽銆?
 
         async def fake_release(_conn):
             released.append(True)
@@ -5435,13 +5658,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                         handled = await intentHandler.handle_direct_uvvis_intent(
                             conn,
-                            "继续下一步",
-                            "继续下一步",
+                            "缁х画涓嬩竴姝?,
+                            "缁х画涓嬩竴姝?,
                         )
 
         self.assertTrue(handled)
         self.assertEqual([True], released)
-        self.assertEqual(["接下来做这一步：数据分析。"], spoken)
+        self.assertEqual(["鎺ヤ笅鏉ュ仛杩欎竴姝ワ細鏁版嵁鍒嗘瀽銆?], spoken)
         self.assertEqual({}, getattr(conn, "_uvvis_direct_state", {}))
 
     async def test_handle_direct_uvvis_analysis_step_releases_session(self):
@@ -5463,8 +5686,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
                 handled = await intentHandler.handle_direct_uvvis_intent(
                     conn,
-                    "开始分析",
-                    "开始分析",
+                    "寮€濮嬪垎鏋?,
+                    "寮€濮嬪垎鏋?,
                 )
 
         self.assertFalse(handled)
@@ -5478,19 +5701,19 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "",
             textUtils.filter_spoken_backstage_text(
-                "我先核对一下五号样品后面的紧接步骤，避免把你带错。"
+                "鎴戝厛鏍稿涓€涓嬩簲鍙锋牱鍝佸悗闈㈢殑绱ф帴姝ラ锛岄伩鍏嶆妸浣犲甫閿欍€?
             ),
         )
         self.assertEqual(
             "",
             textUtils.filter_spoken_backstage_text(
-                "我再看一眼这一步要你回报什么。"
+                "鎴戝啀鐪嬩竴鐪艰繖涓€姝ヨ浣犲洖鎶ヤ粈涔堛€?
             ),
         )
         self.assertEqual(
             "",
             textUtils.filter_spoken_backstage_text(
-                "我接着确认一号样品这一小步的记录项，只记你刚才报的颜色和时间。"
+                "鎴戞帴鐫€纭涓€鍙锋牱鍝佽繖涓€灏忔鐨勮褰曢」锛屽彧璁颁綘鍒氭墠鎶ョ殑棰滆壊鍜屾椂闂淬€?
             ),
         )
 
@@ -5517,13 +5740,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_add_sodium_citrate_all",
-                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                                 "interaction": {
                                     "fast_path_mode": "confirmation_step",
                                     "capabilities": ["procedural_guidance", "step_confirmation"],
                                 },
                                 "prompts": {
-                                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?,
                                 },
                             },
                         }
@@ -5533,9 +5756,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_add_agno3_all",
-                            "title": "1-5号样品：统一加入AgNO3",
+                            "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                             "prompts": {
-                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?5.00 mL AgNO3銆?,
                             },
                         },
                     }
@@ -5559,7 +5782,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "sodium_citrate_added_to_all",
                                 "type": "bool",
-                                "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                                "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                             }
                         ],
                     }
@@ -5587,10 +5810,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_add_agno3_all",
-                                "title": "1-5号样品：统一加入AgNO3",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                             },
                             "current_step_details": {
-                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?5.00 mL AgNO3銆?,
                             },
                         },
                     }
@@ -5603,12 +5826,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "按一到五号顺序完成全部柠檬酸钠加入",
-                    "按一到五号顺序完成全部柠檬酸钠加入",
+                    "鎸変竴鍒颁簲鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
+                    "鎸変竴鍒颁簲鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["按一到五号顺序完成全部柠檬酸钠加入"], sent)
+        self.assertEqual(["鎸変竴鍒颁簲鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?], sent)
         self.assertEqual(1, len(spoken))
         self.assertIn("AgNO3", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
@@ -5640,9 +5863,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_prepare_setup_all",
-                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                                 "prompts": {
-                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                                 },
                             },
                         }
@@ -5652,9 +5875,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_add_sodium_citrate_all",
-                            "title": "1-5号样品：统一加入柠檬酸钠",
+                            "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                             "prompts": {
-                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?1.00 mL 鏌犳閰搁挔銆?,
                             },
                         },
                     }
@@ -5682,12 +5905,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "beakers_labeled",
                                 "type": "bool",
-                                "description": "已完成 1-5 号烧杯编号",
+                                "description": "宸插畬鎴?1-5 鍙风儳鏉紪鍙?,
                             },
                             {
                                 "name": "stir_bars_added_to_all",
                                 "type": "bool",
-                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                                "description": "宸蹭负 1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
                             },
                         ],
                     }
@@ -5719,10 +5942,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_add_sodium_citrate_all",
-                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                             },
                             "current_step_details": {
-                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?1.00 mL 鏌犳閰搁挔銆?,
                             },
                         },
                     }
@@ -5735,14 +5958,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_strict_graph_intent(
                     conn,
-                    "全部完成",
-                    "全部完成",
+                    "鍏ㄩ儴瀹屾垚",
+                    "鍏ㄩ儴瀹屾垚",
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["全部完成"], sent)
+        self.assertEqual(["鍏ㄩ儴瀹屾垚"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("柠檬酸钠", spoken[0])
+        self.assertIn("鏌犳閰搁挔", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
         self.assertIn(
             "proceed_to_next_step",
@@ -5771,9 +5994,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_prepare_setup_all",
-                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                                 "prompts": {
-                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                                 },
                             },
                         }
@@ -5783,9 +6006,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_add_sodium_citrate_all",
-                            "title": "1-5号样品：统一加入柠檬酸钠",
+                            "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                             "prompts": {
-                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?1.00 mL 鏌犳閰搁挔銆?,
                             },
                         },
                     }
@@ -5813,12 +6036,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "beakers_labeled",
                                 "type": "bool",
-                                "description": "已完成 1-5 号烧杯编号",
+                                "description": "宸插畬鎴?1-5 鍙风儳鏉紪鍙?,
                             },
                             {
                                 "name": "stir_bars_added_to_all",
                                 "type": "bool",
-                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                                "description": "宸蹭负 1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
                             },
                         ],
                     }
@@ -5846,10 +6069,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_add_sodium_citrate_all",
-                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                             },
                             "current_step_details": {
-                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?1.00 mL 鏌犳閰搁挔銆?,
                             },
                         },
                     }
@@ -5862,14 +6085,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "当前步骤已完成",
-                    "当前步骤已完成",
+                    "褰撳墠姝ラ宸插畬鎴?,
+                    "褰撳墠姝ラ宸插畬鎴?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["当前步骤已完成"], sent)
+        self.assertEqual(["褰撳墠姝ラ宸插畬鎴?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("柠檬酸钠", spoken[0])
+        self.assertIn("鏌犳閰搁挔", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
 
     async def test_confirmation_statement_without_interaction_metadata_reports_missing_field(self):
@@ -5894,9 +6117,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_add_sodium_citrate_all",
-                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                                 "prompts": {
-                                    "instruction": "按 1 到 5 号顺序统一完成柠檬酸钠加入。",
+                                    "instruction": "鎸?1 鍒?5 鍙烽『搴忕粺涓€瀹屾垚鏌犳閰搁挔鍔犲叆銆?,
                                 },
                             },
                         }
@@ -5906,9 +6129,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_add_agno3_all",
-                            "title": "1-5号样品：统一加入AgNO3",
+                            "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                             "prompts": {
-                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?5.00 mL AgNO3銆?,
                             },
                         },
                     }
@@ -5932,7 +6155,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "sodium_citrate_added_to_all",
                                 "type": "bool",
-                                "description": "已按 1-5 号顺序完成全部柠檬酸钠加入",
+                                "description": "宸叉寜 1-5 鍙烽『搴忓畬鎴愬叏閮ㄦ煚妾吀閽犲姞鍏?,
                             }
                         ],
                     }
@@ -5960,10 +6183,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_add_agno3_all",
-                                "title": "1-5号样品：统一加入AgNO3",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆AgNO3",
                             },
                             "current_step_details": {
-                                "instruction": "按 1 到 5 号顺序加入 5.00 mL AgNO3。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?5.00 mL AgNO3銆?,
                             },
                         },
                     }
@@ -5976,12 +6199,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "按一到五号顺序全部加入柠檬酸钠",
-                    "按一到五号顺序全部加入柠檬酸钠",
+                    "鎸変竴鍒颁簲鍙烽『搴忓叏閮ㄥ姞鍏ユ煚妾吀閽?,
+                    "鎸変竴鍒颁簲鍙烽『搴忓叏閮ㄥ姞鍏ユ煚妾吀閽?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["按一到五号顺序全部加入柠檬酸钠"], sent)
+        self.assertEqual(["鎸変竴鍒颁簲鍙烽『搴忓叏閮ㄥ姞鍏ユ煚妾吀閽?], sent)
         self.assertEqual(1, len(spoken))
         self.assertIn("AgNO3", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
@@ -6007,13 +6230,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_sample1_2_add_kbr_water_nabh4",
-                            "title": "1号样品：加入KBr、纯水并加入NaBH4",
+                            "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘村苟鍔犲叆NaBH4",
                             "interaction": {
                                 "fast_path_mode": "observation_record_step",
                                 "capabilities": ["step_confirmation", "observation_capture"],
                             },
                             "prompts": {
-                                "instruction": "完成 1 号样品 KBr 和纯水加入并混匀后，快速加入 NaBH4 并保持搅拌，记录颜色稳定时间和收尾情况。",
+                                "instruction": "瀹屾垚 1 鍙锋牱鍝?KBr 鍜岀函姘村姞鍏ュ苟娣峰寑鍚庯紝蹇€熷姞鍏?NaBH4 骞朵繚鎸佹悈鎷岋紝璁板綍棰滆壊绋冲畾鏃堕棿鍜屾敹灏炬儏鍐点€?,
                             },
                         },
                     }
@@ -6041,14 +6264,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "result": {
                         "ok": True,
                         "schema_view": [
-                            {"name": "KBr_volume", "type": "bool", "description": "已按当前样品目标用量加入 KBr"},
-                            {"name": "H2O_volume", "type": "bool", "description": "已按当前样品目标用量加入纯水"},
-                            {"name": "mixed_uniformly", "type": "bool", "description": "加入 KBr 和纯水后已搅拌均匀"},
-                            {"name": "nabh4_volume", "type": "bool", "description": "已准确加入 2.50 mL NaBH4"},
-                            {"name": "added_quickly", "type": "bool", "description": "已快速完成 NaBH4 加入"},
-                            {"name": "color", "type": "string", "description": "当前样品最终颜色"},
-                            {"name": "reaction_time", "type": "float", "description": "当前样品颜色稳定所用时间"},
-                            {"name": "color_stable", "type": "bool", "description": "已确认颜色稳定"},
+                            {"name": "KBr_volume", "type": "bool", "description": "宸叉寜褰撳墠鏍峰搧鐩爣鐢ㄩ噺鍔犲叆 KBr"},
+                            {"name": "H2O_volume", "type": "bool", "description": "宸叉寜褰撳墠鏍峰搧鐩爣鐢ㄩ噺鍔犲叆绾按"},
+                            {"name": "mixed_uniformly", "type": "bool", "description": "鍔犲叆 KBr 鍜岀函姘村悗宸叉悈鎷屽潎鍖€"},
+                            {"name": "nabh4_volume", "type": "bool", "description": "宸插噯纭姞鍏?2.50 mL NaBH4"},
+                            {"name": "added_quickly", "type": "bool", "description": "宸插揩閫熷畬鎴?NaBH4 鍔犲叆"},
+                            {"name": "color", "type": "string", "description": "褰撳墠鏍峰搧鏈€缁堥鑹?},
+                            {"name": "reaction_time", "type": "float", "description": "褰撳墠鏍峰搧棰滆壊绋冲畾鎵€鐢ㄦ椂闂?},
+                            {"name": "color_stable", "type": "bool", "description": "宸茬‘璁ら鑹茬ǔ瀹?},
                         ],
                     }
                 }
@@ -6076,15 +6299,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "已经做好了",
-                    "已经做好了",
+                    "宸茬粡鍋氬ソ浜?,
+                    "宸茬粡鍋氬ソ浜?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["已经做好了"], sent)
+        self.assertEqual(["宸茬粡鍋氬ソ浜?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("颜色", spoken[0])
-        self.assertIn("时间", spoken[0])
+        self.assertIn("棰滆壊", spoken[0])
+        self.assertIn("鏃堕棿", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
 
     async def test_strict_graph_observation_report_writes_current_step_and_advances_to_photo(self):
@@ -6110,13 +6333,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_sample1_2_add_kbr_water_nabh4",
-                                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘淬€丯aBH4骞惰鏃惰瀵熼鑹?,
                                 "interaction": {
                                     "fast_path_mode": "observation_record_step",
                                     "capabilities": ["step_confirmation", "observation_capture"],
                                 },
                                 "prompts": {
-                                    "instruction": "先在加入 NaBH4 的同时开始计时，持续搅拌，持续观察颜色变化。",
+                                    "instruction": "鍏堝湪鍔犲叆 NaBH4 鐨勫悓鏃跺紑濮嬭鏃讹紝鎸佺画鎼呮媽锛屾寔缁瀵熼鑹插彉鍖栥€?,
                                 },
                             },
                         }
@@ -6126,12 +6349,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_sample1_5_photo_confirm",
-                            "title": "1号样品：颜色稳定后拍照记录",
+                            "title": "1鍙锋牱鍝侊細棰滆壊绋冲畾鍚庢媿鐓ц褰?,
                             "interaction": {
                                 "fast_path_mode": "photo_confirmation_step",
                             },
                             "prompts": {
-                                "instruction": "拍照记录当前样品颜色。",
+                                "instruction": "鎷嶇収璁板綍褰撳墠鏍峰搧棰滆壊銆?,
                             },
                         },
                     }
@@ -6162,14 +6385,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "result": {
                             "ok": True,
                             "schema_view": [
-                                {"name": "KBr_volume", "type": "bool", "description": "已按当前样品目标用量加入 KBr"},
-                                {"name": "H2O_volume", "type": "bool", "description": "已按当前样品目标用量加入纯水"},
-                                {"name": "mixed_uniformly", "type": "bool", "description": "加入 KBr 和纯水后已搅拌均匀"},
-                                {"name": "nabh4_volume", "type": "bool", "description": "已准确加入 2.50 mL NaBH4"},
-                                {"name": "added_quickly", "type": "bool", "description": "已快速完成 NaBH4 加入"},
-                                {"name": "color", "type": "string", "description": "当前样品最终颜色"},
-                                {"name": "reaction_time", "type": "float", "description": "当前样品颜色稳定所用时间"},
-                                {"name": "color_stable", "type": "bool", "description": "已确认颜色稳定"},
+                                {"name": "KBr_volume", "type": "bool", "description": "宸叉寜褰撳墠鏍峰搧鐩爣鐢ㄩ噺鍔犲叆 KBr"},
+                                {"name": "H2O_volume", "type": "bool", "description": "宸叉寜褰撳墠鏍峰搧鐩爣鐢ㄩ噺鍔犲叆绾按"},
+                                {"name": "mixed_uniformly", "type": "bool", "description": "鍔犲叆 KBr 鍜岀函姘村悗宸叉悈鎷屽潎鍖€"},
+                                {"name": "nabh4_volume", "type": "bool", "description": "宸插噯纭姞鍏?2.50 mL NaBH4"},
+                                {"name": "added_quickly", "type": "bool", "description": "宸插揩閫熷畬鎴?NaBH4 鍔犲叆"},
+                                {"name": "color", "type": "string", "description": "褰撳墠鏍峰搧鏈€缁堥鑹?},
+                                {"name": "reaction_time", "type": "float", "description": "褰撳墠鏍峰搧棰滆壊绋冲畾鎵€鐢ㄦ椂闂?},
+                                {"name": "color_stable", "type": "bool", "description": "宸茬‘璁ら鑹茬ǔ瀹?},
                             ],
                         }
                     }
@@ -6177,8 +6400,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "result": {
                         "ok": True,
                         "schema_view": [
-                            {"name": "photo_taken", "type": "bool", "description": "已完成拍照"},
-                            {"name": "color_confirmed_by_photo", "type": "bool", "description": "已基于照片确认当前样品颜色稳定"},
+                            {"name": "photo_taken", "type": "bool", "description": "宸插畬鎴愭媿鐓?},
+                            {"name": "color_confirmed_by_photo", "type": "bool", "description": "宸插熀浜庣収鐗囩‘璁ゅ綋鍓嶆牱鍝侀鑹茬ǔ瀹?},
                         ],
                     }
                 }
@@ -6190,7 +6413,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "mixed_uniformly": True,
                         "nabh4_volume": True,
                         "added_quickly": True,
-                        "color": "黑灰色",
+                        "color": "榛戠伆鑹?,
                         "reaction_time": 1.0,
                         "color_stable": True,
                     },
@@ -6217,10 +6440,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_sample1_5_photo_confirm",
-                                "title": "1号样品：颜色稳定后拍照记录",
+                                "title": "1鍙锋牱鍝侊細棰滆壊绋冲畾鍚庢媿鐓ц褰?,
                             },
                             "current_step_details": {
-                                "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                                "instruction": "棰滆壊绋冲畾鍚庢媿鐓ц褰曞綋鍓嶆牱鍝侀鑹诧紝骞惰繘鍏?2 鍙锋牱鍝併€?,
                             },
                         },
                     }
@@ -6230,17 +6453,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn._experiment_yaml_steps_cache = [
             {
                 "id": "step_sample1_2_add_kbr_water_nabh4",
-                "title": "1号样品：加入KBr、纯水、NaBH4并计时观察颜色",
+                "title": "1鍙锋牱鍝侊細鍔犲叆KBr銆佺函姘淬€丯aBH4骞惰鏃惰瀵熼鑹?,
                 "prompts": {
-                    "instruction": "先加入并混匀 KBr 与纯水，再快速加入 NaBH4，从加入 NaBH4 的瞬间开始计时并持续搅拌。",
+                    "instruction": "鍏堝姞鍏ュ苟娣峰寑 KBr 涓庣函姘达紝鍐嶅揩閫熷姞鍏?NaBH4锛屼粠鍔犲叆 NaBH4 鐨勭灛闂村紑濮嬭鏃跺苟鎸佺画鎼呮媽銆?,
                 },
             },
             {
                 "id": "step_sample1_5_photo_confirm",
-                "title": "1号样品：颜色稳定后拍照记录",
+                "title": "1鍙锋牱鍝侊細棰滆壊绋冲畾鍚庢媿鐓ц褰?,
                 "interaction": {"fast_path_mode": "photo_confirmation_step"},
                 "prompts": {
-                    "instruction": "颜色稳定后拍照记录当前样品颜色，并进入 2 号样品。",
+                    "instruction": "棰滆壊绋冲畾鍚庢媿鐓ц褰曞綋鍓嶆牱鍝侀鑹诧紝骞惰繘鍏?2 鍙锋牱鍝併€?,
                 },
             },
         ]
@@ -6250,13 +6473,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_strict_graph_intent(
                     conn,
-                    "黑灰色一分钟",
-                    "黑灰色一分钟",
+                    "榛戠伆鑹蹭竴鍒嗛挓",
+                    "榛戠伆鑹蹭竴鍒嗛挓",
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["黑灰色一分钟"], sent)
-        self.assertEqual(["1号样品颜色已经稳定，现在可以拍照吗？"], spoken)
+        self.assertEqual(["榛戠伆鑹蹭竴鍒嗛挓"], sent)
+        self.assertEqual(["1鍙锋牱鍝侀鑹插凡缁忕ǔ瀹氾紝鐜板湪鍙互鎷嶇収鍚楋紵"], spoken)
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
         self.assertIn("finish_trial", [name for name, _args, _priority in tool_calls])
         self.assertIn("proceed_to_next_step", [name for name, _args, _priority in tool_calls])
@@ -6284,13 +6507,13 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_2_tyndall_effect",
-                                "title": "丁达尔现象观察",
+                                "title": "涓佽揪灏旂幇璞¤瀵?,
                                 "interaction": {
                                     "fast_path_mode": "observation_record_step",
                                     "capabilities": ["observation_capture"],
                                 },
                                 "prompts": {
-                                    "instruction": "用激光笔照射每个样品，观察并记录丁达尔现象。",
+                                    "instruction": "鐢ㄦ縺鍏夌瑪鐓у皠姣忎釜鏍峰搧锛岃瀵熷苟璁板綍涓佽揪灏旂幇璞°€?,
                                 },
                             },
                         }
@@ -6300,11 +6523,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
-                            "title": "1-5号样品：暗电流和纯水空白校正",
+                            "title": "1-5鍙锋牱鍝侊細鏆楃數娴佸拰绾按绌虹櫧鏍℃",
                             "prompts": {
                                 "instruction": (
-                                    "现在开始 UV-Vis 前置校正，先提示主说话人先不要放任何液体，"
-                                    "然后使用当前 session_key 调用 uvvis_measure_spectra。"
+                                    "鐜板湪寮€濮?UV-Vis 鍓嶇疆鏍℃锛屽厛鎻愮ず涓昏璇濅汉鍏堜笉瑕佹斁浠讳綍娑蹭綋锛?
+                                    "鐒跺悗浣跨敤褰撳墠 session_key 璋冪敤 uvvis_measure_spectra銆?
                                 ),
                             },
                         },
@@ -6335,32 +6558,32 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "sample_1_tyndall",
                                 "type": "boolean",
-                                "description": "1号样品是否观察到丁达尔现象",
+                                "description": "1鍙锋牱鍝佹槸鍚﹁瀵熷埌涓佽揪灏旂幇璞?,
                             },
                             {
                                 "name": "sample_2_tyndall",
                                 "type": "boolean",
-                                "description": "2号样品是否观察到丁达尔现象",
+                                "description": "2鍙锋牱鍝佹槸鍚﹁瀵熷埌涓佽揪灏旂幇璞?,
                             },
                             {
                                 "name": "sample_3_tyndall",
                                 "type": "boolean",
-                                "description": "3号样品是否观察到丁达尔现象",
+                                "description": "3鍙锋牱鍝佹槸鍚﹁瀵熷埌涓佽揪灏旂幇璞?,
                             },
                             {
                                 "name": "sample_4_tyndall",
                                 "type": "boolean",
-                                "description": "4号样品是否观察到丁达尔现象",
+                                "description": "4鍙锋牱鍝佹槸鍚﹁瀵熷埌涓佽揪灏旂幇璞?,
                             },
                             {
                                 "name": "sample_5_tyndall",
                                 "type": "boolean",
-                                "description": "5号样品是否观察到丁达尔现象",
+                                "description": "5鍙锋牱鍝佹槸鍚﹁瀵熷埌涓佽揪灏旂幇璞?,
                             },
                             {
                                 "name": "tyndall_intensity_comparison",
                                 "type": "string",
-                                "description": "各样品丁达尔效应强度对比描述",
+                                "description": "鍚勬牱鍝佷竵杈惧皵鏁堝簲寮哄害瀵规瘮鎻忚堪",
                             },
                         ],
                     }
@@ -6397,12 +6620,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
-                                "title": "1-5号样品：暗电流和纯水空白校正",
+                                "title": "1-5鍙锋牱鍝侊細鏆楃數娴佸拰绾按绌虹櫧鏍℃",
                             },
                             "current_step_details": {
                                 "instruction": (
-                                    "现在开始 UV-Vis 前置校正，先提示主说话人先不要放任何液体，"
-                                    "然后使用当前 session_key 调用 uvvis_measure_spectra。"
+                                    "鐜板湪寮€濮?UV-Vis 鍓嶇疆鏍℃锛屽厛鎻愮ず涓昏璇濅汉鍏堜笉瑕佹斁浠讳綍娑蹭綋锛?
+                                    "鐒跺悗浣跨敤褰撳墠 session_key 璋冪敤 uvvis_measure_spectra銆?
                                 ),
                             },
                         },
@@ -6416,15 +6639,17 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "全部都有丁达尔现象，继续做下一步。",
-                    "全部都有丁达尔现象，继续做下一步。",
+                    "鍏ㄩ儴閮芥湁涓佽揪灏旂幇璞★紝缁х画鍋氫笅涓€姝ャ€?,
+                    "鍏ㄩ儴閮芥湁涓佽揪灏旂幇璞★紝缁х画鍋氫笅涓€姝ャ€?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["全部都有丁达尔现象，继续做下一步。"], sent)
+        self.assertEqual(["鍏ㄩ儴閮芥湁涓佽揪灏旂幇璞★紝缁х画鍋氫笅涓€姝ャ€?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("暗电流和纯水空白校正", spoken[0])
-        self.assertIn("先不要放任何液体", spoken[0])
+        self.assertIn("绾按绌虹櫧鏍℃", spoken[0])
+        self.assertIn("鏀惧叆绾按姣旇壊鐨?, spoken[0])
+        self.assertIn("鍙互寮€濮嬫壂鎻?, spoken[0])
+        self.assertNotIn("鍏堜笉瑕佹斁浠讳綍娑蹭綋", spoken[0])
         self.assertNotIn("session_key", spoken[0])
         self.assertNotIn("ready_for_samples", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
@@ -6457,9 +6682,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             "ok": True,
                             "step": {
                                 "id": "step_prepare_setup_all",
-                                "title": "1-5号样品：准备烧杯与磁转子",
+                                "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                                 "prompts": {
-                                    "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                    "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                                 },
                             },
                         }
@@ -6469,9 +6694,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_add_sodium_citrate_all",
-                            "title": "1-5号样品：统一加入柠檬酸钠",
+                            "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                             "prompts": {
-                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?1.00 mL 鏌犳閰搁挔銆?,
                             },
                         },
                     }
@@ -6497,12 +6722,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "beakers_labeled",
                                 "type": "bool",
-                                "description": "已完成 1-5 号烧杯编号",
+                                "description": "宸插畬鎴?1-5 鍙风儳鏉紪鍙?,
                             },
                             {
                                 "name": "stir_bars_added_to_all",
                                 "type": "bool",
-                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                                "description": "宸蹭负 1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
                             },
                         ],
                     }
@@ -6534,10 +6759,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "summary": {
                             "current_step": {
                                 "step_id": "step_add_sodium_citrate_all",
-                                "title": "1-5号样品：统一加入柠檬酸钠",
+                                "title": "1-5鍙锋牱鍝侊細缁熶竴鍔犲叆鏌犳閰搁挔",
                             },
                             "current_step_details": {
-                                "instruction": "按 1 到 5 号顺序加入 1.00 mL 柠檬酸钠。",
+                                "instruction": "鎸?1 鍒?5 鍙烽『搴忓姞鍏?1.00 mL 鏌犳閰搁挔銆?,
                             },
                         },
                     }
@@ -6550,14 +6775,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "全部完成",
-                    "全部完成",
+                    "鍏ㄩ儴瀹屾垚",
+                    "鍏ㄩ儴瀹屾垚",
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["全部完成"], sent)
+        self.assertEqual(["鍏ㄩ儴瀹屾垚"], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("柠檬酸钠", spoken[0])
+        self.assertIn("鏌犳閰搁挔", spoken[0])
         self.assertIn("add_fields", [name for name, _args, _priority in tool_calls])
         self.assertIn(
             "proceed_to_next_step",
@@ -6585,9 +6810,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                         "ok": True,
                         "step": {
                             "id": "step_prepare_setup_all",
-                            "title": "1-5号样品：准备烧杯与磁转子",
+                            "title": "1-5鍙锋牱鍝侊細鍑嗗鐑ф澂涓庣杞瓙",
                             "prompts": {
-                                "instruction": "完成 1-5 号样品的烧杯编号和磁转子放置。",
+                                "instruction": "瀹屾垚 1-5 鍙锋牱鍝佺殑鐑ф澂缂栧彿鍜岀杞瓙鏀剧疆銆?,
                             },
                         },
                     }
@@ -6612,12 +6837,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                             {
                                 "name": "beakers_labeled",
                                 "type": "bool",
-                                "description": "已完成 1-5 号烧杯编号",
+                                "description": "宸插畬鎴?1-5 鍙风儳鏉紪鍙?,
                             },
                             {
                                 "name": "stir_bars_added_to_all",
                                 "type": "bool",
-                                "description": "已为 1-5 号烧杯全部放入磁转子",
+                                "description": "宸蹭负 1-5 鍙风儳鏉叏閮ㄦ斁鍏ョ杞瓙",
                             },
                         ],
                     }
@@ -6648,15 +6873,15 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(intentHandler, "speak_txt", fake_speak_txt):
                 handled = await intentHandler.handle_experiment_control_fast_intent(
                     conn,
-                    "一到五号双杯全部放入磁子",
-                    "一到五号双杯全部放入磁子",
+                    "涓€鍒颁簲鍙峰弻鏉叏閮ㄦ斁鍏ョ瀛?,
+                    "涓€鍒颁簲鍙峰弻鏉叏閮ㄦ斁鍏ョ瀛?,
                 )
 
         self.assertTrue(handled)
-        self.assertEqual(["一到五号双杯全部放入磁子"], sent)
+        self.assertEqual(["涓€鍒颁簲鍙峰弻鏉叏閮ㄦ斁鍏ョ瀛?], sent)
         self.assertEqual(1, len(spoken))
-        self.assertIn("烧杯编号", spoken[0])
-        self.assertNotIn("磁转子", spoken[0])
+        self.assertIn("鐑ф澂缂栧彿", spoken[0])
+        self.assertNotIn("纾佽浆瀛?, spoken[0])
         self.assertEqual({"stir_bars_added_to_all"}, state["written_fields"])
 
 if __name__ == "__main__":
