@@ -4180,6 +4180,23 @@ def _assistant_recently_prompted_uvvis_action(conn) -> bool:
     return _contains_any(recent_text, uvvis_prompt_tokens)
 
 
+def _assistant_recently_prompted_pure_water_blank(conn) -> bool:
+    recent_text = _normalize_text_for_match(_get_recent_assistant_text(conn, limit=3))
+    if not recent_text:
+        return False
+
+    return _contains_any(
+        recent_text,
+        (
+            "纯水空白",
+            "纯水比色皿",
+            "1-5号样品位",
+            "参比位",
+            "6支纯水",
+        ),
+    )
+
+
 def _looks_like_uvvis_followup_reply(conn, filtered_text: str) -> bool:
     if not _assistant_recently_prompted_uvvis_action(conn):
         return False
@@ -4593,6 +4610,92 @@ def _read_uvvis_blank_baseline_state_from_shared_dir(conn) -> dict | None:
     }
 
 
+def _extract_uvvis_liquid_blank_state(payload) -> dict | None:
+    named = _collect_payload_named_values(
+        payload,
+        (
+            "liquid_blank_exists",
+            "liquid_blank_status",
+            "liquid_blank_csv",
+            "liquid_blank_manifest_json",
+        ),
+    )
+    if not named:
+        return None
+
+    return {
+        "liquid_blank_exists": bool(_normalize_bool(named.get("liquid_blank_exists"))),
+        "liquid_blank_status": str(named.get("liquid_blank_status", "") or "").strip(),
+        "liquid_blank_csv": str(named.get("liquid_blank_csv", "") or "").strip(),
+        "liquid_blank_manifest_json": str(
+            named.get("liquid_blank_manifest_json", "") or ""
+        ).strip(),
+    }
+
+
+def _liquid_blank_state_has_artifact(state) -> bool:
+    if not isinstance(state, dict):
+        return False
+    return any(
+        _path_exists(state.get(key))
+        for key in ("liquid_blank_csv", "liquid_blank_manifest_json")
+    )
+
+
+def _looks_like_uvvis_liquid_blank_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    if not name or name.startswith("."):
+        return False
+    if "connection_state" in name or "air_blank" in name:
+        return False
+    if path.suffix.lower() not in {".csv", ".json"}:
+        return False
+    return any(token in name for token in ("liquid_blank", "pure_water_blank"))
+
+
+def _read_uvvis_liquid_blank_state_from_shared_dir(conn) -> dict | None:
+    latest_csv: Path | None = None
+    latest_manifest: Path | None = None
+
+    for shared_dir in _resolve_uvvis_shared_blank_dirs(conn):
+        try:
+            if not shared_dir.exists() or not shared_dir.is_dir():
+                continue
+        except Exception:
+            continue
+
+        try:
+            candidates = [path for path in shared_dir.rglob("*") if path.is_file()]
+        except Exception:
+            continue
+
+        for candidate in candidates:
+            if not _looks_like_uvvis_liquid_blank_artifact(candidate):
+                continue
+            suffix = candidate.suffix.lower()
+            if suffix == ".csv" and (
+                latest_csv is None or _stat_mtime(candidate) > _stat_mtime(latest_csv)
+            ):
+                latest_csv = candidate
+            if suffix == ".json" and (
+                latest_manifest is None
+                or _stat_mtime(candidate) > _stat_mtime(latest_manifest)
+            ):
+                latest_manifest = candidate
+
+    if latest_csv is None and latest_manifest is None:
+        return None
+
+    return {
+        "liquid_blank_exists": True,
+        "liquid_blank_status": "reused_from_shared_dir",
+        "liquid_blank_csv": str(latest_csv.resolve()) if latest_csv else "",
+        "liquid_blank_manifest_json": (
+            str(latest_manifest.resolve()) if latest_manifest else ""
+        ),
+    }
+
+
 def _collect_payload_strings(payload) -> list[str]:
     strings: list[str] = []
 
@@ -4737,6 +4840,52 @@ def _payload_mentions_missing_blank(payload) -> bool:
     )
 
 
+def _extract_uvvis_payload_phase(payload) -> str:
+    data = _to_plain_data(payload)
+    if not isinstance(data, dict):
+        return ""
+
+    phase = str(data.get("phase", "") or "").strip().lower()
+    if phase:
+        return phase
+
+    nested = data.get("result")
+    if isinstance(nested, dict):
+        return str(nested.get("phase", "") or "").strip().lower()
+    return ""
+
+
+def _payload_mentions_missing_shared_prep(payload) -> bool:
+    if _extract_uvvis_payload_phase(payload) == "shared_prep_missing":
+        return True
+
+    text = _extract_uvvis_payload_message(payload).lower()
+    return (
+        "shared dark-current and air baseline data are missing" in text
+        or (
+            "ready_for_samples=false" in text
+            and "sample positions are blank" in text
+            and "baseline" in text
+        )
+    )
+
+
+def _payload_mentions_shared_prep_saturated(payload) -> bool:
+    if _extract_uvvis_payload_phase(payload) == "shared_prep_saturated":
+        return True
+
+    text = _extract_uvvis_payload_message(payload).lower()
+    return "shared air baseline is saturated" in text
+
+
+def _payload_indicates_liquid_blank_ready(payload) -> bool:
+    if _extract_uvvis_payload_phase(payload) == "liquid_blank_ready":
+        return True
+
+    state = _extract_uvvis_liquid_blank_state(payload)
+    return _liquid_blank_state_has_artifact(state)
+
+
 def _payload_mentions_reusable_blank(payload) -> bool:
     named = _collect_payload_named_values(payload, ("blank_baseline_exists",))
     exists = _normalize_bool(named.get("blank_baseline_exists"))
@@ -4786,6 +4935,26 @@ def _uvvis_blank_baseline_exists(conn, payload=None) -> bool:
 
     blank_state = getattr(conn, "_last_uvvis_blank_baseline_state", None)
     if _blank_baseline_state_has_artifact(blank_state):
+        return True
+
+    return False
+
+
+def _uvvis_shared_liquid_blank_exists(conn, payload=None) -> bool:
+    disk_state = _read_uvvis_liquid_blank_state_from_shared_dir(conn)
+    if disk_state is not None:
+        setattr(conn, "_last_uvvis_liquid_blank_state", disk_state)
+        return True
+
+    payload_state = _extract_uvvis_liquid_blank_state(payload)
+    if _liquid_blank_state_has_artifact(payload_state):
+        normalized_payload_state = dict(payload_state)
+        normalized_payload_state["liquid_blank_exists"] = True
+        setattr(conn, "_last_uvvis_liquid_blank_state", normalized_payload_state)
+        return True
+
+    blank_state = getattr(conn, "_last_uvvis_liquid_blank_state", None)
+    if _liquid_blank_state_has_artifact(blank_state):
         return True
 
     return False
@@ -4945,6 +5114,8 @@ def _compose_uvvis_status_reply(conn, status: dict, *, inferred_step_id: str = "
         return "UV-Vis 现在没有在工作。这一步已经确认当前批次纯水空白可复用，继续下一步时记得保留或重新放好参比位纯水比色皿。"
     if phase == "await_pure_water_blank":
         return "UV-Vis 现在没有在工作。暗电流校正已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"
+    if phase == "await_shared_prep_reset":
+        return "UV-Vis 现在没有在工作。这一步在等你把一到五号样品位和参比位都清空，我先补做共享前置校正。"
     if phase == "await_reaction_sample":
         return "UV-Vis 现在没有在工作，这一步在等你把样品和参比液放好。"
     if phase == "await_liquid_blank":
@@ -4952,7 +5123,7 @@ def _compose_uvvis_status_reply(conn, status: dict, *, inferred_step_id: str = "
 
     if (
         inferred_step_id == _UVVIS_SHARED_BLANK_STEP_ID
-        and _uvvis_blank_baseline_exists(conn)
+        and _uvvis_shared_liquid_blank_exists(conn)
     ):
         return "UV-Vis 现在没有在工作。暗电流校正已经完成。"
     return "UV-Vis 现在没有在工作。"
@@ -6162,13 +6333,13 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
             "shared_air_baseline_ready": True,
             "pure_water_blank_ready": True,
             "reference_cuvette_ready": True,
-            "observations": "共享暗电流、空气基线和纯水空白已准备完成",
+            "observations": "共享前置校正和纯水空白已准备完成",
         }
         auto_advanced, reply = await _complete_experiment_step_with_fields(
             conn,
             fields=fields,
             auto_advance=True,
-            fallback_reply="共享暗电流、空气基线和纯水空白都准备好了。",
+            fallback_reply="共享前置校正和纯水空白都准备好了。",
         )
         if auto_advanced and reply:
             speak_txt(conn, reply)
@@ -6199,7 +6370,7 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
         return False
 
     await _start_direct_intent_turn(conn, original_text)
-    speak_txt(conn, "先不要放任何液体，我先进行暗电流和空气基线准备。")
+    speak_txt(conn, "先不要放任何液体，我先进行共享前置校正。")
     payload = await _execute_uvvis_tool_payload(
         conn,
         "uvvis_measure_spectra",
@@ -6227,19 +6398,37 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
         "shared_air_baseline_ready": True,
         "pure_water_blank_ready": True,
         "reference_cuvette_ready": True,
-        "observations": "共享暗电流、空气基线和纯水空白已完成或可复用",
+        "observations": "共享前置校正和纯水空白已完成或可复用",
     }
     auto_advanced, reply = await _complete_experiment_step_with_fields(
         conn,
         fields=fields,
         auto_advance=True,
-        fallback_reply="共享暗电流、空气基线和纯水空白都准备好了。",
+        fallback_reply="共享前置校正和纯水空白都准备好了。",
     )
     if auto_advanced and reply:
         speak_txt(conn, reply)
     elif reply:
         speak_txt(conn, reply)
     return True
+
+
+async def _complete_uvvis_shared_blank_step(
+    conn,
+    *,
+    observations: str,
+    fallback_reply: str,
+) -> tuple[bool, str]:
+    return await _complete_experiment_step_with_fields(
+        conn,
+        fields={
+            "pure_water_blank_ready": True,
+            "reference_cuvette_ready": True,
+            "observations": observations,
+        },
+        auto_advance=True,
+        fallback_reply=fallback_reply,
+    )
 
 
 async def _handle_uvvis_shared_blank_prep(
@@ -6350,6 +6539,213 @@ async def _handle_uvvis_shared_blank_prep(
         "暗电流校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。",
     )
     return True
+
+
+async def _handle_uvvis_shared_blank_prep_v2(
+    conn, original_text: str, filtered_text: str, state: dict
+) -> bool:
+    session_key, busy_reply = await _ensure_uvvis_session_key(conn)
+    if not session_key:
+        if busy_reply:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, busy_reply)
+            return True
+        return False
+
+    phase = str(state.get("phase", "") or "").strip()
+    if (
+        not phase
+        and _assistant_recently_prompted_pure_water_blank(conn)
+        and _looks_like_uvvis_ready_reply(filtered_text)
+    ):
+        phase = "await_pure_water_blank"
+
+    if phase == "await_shared_prep_reset":
+        if _is_negative_short_reply_fixed(filtered_text):
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，等你把样品位和参比位都清空后再告诉我。")
+            return True
+
+        if not _looks_like_uvvis_ready_reply(filtered_text):
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_measure_spectra",
+            {
+                "session_key": session_key,
+                "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+                "ready_for_samples": False,
+            },
+        )
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        if _payload_mentions_missing_shared_prep(payload) or _payload_mentions_shared_prep_saturated(payload):
+            _set_uvvis_direct_state(
+                conn,
+                step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+                phase="await_shared_prep_reset",
+                session_key=session_key,
+            )
+            speak_txt(conn, "请先把 1 到 5 号样品位和参比位都清空，我先补做共享前置校正。清空后告诉我可以开始。")
+            return True
+        if _uvvis_shared_liquid_blank_exists(conn, payload) or _payload_indicates_liquid_blank_ready(payload):
+            auto_advanced, reply = await _complete_uvvis_shared_blank_step(
+                conn,
+                observations="当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
+                fallback_reply="当前批次纯水空白可复用，接下来装入样品比色皿。",
+            )
+            _clear_uvvis_direct_state(conn)
+            if reply:
+                speak_txt(conn, reply)
+            return True
+
+        _set_uvvis_direct_state(
+            conn,
+            step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+            phase="await_pure_water_blank",
+            session_key=session_key,
+        )
+        speak_txt(
+            conn,
+            "共享前置校正已经准备好。请在 1 到 5 号样品位和参比位各放 1 支纯水比色皿，共 6 支，放好了告诉我可以开始扫描。",
+        )
+        return True
+
+    if phase == "await_pure_water_blank":
+        if _is_negative_short_reply_fixed(filtered_text):
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "好，等你把纯水比色皿放好后再告诉我。")
+            return True
+
+        if not _looks_like_uvvis_ready_reply(filtered_text):
+            return False
+
+        await _start_direct_intent_turn(conn, original_text)
+        payload = await _execute_uvvis_tool_payload(
+            conn,
+            "uvvis_measure_spectra",
+            {
+                "session_key": session_key,
+                "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+                "ready_for_samples": True,
+            },
+        )
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        if _payload_mentions_missing_shared_prep(payload) or _payload_mentions_shared_prep_saturated(payload):
+            _set_uvvis_direct_state(
+                conn,
+                step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+                phase="await_shared_prep_reset",
+                session_key=session_key,
+            )
+            speak_txt(conn, "共享前置校正还没准备好，请先把 1 到 5 号样品位和参比位都清空，我先补做前置校正。清空后告诉我可以开始。")
+            return True
+        if _payload_mentions_missing_blank(payload):
+            _set_uvvis_direct_state(
+                conn,
+                step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+                phase="await_pure_water_blank",
+                session_key=session_key,
+            )
+            speak_txt(conn, "这一步还缺纯水空白，请先把 1 到 5 号样品位和参比位都放入纯水比色皿，放好后告诉我可以开始扫描。")
+            return True
+
+        auto_advanced, reply = await _complete_uvvis_shared_blank_step(
+            conn,
+            observations="当前批次纯水空白已记录完成，参比位纯水比色皿可继续用于后续测量。",
+            fallback_reply="纯水空白已经准备好了。",
+        )
+        if auto_advanced:
+            _clear_uvvis_direct_state(conn)
+        if reply:
+            speak_txt(conn, reply)
+        return True
+
+    if not (
+        _is_affirmative_short_reply_fixed(filtered_text)
+        or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
+        or _contains_any(
+            _normalize_text_for_match(filtered_text),
+            (
+                "纯水空白",
+                "纯水比色皿",
+                "空白校正",
+                "开始uvvis",
+                "开始紫外可见",
+                "开始测量",
+                "开始扫描",
+                "可以开始扫描",
+                "空白",
+            ),
+        )
+    ):
+        return False
+
+    await _start_direct_intent_turn(conn, original_text)
+
+    if _uvvis_shared_liquid_blank_exists(conn):
+        auto_advanced, reply = await _complete_uvvis_shared_blank_step(
+            conn,
+            observations="当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
+            fallback_reply="当前批次纯水空白可复用，接下来装入样品比色皿。",
+        )
+        _clear_uvvis_direct_state(conn)
+        if reply:
+            speak_txt(conn, reply)
+        return True
+
+    payload = await _execute_uvvis_tool_payload(
+        conn,
+        "uvvis_measure_spectra",
+        {
+            "session_key": session_key,
+            "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
+            "ready_for_samples": False,
+        },
+    )
+    if _payload_looks_busy_or_inaccessible(payload):
+        speak_txt(conn, _UVVIS_BUSY_REPLY)
+        return True
+    if _uvvis_shared_liquid_blank_exists(conn, payload) or _payload_indicates_liquid_blank_ready(payload):
+        auto_advanced, reply = await _complete_uvvis_shared_blank_step(
+            conn,
+            observations="当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
+            fallback_reply="当前批次纯水空白可复用，接下来装入样品比色皿。",
+        )
+        _clear_uvvis_direct_state(conn)
+        if reply:
+            speak_txt(conn, reply)
+        return True
+
+    if _payload_mentions_missing_shared_prep(payload) or _payload_mentions_shared_prep_saturated(payload):
+        _set_uvvis_direct_state(
+            conn,
+            step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+            phase="await_shared_prep_reset",
+            session_key=session_key,
+        )
+        speak_txt(conn, "请先保持 1 到 5 号样品位和参比位都为空，我先补做共享前置校正。清空后告诉我可以开始。")
+        return True
+
+    _set_uvvis_direct_state(
+        conn,
+        step_id=_UVVIS_SHARED_BLANK_STEP_ID,
+        phase="await_pure_water_blank",
+        session_key=session_key,
+    )
+    speak_txt(
+        conn,
+        "共享前置校正已经准备好。请在 1 到 5 号样品位和参比位各放 1 支纯水比色皿，共 6 支，放好了告诉我可以开始扫描。",
+    )
+    return True
+
+
+_handle_uvvis_shared_blank_prep = _handle_uvvis_shared_blank_prep_v2
 
 
 async def _handle_uvvis_spectra_measurement(
@@ -6682,7 +7078,7 @@ async def _handle_uvvis_kinetics_measurement(
             return False
 
         await _start_direct_intent_turn(conn, original_text)
-        speak_txt(conn, "先保持样品位为空，我先做暗电流和 400 纳米空气基线准备。")
+        speak_txt(conn, "先保持样品位为空，我先做 400 纳米动力学测量需要的共享前置准备。")
         payload = await _execute_uvvis_tool_payload(
             conn,
             "uvvis_measure_kinetics",
@@ -6724,7 +7120,7 @@ async def _handle_uvvis_kinetics_measurement(
         )
         speak_txt(
             conn,
-            f"共享暗电流和 400 纳米空气基线准备好了。请把参比位保持为该步骤指定的参比液，把{sample_position}号样品位换成真实反应液，放好了告诉我。",
+            f"共享前置准备好了。请把参比位保持为该步骤指定的参比液，把{sample_position}号样品位换成真实反应液，放好了告诉我。",
         )
         return True
 

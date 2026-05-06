@@ -4770,22 +4770,41 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         conn = _FakeConn()
         conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_BLANK_STEP_ID
         spoken = []
+        executed = []
 
         async def fake_ensure_session_key(_conn):
             return "lease-1", ""
+
+        async def fake_execute(_conn, tool_name, arguments):
+            executed.append((tool_name, dict(arguments)))
+            return {"success": True, "phase": "shared_prep_ready", "liquid_blank_exists": False}
 
         def fake_speak_txt(_conn, text):
             spoken.append(text)
 
         with patch.object(intentHandler, "_ensure_uvvis_session_key", fake_ensure_session_key):
-            with patch.object(intentHandler, "speak_txt", fake_speak_txt):
-                handled = await intentHandler.handle_direct_uvvis_intent(
-                    conn,
-                    "寮€濮嬫壂鎻?,
-                    "寮€濮嬫壂鎻?,
-                )
+            with patch.object(intentHandler, "_execute_uvvis_tool_payload", fake_execute):
+                with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "开始扫描",
+                        "开始扫描",
+                    )
 
         self.assertTrue(handled)
+        self.assertEqual(
+            [
+                (
+                    "uvvis_measure_spectra",
+                    {
+                        "session_key": "lease-1",
+                        "sample_positions": [1, 2, 3, 4, 5],
+                        "ready_for_samples": False,
+                    },
+                )
+            ],
+            executed,
+        )
         self.assertEqual(
             {
                 "step_id": intentHandler._UVVIS_SHARED_BLANK_STEP_ID,
@@ -4796,7 +4815,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [
-                "鏆楃數娴佹牎姝ｅ凡缁忓畬鎴愩€傝鍦?1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁鍏ョ函姘存瘮鑹茬毧锛屽叡 6 涓紝鏀惧ソ鍚庡憡璇夋垜鍙互寮€濮嬫壂鎻忋€?,
+                "共享前置校正已经准备好。请在 1 到 5 号样品位和参比位各放 1 支纯水比色皿，共 6 支，放好了告诉我可以开始扫描。",
             ],
             spoken,
         )
@@ -4933,9 +4952,9 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
     async def test_handle_direct_uvvis_shared_blank_prep_reuses_blank_and_advances(self):
         conn = _FakeConn()
         conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_BLANK_STEP_ID
-        conn._last_uvvis_blank_baseline_state = {
-            "blank_baseline_exists": True,
-            "blank_baseline_csv": str(Path(__file__).resolve()),
+        conn._last_uvvis_liquid_blank_state = {
+            "liquid_blank_exists": True,
+            "liquid_blank_csv": str(Path(__file__).resolve()),
         }
         spoken = []
         completed = []
@@ -5088,11 +5107,11 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             str(shared_blank_csv.resolve()),
-            getattr(conn, "_last_uvvis_blank_baseline_state", {}).get("blank_baseline_csv"),
+            getattr(conn, "_last_uvvis_liquid_blank_state", {}).get("liquid_blank_csv"),
         )
         self.assertEqual(
             "reused_from_shared_dir",
-            getattr(conn, "_last_uvvis_blank_baseline_state", {}).get("blank_baseline_status"),
+            getattr(conn, "_last_uvvis_liquid_blank_state", {}).get("liquid_blank_status"),
         )
         self.assertEqual({}, getattr(conn, "_uvvis_direct_state", {}))
         self.assertEqual(["閹恒儰绗呴弶銉ヤ粵鏉╂瑤绔村銉窗鐟佸懎鍙嗗В鏃囧閻ㄨ￥鈧?"], spoken)
