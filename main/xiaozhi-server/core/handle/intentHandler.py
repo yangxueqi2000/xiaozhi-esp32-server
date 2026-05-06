@@ -4861,15 +4861,15 @@ async def _get_uvvis_session_status(conn) -> dict:
     manager = _get_server_mcp_manager(conn)
     if manager is None:
         return {"ok": False, "message": _UVVIS_NOT_READY_REPLY}
-    if not manager.is_mcp_tool("uvvis_session"):
-        try:
-            await manager.ensure_client_initialized("uvvis")
-        except Exception as exc:
-            conn.logger.bind(tag=TAG).warning(
-                f"uvvis client targeted initialize failed during status check: {exc}"
-            )
-        if not manager.is_mcp_tool("uvvis_session"):
-            return {"ok": False, "message": _UVVIS_NOT_READY_REPLY}
+    try:
+        ready = await manager.ensure_client_initialized("uvvis")
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"uvvis client targeted initialize failed during status check: {exc}"
+        )
+        ready = False
+    if not ready or not manager.is_mcp_tool("uvvis_session"):
+        return {"ok": False, "message": _UVVIS_NOT_READY_REPLY}
 
     try:
         payload = await _execute_uvvis_tool_payload(
@@ -4966,15 +4966,15 @@ async def _ensure_uvvis_session_key(conn) -> tuple[str, str]:
     manager = _get_server_mcp_manager(conn)
     if manager is None:
         return "", _UVVIS_NOT_READY_REPLY
-    if not manager.is_mcp_tool("uvvis_session"):
-        try:
-            await manager.ensure_client_initialized("uvvis")
-        except Exception as exc:
-            conn.logger.bind(tag=TAG).warning(
-                f"uvvis client targeted initialize failed: {exc}"
-            )
-        if not manager.is_mcp_tool("uvvis_session"):
-            return "", _UVVIS_NOT_READY_REPLY
+    try:
+        ready = await manager.ensure_client_initialized("uvvis")
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"uvvis client targeted initialize failed: {exc}"
+        )
+        ready = False
+    if not ready or not manager.is_mcp_tool("uvvis_session"):
+        return "", _UVVIS_NOT_READY_REPLY
 
     try:
         payload = await _execute_uvvis_tool_payload(

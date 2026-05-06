@@ -16,6 +16,17 @@ from .mcp_client import ServerMCPClient, _coerce_timeout_value
 TAG = __name__
 logger = setup_logging()
 
+_REQUIRED_CLIENT_TOOLS: Dict[str, frozenset[str]] = {
+    "uvvis": frozenset(
+        {
+            "uvvis_session",
+            "uvvis_prepare_dark_current",
+            "uvvis_measure_spectra",
+            "uvvis_measure_kinetics",
+        }
+    )
+}
+
 
 class ServerMCPManager:
     """Shared MCP client pool for all device connections."""
@@ -184,6 +195,8 @@ class ServerMCPManager:
                 type(self)._shared_ref_count += 1
                 self._acquired = True
 
+        if "uvvis" in self.load_config():
+            await self.ensure_client_initialized("uvvis")
         self._refresh_conn_tool_cache()
 
     def get_all_tools(self) -> List[Dict[str, Any]]:
@@ -228,16 +241,37 @@ class ServerMCPManager:
         """Check whether a tool exists in the shared pool."""
         return tool_name in type(self)._shared_tool_to_client
 
+    @classmethod
+    def _missing_required_tools(cls, client_name: str) -> set[str]:
+        required = _REQUIRED_CLIENT_TOOLS.get(client_name, frozenset())
+        if not required:
+            return set()
+
+        available = {
+            (tool.get("function") or {}).get("name")
+            for tool in cls._shared_client_tools.get(client_name, [])
+            if isinstance(tool, dict)
+        }
+        return {tool_name for tool_name in required if tool_name not in available}
+
     async def ensure_client_initialized(self, client_name: str) -> bool:
         """Best-effort targeted recovery for a missing or disconnected shared client."""
         current = type(self)._shared_clients.get(client_name)
-        if current is not None and current.is_connected():
+        missing_required_tools = self._missing_required_tools(client_name)
+        if current is not None and current.is_connected() and not missing_required_tools:
             return True
+        if missing_required_tools:
+            logger.bind(tag=TAG).warning(
+                "MCP client %s is missing required tools %s; forcing a refresh",
+                client_name,
+                sorted(missing_required_tools),
+            )
 
         reconnect_lock = self._get_reconnect_lock(client_name)
         async with reconnect_lock:
             current = type(self)._shared_clients.get(client_name)
-            if current is not None and current.is_connected():
+            missing_required_tools = self._missing_required_tools(client_name)
+            if current is not None and current.is_connected() and not missing_required_tools:
                 return True
 
             if current is not None:
@@ -267,6 +301,14 @@ class ServerMCPManager:
             )
 
         self._refresh_conn_tool_cache()
+        missing_required_tools = self._missing_required_tools(client_name)
+        if missing_required_tools:
+            logger.bind(tag=TAG).warning(
+                "MCP client %s is still missing required tools after refresh: %s",
+                client_name,
+                sorted(missing_required_tools),
+            )
+            return False
         return True
 
     async def _reconnect_client(
