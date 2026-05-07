@@ -682,3 +682,24 @@ def validate_mcp_endpoint(mcp_endpoint: str) -> bool:
         return False
 
     return True
+
+
+def normalize_mcp_endpoint_for_ws(mcp_endpoint: str) -> str:
+    """
+    Normalize a configured MCP endpoint into the websocket call URL used at runtime.
+
+    Accepts either the user-facing `/mcp/` form or the already-normalized `/call/`
+    websocket URL. Returns an empty string for placeholders or invalid values.
+    """
+    endpoint = str(mcp_endpoint or "").strip()
+    if not endpoint or endpoint.lower() == "null":
+        return ""
+
+    if validate_mcp_endpoint(endpoint):
+        return endpoint.replace("/mcp/", "/call/")
+
+    lower_endpoint = endpoint.lower()
+    if endpoint.startswith(("ws://", "wss://")) and "/call/" in endpoint and "key" not in lower_endpoint:
+        return endpoint
+
+    return ""

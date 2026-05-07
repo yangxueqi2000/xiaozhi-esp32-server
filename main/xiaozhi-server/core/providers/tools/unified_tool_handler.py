@@ -13,6 +13,7 @@ from .server_mcp import ServerMCPExecutor
 from .device_iot import DeviceIoTExecutor
 from .device_mcp import DeviceMCPExecutor
 from .mcp_endpoint import MCPEndpointExecutor
+from core.utils.util import normalize_mcp_endpoint_for_ws
 
 
 class UnifiedToolHandler:
@@ -83,13 +84,10 @@ class UnifiedToolHandler:
             from .mcp_endpoint import connect_mcp_endpoint
 
             # 从配置中获取MCP接入点URL
-            mcp_endpoint_url = self.config.get("mcp_endpoint", "")
+            raw_mcp_endpoint_url = str(self.config.get("mcp_endpoint", "") or "").strip()
+            mcp_endpoint_url = normalize_mcp_endpoint_for_ws(raw_mcp_endpoint_url)
 
-            if (
-                mcp_endpoint_url
-                and "你的" not in mcp_endpoint_url
-                and mcp_endpoint_url != "null"
-            ):
+            if mcp_endpoint_url:
                 self.logger.info(f"正在初始化MCP接入点: {mcp_endpoint_url}")
                 mcp_endpoint_client = await connect_mcp_endpoint(
                     mcp_endpoint_url, self.conn
@@ -101,6 +99,9 @@ class UnifiedToolHandler:
                     self.logger.info("MCP接入点初始化成功")
                 else:
                     self.logger.warning("MCP接入点初始化失败")
+            elif raw_mcp_endpoint_url and raw_mcp_endpoint_url != "null":
+                self.logger.warning(f"跳过无效的MCP接入点: {raw_mcp_endpoint_url}")
+                self.config["mcp_endpoint"] = ""
 
         except Exception as e:
             self.logger.error(f"初始化MCP接入点失败: {e}")

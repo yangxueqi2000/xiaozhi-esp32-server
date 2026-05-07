@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import tomllib
 import types
 import unittest
 from pathlib import Path
@@ -36,9 +37,10 @@ from core.providers.llm.codex.codex import (
     _CodexSession,
     _decode_stderr_line,
     _experiment_prompt_block,
-    _load_codex_mcp_config_overrides,
+    _load_codex_mcp_server_configs,
     _recoverable_stderr_reason,
     _should_suppress_stderr_warning,
+    LLMProvider,
 )
 
 
@@ -185,7 +187,7 @@ class CodexPromptStateTest(unittest.TestCase):
 
         self.assertIn("allow_login_shell=false", session.app_server_config_overrides)
 
-    def test_load_codex_mcp_config_overrides_reads_stdio_env_from_settings_json(self):
+    def test_load_codex_mcp_server_configs_reads_stdio_env_from_settings_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             settings_path = Path(tmp_dir) / ".mcp_server_settings.json"
             settings_path.write_text(
@@ -207,23 +209,99 @@ class CodexPromptStateTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            overrides = _load_codex_mcp_config_overrides(settings_path)
+            servers = _load_codex_mcp_server_configs(settings_path)
 
-        self.assertIn(
-            'mcp_servers.experiment-graph.command="C:/Python/python.exe"',
-            overrides,
+        self.assertEqual("C:/Python/python.exe", servers["experiment-graph"]["command"])
+        self.assertEqual(
+            ["C:/repo/experiment_graph_mcp_server.py"],
+            servers["experiment-graph"]["args"],
         )
-        self.assertIn(
-            'mcp_servers.experiment-graph.args=["C:/repo/experiment_graph_mcp_server.py"]',
-            overrides,
+        self.assertEqual(
+            {
+                "EXPERIMENT_YAML_PATH": "C:/repo/experiments.yaml",
+                "PYTHONUTF8": "1",
+            },
+            servers["experiment-graph"]["env"],
         )
-        env_override = next(
-            item
-            for item in overrides
-            if item.startswith("mcp_servers.experiment-graph.env=")
-        )
-        self.assertIn('EXPERIMENT_YAML_PATH = "C:/repo/experiments.yaml"', env_override)
-        self.assertIn('PYTHONUTF8 = "1"', env_override)
+
+    def test_prepare_runtime_codex_home_rewrites_uvvis_as_url_server(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+
+            (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+            (codex_home / "config.toml").write_text(
+                "\n".join(
+                    [
+                        '[mcp_servers.uvvis]',
+                        'command = "python"',
+                        'args = ["legacy_uvvis.py"]',
+                        "",
+                        '[mcp_servers.experiment-graph]',
+                        'command = "python"',
+                        'args = ["legacy_experiment.py"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            settings_path = root / ".mcp_server_settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "uvvis": {
+                                "url": "http://127.0.0.1:8766/mcp",
+                                "headers": {"Authorization": "Bearer demo-token"},
+                            },
+                            "experiment-graph": {
+                                "command": "C:/Python/python.exe",
+                                "args": ["C:/repo/experiment_graph_mcp_server.py"],
+                            },
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            session = _CodexSession(
+                {
+                    "codex_bin": "codex.cmd",
+                    "model_name": "gpt-5.4",
+                    "workspace": str(workspace),
+                    "system_prompt_mode": "first_turn",
+                    "bootstrap_mode": "none",
+                    "auto_approve": True,
+                    "network_access": True,
+                    "export_api_key": False,
+                    "codex_config_path": str(codex_home / "config.toml"),
+                    "mcp_settings_path": str(settings_path),
+                },
+                "test-session",
+            )
+
+            runtime_home = session._prepare_runtime_codex_home()
+
+            self.assertIsNotNone(runtime_home)
+            self.assertTrue((runtime_home / "auth.json").exists())
+
+            merged = tomllib.loads((runtime_home / "config.toml").read_text(encoding="utf-8"))
+            self.assertEqual(
+                {"url": "http://127.0.0.1:8766/mcp", "http_headers": {"Authorization": "Bearer demo-token"}},
+                merged["mcp_servers"]["uvvis"],
+            )
+            self.assertEqual(
+                {
+                    "command": "C:/Python/python.exe",
+                    "args": ["C:/repo/experiment_graph_mcp_server.py"],
+                },
+                merged["mcp_servers"]["experiment-graph"],
+            )
 
     def test_timeout_without_current_step_uses_operation_template(self):
         prompt_text = self._first_prompt_with_experiment_context(
@@ -418,6 +496,39 @@ class CodexPromptStateTest(unittest.TestCase):
             )
 
         self.assertEqual(str(live_bin), session.codex_bin)
+
+    def test_provider_cleanup_closes_all_cached_sessions(self):
+        provider = LLMProvider(
+            {
+                "codex_bin": "codex.cmd",
+                "model_name": "gpt-5.4",
+                "workspace": str(SCRIPT_DIR),
+                "system_prompt_mode": "first_turn",
+                "bootstrap_mode": "none",
+                "auto_approve": True,
+                "network_access": True,
+                "export_api_key": False,
+            }
+        )
+
+        closed = []
+
+        class _FakeSession:
+            def __init__(self, name: str):
+                self.name = name
+
+            def close(self):
+                closed.append(self.name)
+
+        provider._sessions = {
+            "session-a": _FakeSession("session-a"),
+            "session-b": _FakeSession("session-b"),
+        }
+
+        provider.cleanup()
+
+        self.assertEqual(["session-a", "session-b"], closed)
+        self.assertEqual({}, provider._sessions)
 
 
 if __name__ == "__main__":

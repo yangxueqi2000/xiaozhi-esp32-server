@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 from typing import Dict, Optional
 
@@ -212,6 +213,37 @@ class WebSocketServer:
         ):
             await asyncio.Future()
 
+    async def _cleanup_shared_component(self, name: str, component) -> None:
+        cleanup = getattr(component, "cleanup", None)
+        if not callable(cleanup):
+            cleanup = getattr(component, "close", None)
+        if not callable(cleanup):
+            return
+
+        try:
+            result = cleanup()
+            if inspect.isawaitable(result):
+                await result
+            self.logger.bind(tag=TAG).info(
+                f"shared component cleanup completed: {name}"
+            )
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"shared component cleanup failed: {name}, error={exc}"
+            )
+
+    async def _cleanup_shared_modules(self) -> None:
+        seen = set()
+        for name in ("llm", "intent", "memory", "asr", "vad"):
+            component = getattr(self, f"_{name}", None)
+            if component is None:
+                continue
+            ident = id(component)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            await self._cleanup_shared_component(name, component)
+
     async def stop(self):
         """Best-effort shutdown for active connections and shared MCP clients."""
         async with self.connections_lock:
@@ -263,6 +295,7 @@ class WebSocketServer:
                 )
 
         await ServerMCPManager.force_cleanup_shared_pool()
+        await self._cleanup_shared_modules()
 
     async def _handle_connection(self, websocket):
         headers = dict(websocket.request.headers)

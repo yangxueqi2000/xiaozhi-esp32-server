@@ -104,6 +104,17 @@ sys.modules.setdefault(
 
 from core.websocket_server import WebSocketServer
 
+for _module_name in (
+    "core.websocket_server",
+    "core.providers.tools.server_mcp.mcp_manager",
+    "core.auth",
+    "core.connection",
+    "core.utils.modules_initialize",
+    "core.utils.util",
+    "config.config_loader",
+):
+    sys.modules.pop(_module_name, None)
+
 
 class _FakeHandler:
     def __init__(self, *, session_id: str, reconnect_ready: bool):
@@ -141,6 +152,14 @@ class _FakeClosableHandler:
         self.close_calls.append(websocket)
 
 
+class _FakeCleanupComponent:
+    def __init__(self):
+        self.cleanup_calls = 0
+
+    async def cleanup(self):
+        self.cleanup_calls += 1
+
+
 class WebSocketServerDeviceIsolationTest(unittest.IsolatedAsyncioTestCase):
     def _build_server(self):
         server = object.__new__(WebSocketServer)
@@ -148,6 +167,11 @@ class WebSocketServerDeviceIsolationTest(unittest.IsolatedAsyncioTestCase):
         server.connections_lock = asyncio.Lock()
         server.connections_by_session = {}
         server.connections_by_device = {}
+        server._llm = None
+        server._intent = None
+        server._memory = None
+        server._asr = None
+        server._vad = None
         return server
 
     def setUp(self):
@@ -218,6 +242,8 @@ class WebSocketServerDeviceIsolationTest(unittest.IsolatedAsyncioTestCase):
         server = self._build_server()
         handler_a = _FakeClosableHandler(session_id="session-a", device_id="device-a")
         handler_b = _FakeClosableHandler(session_id="session-b", device_id="device-b")
+        llm_component = _FakeCleanupComponent()
+        server._llm = llm_component
         server.connections_by_session = {
             "session-a": handler_a,
             "session-b": handler_b,
@@ -236,3 +262,4 @@ class WebSocketServerDeviceIsolationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({}, server.connections_by_session)
         self.assertEqual({}, server.connections_by_device)
         self.assertEqual(1, _FakeServerMCPManager.force_cleanup_calls)
+        self.assertEqual(1, llm_component.cleanup_calls)

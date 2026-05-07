@@ -71,6 +71,10 @@ from core.providers.tools.server_mcp.mcp_manager import ServerMCPManager
 class _FakeConn:
     def __init__(self, yaml_path: str):
         self.experiment_yaml_path = yaml_path
+        self.device_id = ""
+        self.headers = {}
+        self.session_id = ""
+        self.experiment_session_id = ""
 
 
 class ServerMCPManagerConfigTest(unittest.TestCase):
@@ -109,6 +113,75 @@ class ServerMCPManagerConfigTest(unittest.TestCase):
         self.assertEqual(
             str(yaml_path.resolve()),
             config["experiment-graph"]["env"]["EXPERIMENT_YAML_PATH"],
+        )
+
+
+class _FakeRuntimeClient:
+    def __init__(self):
+        self.calls = []
+
+    def is_connected(self):
+        return True
+
+    async def call_tool(self, tool_name, arguments, progress_callback=None, meta=None):
+        self.calls.append(
+            {
+                "tool_name": tool_name,
+                "arguments": dict(arguments),
+                "meta": dict(meta or {}),
+            }
+        )
+        return {"ok": True}
+
+
+class ServerMCPManagerRecoveryTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        ServerMCPManager._shared_clients = {}
+        ServerMCPManager._shared_client_tools = {}
+        ServerMCPManager._shared_tool_to_client = {}
+        ServerMCPManager._shared_initialized = False
+        ServerMCPManager._shared_ref_count = 0
+        ServerMCPManager._shared_init_lock = None
+        ServerMCPManager._shared_reconnect_locks = {}
+
+    async def test_execute_tool_refreshes_uvvis_mapping_when_tool_owner_is_missing(self):
+        conn = _FakeConn("")
+        manager = ServerMCPManager(conn)
+        fake_client = _FakeRuntimeClient()
+        refreshed = []
+
+        async def fake_ensure_client_initialized(client_name):
+            refreshed.append(client_name)
+            ServerMCPManager._shared_clients["uvvis"] = fake_client
+            ServerMCPManager._shared_client_tools["uvvis"] = [
+                {
+                    "function": {
+                        "name": "uvvis_prepare_dark_current",
+                    }
+                }
+            ]
+            ServerMCPManager._shared_tool_to_client[
+                "uvvis_prepare_dark_current"
+            ] = "uvvis"
+            return True
+
+        manager.ensure_client_initialized = fake_ensure_client_initialized
+
+        result = await manager.execute_tool(
+            "uvvis_prepare_dark_current",
+            {"session_key": "lease-1"},
+        )
+
+        self.assertEqual(["uvvis"], refreshed)
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(1, len(fake_client.calls))
+        self.assertEqual(
+            {
+                "tool_name": "uvvis_prepare_dark_current",
+                "arguments": {"session_key": "lease-1"},
+                "meta": {},
+            },
+            fake_client.calls[0],
         )
 
 

@@ -637,7 +637,7 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
     ):
         return (
             "先检查1到5号样品位都为空，参比位也不要放任何液体。"
-            "确认后告诉我都空了。"
+            "都空了就告诉我。可以开始时直接说“开始扫描”。"
         )
 
     if signature and (
@@ -722,7 +722,7 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
     reply_map = {
         "step_3_uv_vis_shared_dark_air_prep": (
             "先检查1到5号样品位都为空，参比位也不要放任何液体。"
-            "确认后告诉我都空了。"
+            "都空了就告诉我。可以开始时直接说“开始扫描”。"
         ),
         "step_3_uv_vis_shared_dark_blank_prep": (
             f"{prefix}1-5号样品：纯水空白校正。"
@@ -2770,6 +2770,18 @@ def _resolve_experiment_yaml_steps(conn) -> list[dict]:
     return []
 
 
+def _experiment_has_step_id(conn, step_id: str) -> bool:
+    target_step_id = str(step_id or "").strip()
+    if not target_step_id:
+        return False
+
+    return any(
+        str(step.get("id", "") or "").strip() == target_step_id
+        for step in _resolve_experiment_yaml_steps(conn)
+        if isinstance(step, dict)
+    )
+
+
 _EXPERIMENT_STEP_MATCH_ALIAS_RULES = (
     (re.compile(r"agno3", flags=re.IGNORECASE), ("硝酸银",)),
     (re.compile(r"硝酸银"), ("agno3",)),
@@ -4259,6 +4271,51 @@ def _looks_like_uvvis_empty_positions_reply(filtered_text: str) -> bool:
     return _contains_any(norm, ready_tokens)
 
 
+def _looks_like_uvvis_empty_then_start_reply(filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    if not norm:
+        return False
+    if _is_negative_short_reply_fixed(filtered_text):
+        return False
+    empty_tokens = (
+        "都空了",
+        "已经都空了",
+        "都留空了",
+        "已经留空了",
+        "样品位都空了",
+        "样品位和参比位都空了",
+        "空架准备好了",
+    )
+    start_tokens = (
+        "可以开始了",
+        "开始吧",
+        "开始测量",
+        "开始扫描",
+        "可以开始扫描",
+        "扫描吧",
+        "开始空架扫描",
+    )
+    return _contains_any(norm, empty_tokens) and _contains_any(norm, start_tokens)
+
+
+def _looks_like_uvvis_start_scan_reply(filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    if not norm:
+        return False
+    if _is_negative_short_reply_fixed(filtered_text):
+        return False
+    start_tokens = (
+        "可以开始了",
+        "开始吧",
+        "开始测量",
+        "开始扫描",
+        "可以开始扫描",
+        "扫描吧",
+        "开始空架扫描",
+    )
+    return _contains_any(norm, start_tokens)
+
+
 def _get_current_experiment_step_id(conn) -> str:
     step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
     if step_id:
@@ -5007,6 +5064,20 @@ def _payload_has_success_flag(payload) -> bool | None:
 
 
 async def _execute_uvvis_tool_payload(conn, tool_name: str, arguments: dict) -> dict:
+    manager = _get_server_mcp_manager(conn)
+    if manager is None:
+        raise RuntimeError(_UVVIS_NOT_READY_REPLY)
+    if str(tool_name or "").startswith("uvvis_"):
+        try:
+            ready = await manager.ensure_client_initialized("uvvis")
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"uvvis client targeted initialize failed before {tool_name}: {exc}"
+            )
+            ready = False
+        if not ready or not manager.is_mcp_tool(tool_name):
+            raise RuntimeError(_UVVIS_NOT_READY_REPLY)
+
     busy_token = f"uvvis:{tool_name}"
     busy_acquired = False
     if hasattr(conn, "acquire_external_busy"):
@@ -6292,6 +6363,35 @@ async def _release_uvvis_session_for_analysis(conn) -> None:
     setattr(conn, "_uvvis_analysis_release_done_step_id", step_id)
 
 
+async def _run_uvvis_shared_dark_air_scan(conn) -> tuple[bool, str]:
+    session_key, busy_reply = await _ensure_uvvis_session_key(conn)
+    if not session_key:
+        return False, busy_reply
+
+    prepare_payload = await _execute_uvvis_tool_payload(
+        conn,
+        "uvvis_prepare_dark_current",
+        {"session_key": session_key},
+    )
+    if _payload_looks_busy_or_inaccessible(prepare_payload):
+        return True, _UVVIS_BUSY_REPLY
+
+    completed, reply = await _complete_experiment_step_with_fields(
+        conn,
+        fields={
+            "empty_positions_confirmed": True,
+            "shared_dark_current_ready": True,
+            "shared_air_baseline_ready": True,
+            "observations": "共享暗电流和空气能量校正已完成。",
+        },
+        auto_advance=True,
+        fallback_reply="共享暗电流和空气能量校正已经完成。",
+    )
+    if completed:
+        _clear_uvvis_direct_state(conn)
+    return True, reply
+
+
 async def _handle_uvvis_shared_dark_air_prep(
     conn, original_text: str, filtered_text: str
 ) -> bool:
@@ -6317,7 +6417,7 @@ async def _handle_uvvis_shared_dark_air_prep(
         )
         speak_txt(
             conn,
-            "先检查1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。",
+            "先检查1到5号样品位都为空，参比位也不要放任何液体。都空了就告诉我。可以开始时直接说“开始扫描”。",
         )
         return True
 
@@ -6329,10 +6429,21 @@ async def _handle_uvvis_shared_dark_air_prep(
             await _start_direct_intent_turn(conn, original_text)
             speak_txt(conn, "好，等你确认样品位和参比位都留空后再告诉我。")
             return True
+        if (
+            _looks_like_uvvis_empty_then_start_reply(filtered_text)
+            or _looks_like_uvvis_start_scan_reply(filtered_text)
+        ):
+            await _start_direct_intent_turn(conn, original_text)
+            handled, reply = await _run_uvvis_shared_dark_air_scan(conn)
+            if handled:
+                if reply:
+                    speak_txt(conn, reply)
+                return True
+            return False
         if not _looks_like_uvvis_empty_positions_reply(filtered_text):
             if _looks_like_uvvis_ready_reply(filtered_text):
                 await _start_direct_intent_turn(conn, original_text)
-                speak_txt(conn, "先确认1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。")
+                speak_txt(conn, "先确认1到5号样品位都为空，参比位也不要放任何液体。都空了就告诉我。可以开始时直接说“开始扫描”。")
                 return True
             return False
         await _start_direct_intent_turn(conn, original_text)
@@ -6349,47 +6460,20 @@ async def _handle_uvvis_shared_dark_air_prep(
             await _start_direct_intent_turn(conn, original_text)
             speak_txt(conn, "好，等你可以开始扫描时再告诉我。")
             return True
-        if _looks_like_uvvis_empty_positions_reply(filtered_text):
-            await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "可以开始时告诉我“开始扫描”。")
-            return True
-        if not _looks_like_uvvis_ready_reply(filtered_text):
-            return False
-
-        session_key, busy_reply = await _ensure_uvvis_session_key(conn)
-        if not session_key:
-            if busy_reply:
+        if not (
+            _looks_like_uvvis_empty_then_start_reply(filtered_text)
+            or _looks_like_uvvis_ready_reply(filtered_text)
+        ):
+            if _looks_like_uvvis_empty_positions_reply(filtered_text):
                 await _start_direct_intent_turn(conn, original_text)
-                speak_txt(conn, busy_reply)
+                speak_txt(conn, "可以开始时告诉我“开始扫描”。")
                 return True
             return False
 
         await _start_direct_intent_turn(conn, original_text)
-        payload = await _execute_uvvis_tool_payload(
-            conn,
-            "uvvis_measure_spectra",
-            {
-                "session_key": session_key,
-                "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
-                "ready_for_samples": False,
-            },
-        )
-        if _payload_looks_busy_or_inaccessible(payload):
-            speak_txt(conn, _UVVIS_BUSY_REPLY)
-            return True
-
-        completed, reply = await _complete_experiment_step_with_fields(
-            conn,
-            fields={
-                "shared_dark_current_ready": True,
-                "shared_air_baseline_ready": True,
-                "observations": "共享暗电流和空气能量校正已完成。",
-            },
-            auto_advance=True,
-            fallback_reply="共享暗电流和空气能量校正已经完成。",
-        )
-        if completed:
-            _clear_uvvis_direct_state(conn)
+        handled, reply = await _run_uvvis_shared_dark_air_scan(conn)
+        if not handled:
+            return False
         if reply:
             speak_txt(conn, reply)
         return True
@@ -6425,7 +6509,7 @@ async def _handle_uvvis_shared_dark_air_prep(
     )
     speak_txt(
         conn,
-        "先检查1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。",
+        "先检查1到5号样品位都为空，参比位也不要放任何液体。都空了就告诉我。可以开始时直接说“开始扫描”。",
     )
     return True
 
@@ -6925,16 +7009,24 @@ async def _handle_uvvis_spectra_measurement(
         return True
     if _payload_mentions_missing_blank(payload):
         _clear_uvvis_direct_state(conn)
+        fallback_step_id = (
+            _UVVIS_SHARED_BLANK_STEP_ID
+            if _experiment_has_step_id(conn, _UVVIS_SHARED_BLANK_STEP_ID)
+            else _UVVIS_SHARED_DARK_AIR_STEP_ID
+        )
         await _call_experiment_graph_tool_fast(
             conn,
             "redirect_to_step",
             {
                 "session_id": str(getattr(conn, "experiment_session_id", "") or "").strip(),
-                "step_id": _UVVIS_SHARED_BLANK_STEP_ID,
+                "step_id": fallback_step_id,
             },
             priority="foreground",
         )
-        speak_txt(conn, "这一步缺少纯水空白，我先退回前置校正。请先把样品位和参比位都清空，再告诉我开始。")
+        if fallback_step_id == _UVVIS_SHARED_BLANK_STEP_ID:
+            speak_txt(conn, "这一步缺少纯水空白，我先退回前置校正。请先把样品位和参比位都清空，再告诉我开始。")
+        else:
+            speak_txt(conn, "这一步缺少共享前置校正，我先退回共享暗电流和空气能量校正。请先把样品位和参比位都清空，再告诉我开始扫描。")
         return True
 
     rows = _extract_uvvis_measure_spectra_rows(payload, conn)

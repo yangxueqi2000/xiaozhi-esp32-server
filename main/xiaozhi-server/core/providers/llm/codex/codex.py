@@ -3,8 +3,11 @@ import locale
 import os
 import queue
 import re
+import shutil
+import signal
 import subprocess
 import threading
+import tomllib
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +23,34 @@ _SERVER_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_MCP_SETTINGS_PATH = _SERVER_ROOT / "data" / ".mcp_server_settings.json"
 _DEFAULT_CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 _DEFAULT_APP_SERVER_CONFIG_OVERRIDES = ("allow_login_shell=false",)
+_RUNTIME_CODEX_HOME_COPY_FILES = (
+    "AGENTS.md",
+    "auth.json",
+    "cap_sid",
+    "installation_id",
+    "version.json",
+)
+_RUNTIME_CODEX_HOME_COPY_DIRS = (
+    "mcp-proxies",
+    "plugins",
+    "rules",
+    "skills",
+    "vendor_imports",
+)
+
+if os.name == "nt":
+    try:
+        import win32api
+        import win32con
+        import win32job
+    except ImportError:
+        win32api = None
+        win32con = None
+        win32job = None
+else:
+    win32api = None
+    win32con = None
+    win32job = None
 
 
 def _ts() -> str:
@@ -78,6 +109,166 @@ def _decode_stderr_line(line: Any) -> str:
             "big5",
         ),
     )
+
+
+def _create_windows_kill_job():
+    if os.name != "nt" or win32job is None:
+        return None
+
+    try:
+        job = win32job.CreateJobObject(None, "")
+        extended_info = win32job.QueryInformationJobObject(
+            job,
+            win32job.JobObjectExtendedLimitInformation,
+        )
+        extended_info["BasicLimitInformation"]["LimitFlags"] |= (
+            win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        win32job.SetInformationJobObject(
+            job,
+            win32job.JobObjectExtendedLimitInformation,
+            extended_info,
+        )
+        return job
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"failed to create windows job object for codex cleanup: {exc}"
+        )
+        return None
+
+
+def _close_windows_job(job_handle) -> None:
+    if job_handle is None or win32api is None:
+        return
+    try:
+        win32api.CloseHandle(job_handle)
+    except Exception:
+        pass
+
+
+def _assign_process_to_windows_job(
+    proc: subprocess.Popen,
+    job_handle,
+):
+    if (
+        os.name != "nt"
+        or job_handle is None
+        or win32api is None
+        or win32con is None
+        or win32job is None
+    ):
+        return None
+
+    process_handle = None
+    try:
+        process_handle = win32api.OpenProcess(
+            win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE,
+            False,
+            proc.pid,
+        )
+        win32job.AssignProcessToJobObject(job_handle, process_handle)
+        return job_handle
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"failed to assign codex app-server process {proc.pid} to job object: {exc}"
+        )
+        _close_windows_job(job_handle)
+        return None
+    finally:
+        if process_handle is not None:
+            try:
+                win32api.CloseHandle(process_handle)
+            except Exception:
+                pass
+
+
+def _taskkill_process_tree(pid: int) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _terminate_process_tree(
+    proc: subprocess.Popen,
+    *,
+    timeout_seconds: float,
+    windows_job_handle=None,
+) -> None:
+    pid = getattr(proc, "pid", None)
+
+    if os.name == "nt":
+        try:
+            proc.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            if windows_job_handle is not None and win32job is not None:
+                try:
+                    win32job.TerminateJobObject(windows_job_handle, 1)
+                except Exception:
+                    pass
+            elif pid:
+                _taskkill_process_tree(pid)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception:
+            if windows_job_handle is not None and win32job is not None:
+                try:
+                    win32job.TerminateJobObject(windows_job_handle, 1)
+                except Exception:
+                    pass
+            elif pid:
+                _taskkill_process_tree(pid)
+        finally:
+            _close_windows_job(windows_job_handle)
+        return
+
+    try:
+        proc.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
 
 
 def _resolve_optional_path(path_text: Any, base_dir: Optional[Path] = None) -> Optional[Path]:
@@ -141,9 +332,43 @@ def _toml_literal(value: Any) -> str:
     raise TypeError(f"unsupported TOML literal type: {type(value).__name__}")
 
 
-def _load_codex_mcp_config_overrides(settings_path: Optional[Path]) -> List[str]:
+def _load_toml_document(path: Optional[Path]) -> Dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+
+    try:
+        with open(path, "rb") as handle:
+            raw = tomllib.load(handle) or {}
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"codex config load failed: path={path} error={exc}"
+        )
+        return {}
+
+    if not isinstance(raw, dict):
+        logger.bind(tag=TAG).warning(
+            f"codex config ignored non-object root: path={path}"
+        )
+        return {}
+
+    return raw
+
+
+def _coerce_string_map(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    coerced: Dict[str, str] = {}
+    for key, item in value.items():
+        if key is None or item is None:
+            continue
+        coerced[str(key)] = str(item)
+    return coerced
+
+
+def _load_codex_mcp_server_configs(settings_path: Optional[Path]) -> Dict[str, Dict[str, Any]]:
     if settings_path is None or not settings_path.exists():
-        return []
+        return {}
 
     try:
         raw = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -151,13 +376,13 @@ def _load_codex_mcp_config_overrides(settings_path: Optional[Path]) -> List[str]
         logger.bind(tag=TAG).warning(
             f"codex mcp settings load failed: path={settings_path} error={exc}"
         )
-        return []
+        return {}
 
     servers = raw.get("mcpServers")
     if not isinstance(servers, dict):
-        return []
+        return {}
 
-    overrides: List[str] = []
+    merged_servers: Dict[str, Dict[str, Any]] = {}
     for name, server_cfg in servers.items():
         server_name = str(name or "").strip()
         if not server_name or not re.fullmatch(r"[A-Za-z0-9_-]+", server_name):
@@ -168,52 +393,115 @@ def _load_codex_mcp_config_overrides(settings_path: Optional[Path]) -> List[str]
         if not isinstance(server_cfg, dict):
             continue
 
-        prefix = f"mcp_servers.{server_name}"
         url = str(server_cfg.get("url", "") or "").strip()
         if url:
-            transport = str(server_cfg.get("transport", "") or "streamable-http").strip()
-            overrides.append(f"{prefix}.type={_toml_literal(transport)}")
-            overrides.append(f"{prefix}.url={_toml_literal(url)}")
+            merged_entry: Dict[str, Any] = {"url": url}
 
-            headers = server_cfg.get("headers")
-            if isinstance(headers, dict) and headers:
-                overrides.append(
-                    f"{prefix}.headers={_toml_literal({str(k): str(v) for k, v in headers.items() if v is not None})}"
-                )
+            headers = _coerce_string_map(server_cfg.get("headers"))
+            if headers:
+                merged_entry["http_headers"] = headers
+
             bearer_token_env_var = str(
                 server_cfg.get("bearer_token_env_var", "") or ""
             ).strip()
             if bearer_token_env_var:
-                overrides.append(
-                    f"{prefix}.bearer_token_env_var={_toml_literal(bearer_token_env_var)}"
-                )
+                merged_entry["bearer_token_env_var"] = bearer_token_env_var
+            merged_servers[server_name] = merged_entry
             continue
 
         command = str(server_cfg.get("command", "") or "").strip()
         if not command:
             continue
 
-        transport = str(server_cfg.get("transport", "") or "stdio").strip()
-        overrides.append(f"{prefix}.type={_toml_literal(transport)}")
-        overrides.append(f"{prefix}.command={_toml_literal(command)}")
+        merged_entry = {"command": command}
 
         args = server_cfg.get("args")
         if isinstance(args, list):
-            overrides.append(
-                f"{prefix}.args={_toml_literal([str(item) for item in args])}"
-            )
+            merged_entry["args"] = [str(item) for item in args]
 
-        env = server_cfg.get("env")
-        if isinstance(env, dict) and env:
-            overrides.append(
-                f"{prefix}.env={_toml_literal({str(k): str(v) for k, v in env.items() if v is not None})}"
-            )
+        env = _coerce_string_map(server_cfg.get("env"))
+        if env:
+            merged_entry["env"] = env
 
         cwd = str(server_cfg.get("cwd", "") or "").strip()
         if cwd:
-            overrides.append(f"{prefix}.cwd={_toml_literal(cwd)}")
+            merged_entry["cwd"] = cwd
 
-    return overrides
+        merged_servers[server_name] = merged_entry
+
+    return merged_servers
+
+
+def _merge_codex_mcp_server_configs(
+    base_config: Dict[str, Any],
+    server_configs: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    merged = deepcopy(base_config) if isinstance(base_config, dict) else {}
+    existing_servers = merged.get("mcp_servers")
+    if not isinstance(existing_servers, dict):
+        existing_servers = {}
+    else:
+        existing_servers = deepcopy(existing_servers)
+
+    for server_name, server_cfg in server_configs.items():
+        existing_servers[server_name] = deepcopy(server_cfg)
+
+    merged["mcp_servers"] = existing_servers
+    return merged
+
+
+def _split_toml_table_items(
+    value: Dict[str, Any],
+) -> Tuple[List[Tuple[str, Any]], List[Tuple[str, Dict[str, Any]]]]:
+    scalars: List[Tuple[str, Any]] = []
+    child_tables: List[Tuple[str, Dict[str, Any]]] = []
+    for key, item in value.items():
+        if item is None:
+            continue
+        if isinstance(item, dict):
+            child_tables.append((str(key), item))
+        else:
+            scalars.append((str(key), item))
+    return scalars, child_tables
+
+
+def _toml_table_name(parts: List[str]) -> str:
+    return ".".join(_toml_key(str(part)) for part in parts)
+
+
+def _append_toml_table_lines(
+    lines: List[str],
+    table_value: Dict[str, Any],
+    table_path: List[str],
+) -> None:
+    scalar_items, child_tables = _split_toml_table_items(table_value)
+    if table_path:
+        if lines:
+            lines.append("")
+        lines.append(f"[{_toml_table_name(table_path)}]")
+
+    for key, value in scalar_items:
+        lines.append(f"{_toml_key(key)} = {_toml_literal(value)}")
+
+    for key, child_value in child_tables:
+        _append_toml_table_lines(lines, child_value, [*table_path, key])
+
+
+def _dump_toml_document(document: Dict[str, Any]) -> str:
+    if not isinstance(document, dict):
+        raise TypeError("toml document root must be a dict")
+
+    lines: List[str] = []
+    root_scalars, root_tables = _split_toml_table_items(document)
+
+    for key, value in root_scalars:
+        lines.append(f"{_toml_key(key)} = {_toml_literal(value)}")
+
+    for key, child_value in root_tables:
+        _append_toml_table_lines(lines, child_value, [key])
+
+    text = "\n".join(lines).rstrip()
+    return text + ("\n" if text else "")
 
 
 def _override_key(override: str) -> str:
@@ -1037,8 +1325,9 @@ def _experiment_prompt_block(
     parts.append(
         "UV-Vis execution guard:\n"
         "- The UV-Vis MCP tools are available in this runtime.\n"
-        "- If the current experiment step or local prompt explicitly defines shared dark-current and air-baseline preparation through uvvis_measure_spectra with ready_for_samples=false, follow that step definition instead of switching to uvvis_prepare_dark_current.\n"
-        "- Use uvvis_prepare_dark_current only for standalone manual dark-current preparation when the active experiment step does not already specify the shared-preparation uvvis_measure_spectra flow.\n"
+        "- If the current experiment step or local prompt explicitly requires uvvis_prepare_dark_current, call it first before the follow-up UV-Vis measurement tool defined for that step.\n"
+        "- For shared dark-current and air-baseline preparation, use uvvis_measure_spectra with ready_for_samples=false after any step-required uvvis_prepare_dark_current call has completed.\n"
+        "- Use uvvis_prepare_dark_current as a standalone manual dark-current action only when the active experiment step does not already define a larger shared-preparation sequence.\n"
         "- Before re-measuring a shared pure-water blank, inspect the shared uv_data_common directory for reusable blank artifacts and skip the blank scan when reusable data already exists there.\n"
         "- If the shared pure-water blank is missing, keep the positions empty and call uvvis_measure_spectra with ready_for_samples=false once to prepare the shared prerequisites in the background before you ask the student to place pure water.\n"
         "- After those shared prerequisites are ready, ask for six pure-water cuvettes only when the shared pure-water blank is still missing, then use uvvis_measure_spectra with ready_for_samples=true to record the pure-water blank.\n"
@@ -1120,6 +1409,7 @@ class _CodexSession:
         self._raw_stream_flush_bytes = int(config.get("raw_stream_flush_bytes", 8192))
 
         self.proc: Optional[subprocess.Popen] = None
+        self._proc_windows_job = None
         self.q: Optional[queue.Queue] = None
         self.thread_id: Optional[str] = None
         self._req_id = 0
@@ -1130,6 +1420,7 @@ class _CodexSession:
         self._restart_required = False
         self._restart_reason: Optional[str] = None
         self._suppress_powershell_profile_warning_lines = 0
+        self._runtime_codex_home: Optional[Path] = None
         self._lock = threading.Lock()
         self._watched_config_paths = self._build_watched_config_paths()
         self._watched_config_state = _snapshot_watched_paths(self._watched_config_paths)
@@ -1239,11 +1530,67 @@ class _CodexSession:
             labels += ", ..."
         return labels
 
+    def _resolve_runtime_codex_home_path(self) -> Optional[Path]:
+        base_home = self.codex_config_path.parent if self.codex_config_path else None
+        if base_home is None:
+            return None
+        try:
+            return (base_home / ".xiaozhi-runtime" / _safe_filename(self.session_key)).resolve()
+        except OSError:
+            return base_home / ".xiaozhi-runtime" / _safe_filename(self.session_key)
+
+    def _mirror_codex_home_support_files(
+        self,
+        source_home: Path,
+        target_home: Path,
+    ) -> None:
+        for file_name in _RUNTIME_CODEX_HOME_COPY_FILES:
+            source_path = source_home / file_name
+            if not source_path.is_file():
+                continue
+            shutil.copy2(source_path, target_home / file_name)
+
+        for dir_name in _RUNTIME_CODEX_HOME_COPY_DIRS:
+            source_path = source_home / dir_name
+            target_path = target_home / dir_name
+            if not source_path.is_dir() or target_path.exists():
+                continue
+            shutil.copytree(source_path, target_path)
+
+    def _prepare_runtime_codex_home(self) -> Optional[Path]:
+        server_configs = _load_codex_mcp_server_configs(self.mcp_settings_path)
+        if not server_configs:
+            self._runtime_codex_home = None
+            return None
+
+        runtime_codex_home = self._resolve_runtime_codex_home_path()
+        if runtime_codex_home is None:
+            return None
+
+        source_home = self.codex_config_path.parent
+        try:
+            runtime_codex_home.mkdir(parents=True, exist_ok=True)
+            if source_home.exists():
+                self._mirror_codex_home_support_files(source_home, runtime_codex_home)
+
+            base_config = _load_toml_document(self.codex_config_path)
+            merged_config = _merge_codex_mcp_server_configs(base_config, server_configs)
+            (runtime_codex_home / "config.toml").write_text(
+                _dump_toml_document(merged_config),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(
+                "failed to prepare runtime CODEX_HOME; falling back to default config: "
+                f"session={self.session_key} error={exc}"
+            )
+            return None
+
+        self._runtime_codex_home = runtime_codex_home
+        return runtime_codex_home
+
     def _build_app_server_command(self) -> List[str]:
         cmd = [self.codex_bin, "app-server"]
-
-        for override in _load_codex_mcp_config_overrides(self.mcp_settings_path):
-            cmd.extend(["-c", override])
 
         for override in self.app_server_config_overrides:
             cmd.extend(["-c", override])
@@ -1359,6 +1706,9 @@ class _CodexSession:
         if codex_bin_dir and Path(codex_bin_dir).exists():
             env["PATH"] = codex_bin_dir + os.pathsep + env.get("PATH", "")
         env.update(self.env_overrides)
+        runtime_codex_home = self._prepare_runtime_codex_home()
+        if runtime_codex_home is not None:
+            env["CODEX_HOME"] = str(runtime_codex_home)
 
         launch_cmd = self._build_app_server_command()
         self.proc = subprocess.Popen(
@@ -1368,6 +1718,11 @@ class _CodexSession:
             stderr=subprocess.PIPE,
             cwd=self.workspace,
             env=env,
+            start_new_session=(os.name != "nt"),
+        )
+        self._proc_windows_job = _assign_process_to_windows_job(
+            self.proc,
+            _create_windows_kill_job(),
         )
         self._watched_config_state = _snapshot_watched_paths(self._watched_config_paths)
 
@@ -1459,20 +1814,18 @@ class _CodexSession:
         if not self.proc:
             return
         proc = self.proc
+        windows_job_handle = self._proc_windows_job
         try:
             if proc.stdin:
                 proc.stdin.close()
         except Exception:
             pass
         try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception:
-                pass
+            _terminate_process_tree(
+                proc,
+                timeout_seconds=5.0,
+                windows_job_handle=windows_job_handle,
+            )
         except Exception:
             pass
         for stream in (proc.stdout, proc.stderr):
@@ -1482,11 +1835,19 @@ class _CodexSession:
             except Exception:
                 pass
         self.proc = None
+        self._proc_windows_job = None
         self.q = None
         self.thread_id = None
         self._active_turn_id = None
         self._restart_required = False
         self._restart_reason = None
+        runtime_codex_home = self._runtime_codex_home
+        self._runtime_codex_home = None
+        if runtime_codex_home and runtime_codex_home.exists():
+            try:
+                shutil.rmtree(runtime_codex_home, ignore_errors=True)
+            except Exception:
+                pass
 
     def _restart(self) -> None:
         self.close()
@@ -1897,6 +2258,17 @@ class LLMProvider(LLMProviderBase):
         finally:
             if use_temp_session:
                 session.close()
+
+    def cleanup(self) -> None:
+        sessions = list(self._sessions.values())
+        self._sessions = {}
+        for session in sessions:
+            try:
+                session.close()
+            except Exception as exc:
+                logger.bind(tag=TAG).warning(
+                    f"failed to close codex session during provider cleanup: {exc}"
+                )
 
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
         patched_dialogue = deepcopy(dialogue)

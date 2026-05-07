@@ -1,9 +1,11 @@
 import asyncio
+
 from aiohttp import web
+
 from config.logger import setup_logging
+from core.api.device_mcp_handler import DeviceMCPHandler
 from core.api.ota_handler import OTAHandler
 from core.api.vision_handler import VisionHandler
-from core.api.device_mcp_handler import DeviceMCPHandler
 
 TAG = __name__
 
@@ -16,24 +18,18 @@ class SimpleHttpServer:
         self.ota_handler = OTAHandler(config)
         self.vision_handler = VisionHandler(config)
         self.device_mcp_handler = DeviceMCPHandler(config, ws_server)
+        self._app = None
+        self._runner = None
+        self._site = None
+        self._stop_event = None
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
-        """获取websocket地址
-
-        Args:
-            local_ip: 本地IP地址
-            port: 端口号
-
-        Returns:
-            str: websocket地址
-        """
         server_config = self.config["server"]
         websocket_config = server_config.get("websocket")
 
-        if websocket_config and "你" not in websocket_config:
+        if websocket_config:
             return websocket_config
-        else:
-            return f"ws://{local_ip}:{port}/xiaozhi/v1/"
+        return f"ws://{local_ip}:{port}/xiaozhi/v1/"
 
     async def start(self):
         try:
@@ -44,9 +40,9 @@ class SimpleHttpServer:
 
             if port:
                 app = web.Application()
+                self._app = app
 
                 if not read_config_from_api:
-                    # 如果没有开启智控台，只是单模块运行，就需要再添加简单OTA接口，用于下发websocket接口
                     app.add_routes(
                         [
                             web.get("/xiaozhi/ota/", self.ota_handler.handle_get),
@@ -54,7 +50,6 @@ class SimpleHttpServer:
                             web.options(
                                 "/xiaozhi/ota/", self.ota_handler.handle_options
                             ),
-                            # 下载接口，仅提供 data/bin/*.bin 下载
                             web.get(
                                 "/xiaozhi/ota/download/{filename}",
                                 self.ota_handler.handle_download,
@@ -65,18 +60,21 @@ class SimpleHttpServer:
                             ),
                         ]
                     )
-                # 添加路由
+
                 app.add_routes(
                     [
                         web.get("/mcp/vision/explain", self.vision_handler.handle_get),
                         web.post(
-                            "/mcp/vision/explain", self.vision_handler.handle_post
+                            "/mcp/vision/explain",
+                            self.vision_handler.handle_post,
                         ),
                         web.options(
-                            "/mcp/vision/explain", self.vision_handler.handle_options
+                            "/mcp/vision/explain",
+                            self.vision_handler.handle_options,
                         ),
                         web.get(
-                            "/mcp/device/sessions", self.device_mcp_handler.handle_get
+                            "/mcp/device/sessions",
+                            self.device_mcp_handler.handle_get,
                         ),
                         web.post(
                             "/mcp/device/take_photo",
@@ -109,18 +107,47 @@ class SimpleHttpServer:
                     ]
                 )
 
-                # 运行服务
-                runner = web.AppRunner(app)
-                await runner.setup()
-                site = web.TCPSite(runner, host, port)
-                await site.start()
+                self._runner = web.AppRunner(app)
+                await self._runner.setup()
+                self._site = web.TCPSite(self._runner, host, port)
+                await self._site.start()
 
-                # 保持服务运行
-                while True:
-                    await asyncio.sleep(3600)  # 每隔 1 小时检查一次
+                self._stop_event = asyncio.Event()
+                await self._stop_event.wait()
         except Exception as e:
-            self.logger.bind(tag=TAG).error(f"HTTP服务器启动失败: {e}")
+            self.logger.bind(tag=TAG).error(f"HTTP鏈嶅姟鍣ㄥ惎鍔ㄥけ璐? {e}")
             import traceback
 
-            self.logger.bind(tag=TAG).error(f"错误堆栈: {traceback.format_exc()}")
+            self.logger.bind(tag=TAG).error(f"閿欒鍫嗘爤: {traceback.format_exc()}")
             raise
+        finally:
+            await self.stop()
+
+    async def stop(self):
+        stop_event = self._stop_event
+        if stop_event is not None and not stop_event.is_set():
+            stop_event.set()
+
+        site = self._site
+        runner = self._runner
+
+        self._app = None
+        self._site = None
+        self._runner = None
+        self._stop_event = None
+
+        if site is not None:
+            try:
+                await site.stop()
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    f"HTTP server site stop failed: {exc}"
+                )
+
+        if runner is not None:
+            try:
+                await runner.cleanup()
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    f"HTTP server runner cleanup failed: {exc}"
+                )

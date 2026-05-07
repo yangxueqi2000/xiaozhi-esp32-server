@@ -2009,8 +2009,17 @@ def _looks_like_student_facing_scan_ready_sentence(text: str) -> bool:
         "告诉我可以开始扫描",
         "告诉我开始扫描",
         "可以开始扫描时直接告诉我",
+        "可以开始时直接说“开始扫描”",
+        "可以开始时直接说开始扫描",
     )
     if any(token in normalized for token in direct_ready_tokens):
+        return True
+
+    if (
+        "开始扫描" in normalized
+        and "直接说" in normalized
+        and "可以开始时" in normalized
+    ):
         return True
 
     return "可以开始扫描" in normalized and any(

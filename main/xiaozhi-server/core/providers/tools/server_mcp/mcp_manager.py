@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -150,6 +151,90 @@ class ServerMCPManager:
         env["EXPERIMENT_YAML_PATH"] = experiment_yaml_path
 
     @staticmethod
+    def _normalize_startup_args(raw_args: Any) -> list[str]:
+        if raw_args is None:
+            return []
+        if isinstance(raw_args, (str, Path)):
+            text = str(raw_args).strip()
+            return [text] if text else []
+
+        normalized: list[str] = []
+        if isinstance(raw_args, list):
+            for value in raw_args:
+                text = str(value or "").strip()
+                if text:
+                    normalized.append(text)
+        return normalized
+
+    async def _run_startup_hook(self, name: str, srv_config: Dict[str, Any]) -> None:
+        startup_cfg = srv_config.get("startup")
+        if not isinstance(startup_cfg, dict):
+            return
+
+        command = str(startup_cfg.get("command", "") or "").strip()
+        if not command:
+            return
+
+        args = self._normalize_startup_args(startup_cfg.get("args"))
+        cwd = str(startup_cfg.get("cwd", "") or "").strip() or None
+        startup_timeout = _coerce_timeout_value(
+            startup_cfg.get("timeout"),
+            default=45.0,
+            allow_unbounded=False,
+        )
+        try:
+            timeout_seconds = max(5.0, float(startup_timeout or 45.0))
+        except (TypeError, ValueError):
+            timeout_seconds = 45.0
+
+        env = {**os.environ}
+        for source in (srv_config.get("env"), startup_cfg.get("env")):
+            if isinstance(source, dict):
+                for key, value in source.items():
+                    key_text = str(key or "").strip()
+                    if not key_text:
+                        continue
+                    env[key_text] = str(value or "")
+
+        logger.bind(tag=TAG).info(
+            f"Running MCP startup hook for {name}: {command} {' '.join(args)}"
+        )
+        process = await asyncio.create_subprocess_exec(
+            command,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(Exception):
+                await process.communicate()
+            raise RuntimeError(
+                f"startup hook for MCP server {name} timed out after {timeout_seconds:.1f}s"
+            ) from exc
+
+        if process.returncode != 0:
+            stdout_text = stdout.decode("utf-8", errors="ignore").strip()
+            stderr_text = stderr.decode("utf-8", errors="ignore").strip()
+            detail = stderr_text or stdout_text or f"exit code {process.returncode}"
+            raise RuntimeError(f"startup hook for MCP server {name} failed: {detail}")
+
+    @staticmethod
+    def _infer_client_name_for_tool(tool_name: str) -> str:
+        normalized_name = str(tool_name or "").strip()
+        if normalized_name.startswith("uvvis_"):
+            return "uvvis"
+        return ""
+
+    @staticmethod
     def _resolve_client_initialize_timeout(srv_config: Dict[str, Any]) -> float:
         transport_type = str(srv_config.get("transport", "") or "").strip().lower()
         default_timeout = 20.0 if transport_type in {"streamable-http", "http", "sse"} else 10.0
@@ -173,6 +258,7 @@ class ServerMCPManager:
     ) -> Optional[tuple[str, ServerMCPClient, List[Dict[str, Any]]]]:
         client = None
         try:
+            await self._run_startup_hook(name, srv_config)
             logger.bind(tag=TAG).info(f"Initializing server MCP client: {name}")
             client = ServerMCPClient(srv_config)
             init_timeout = self._resolve_client_initialize_timeout(srv_config)
@@ -431,9 +517,19 @@ class ServerMCPManager:
 
         client_name = type(self)._shared_tool_to_client.get(tool_name)
         if not client_name:
+            inferred_client_name = self._infer_client_name_for_tool(tool_name)
+            if inferred_client_name:
+                await self.ensure_client_initialized(inferred_client_name)
+                client_name = type(self)._shared_tool_to_client.get(tool_name)
+        if not client_name:
             raise ValueError(f"Tool {tool_name} was not found in any MCP server")
 
         target_client = type(self)._shared_clients.get(client_name)
+        if not target_client:
+            ready = await self.ensure_client_initialized(client_name)
+            if not ready:
+                raise RuntimeError(f"MCP client {client_name} is not initialized")
+            target_client = type(self)._shared_clients.get(client_name)
         if not target_client:
             raise RuntimeError(f"MCP client {client_name} is not initialized")
 

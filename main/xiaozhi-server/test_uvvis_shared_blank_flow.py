@@ -346,7 +346,7 @@ class UvvisSharedBlankFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [
-                "先检查1到5号样品位都为空，参比位也不要放任何液体。确认后告诉我都空了。",
+                "先检查1到5号样品位都为空，参比位也不要放任何液体。都空了就告诉我。可以开始时直接说“开始扫描”。",
             ],
             spoken,
         )
