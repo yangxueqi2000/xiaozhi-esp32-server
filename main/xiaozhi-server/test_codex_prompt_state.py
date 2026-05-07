@@ -1,11 +1,15 @@
 import json
 import sys
 import tempfile
-import tomllib
 import types
 import unittest
 from pathlib import Path
 from types import MethodType
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent

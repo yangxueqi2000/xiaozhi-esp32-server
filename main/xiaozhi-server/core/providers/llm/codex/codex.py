@@ -7,11 +7,15 @@ import shutil
 import signal
 import subprocess
 import threading
-import tomllib
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 
 from config.logger import setup_logging
 from core.providers.llm.base import LLMProviderBase
