@@ -43,6 +43,7 @@ _EXPERIMENT_GRAPH_TOOLS = {
     "get_current_progress",
     "get_modifiable_records",
     "export_records",
+    "export_records_to_yaml",
     "start_trial",
     "cancel_trial",
     "add_field",
@@ -195,6 +196,47 @@ def extract_experiment_session_id(payload, arguments: dict | None = None) -> str
             if value:
                 return value
     return str((arguments or {}).get("session_id", "") or "").strip()
+
+
+def _coerce_positive_int(value) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 1 else None
+
+
+def extract_experiment_group_number(payload, arguments: dict | None = None) -> int | None:
+    body = _experiment_result_body(payload)
+
+    def from_mapping(mapping) -> int | None:
+        if not isinstance(mapping, dict):
+            return None
+        for key in ("current_group_number", "group_number", "experiment_group_number"):
+            number = _coerce_positive_int(mapping.get(key))
+            if number is not None:
+                return number
+        return None
+
+    for mapping in (body, body.get("state"), body.get("current_progress"), body.get("progress")):
+        number = from_mapping(mapping)
+        if number is not None:
+            return number
+        if isinstance(mapping, dict):
+            number = from_mapping(mapping.get("current_data"))
+            if number is not None:
+                return number
+
+    summary = body.get("summary")
+    if isinstance(summary, dict):
+        for mapping in (summary, summary.get("current_progress"), summary.get("current_step")):
+            number = from_mapping(mapping)
+            if number is not None:
+                return number
+
+    return from_mapping(arguments or {})
 
 
 def extract_experiment_message(payload) -> str:
@@ -361,6 +403,10 @@ def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None, ar
         session_id = extract_experiment_session_id(payload, arguments=arguments)
         if session_id:
             setattr(conn, "experiment_session_id", session_id)
+
+        group_number = extract_experiment_group_number(payload, arguments=arguments)
+        if group_number is not None:
+            setattr(conn, "experiment_current_group_number", group_number)
 
         current_step_id = _extract_experiment_current_step_id(payload)
         if current_step_id:

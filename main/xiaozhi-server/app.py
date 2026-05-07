@@ -1,7 +1,12 @@
 import asyncio
+import json
+import os
 import signal
+import subprocess
 import sys
 import uuid
+from pathlib import Path
+from urllib.request import urlopen
 
 from aioconsole import ainput
 
@@ -18,6 +23,22 @@ from core.websocket_server import WebSocketServer
 
 TAG = __name__
 logger = setup_logging()
+_voiceprint_process = None
+_voiceprint_log_handle = None
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+
+    text_lower = text.lower()
+    return (
+        "你的" in text
+        or "浣犵殑" in text
+        or "your" in text_lower
+        or "example" in text_lower
+    )
 
 
 async def wait_for_exit() -> None:
@@ -36,6 +57,141 @@ async def wait_for_exit() -> None:
         pass
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _voiceprint_health_url(config: dict) -> str:
+    voiceprint_config = config.get("voiceprint", {}) or {}
+    return str(voiceprint_config.get("url", "") or "").strip()
+
+
+def _voiceprint_health_ok(url: str, timeout: float = 3.0) -> bool:
+    if not url:
+        return False
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            if response.status != 200:
+                return False
+            body = json.loads(response.read().decode("utf-8"))
+            return body.get("status") == "healthy"
+    except Exception:
+        return False
+
+
+def _default_voiceprint_root() -> str:
+    github_root = Path(__file__).resolve().parents[2].parent
+    return str(github_root / "voiceprint-api")
+
+
+async def ensure_voiceprint_service(config: dict):
+    """Start local voiceprint-api when the experiment config enables voiceprint."""
+    global _voiceprint_process, _voiceprint_log_handle
+
+    voiceprint_config = config.get("voiceprint", {}) or {}
+    if not _as_bool(voiceprint_config.get("enabled"), default=False):
+        logger.bind(tag=TAG).info("声纹识别总开关已关闭，不启动 voiceprint-api")
+        return None
+
+    service_config = voiceprint_config.get("service", {}) or {}
+    if not _as_bool(service_config.get("auto_start"), default=True):
+        logger.bind(tag=TAG).info("voiceprint-api 自动启动已关闭")
+        return None
+
+    health_url = _voiceprint_health_url(config)
+    if _voiceprint_health_ok(health_url):
+        logger.bind(tag=TAG).info("voiceprint-api 已在运行，健康检查通过")
+        return None
+
+    root = Path(str(service_config.get("root") or _default_voiceprint_root())).resolve()
+    start_script = str(service_config.get("start_script") or "start_server.py").strip()
+    script_path = root / start_script
+    python_path = str(service_config.get("python") or sys.executable).strip()
+    startup_timeout = float(service_config.get("startup_timeout", 120) or 120)
+    log_file = Path(
+        str(
+            service_config.get("log_file")
+            or (Path(__file__).resolve().parent / "tmp" / "voiceprint_api_stdout.log")
+        )
+    )
+
+    if not script_path.exists():
+        logger.bind(tag=TAG).warning(
+            f"voiceprint-api 启动脚本不存在: {script_path}"
+        )
+        return None
+
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    _voiceprint_log_handle = open(log_file, "a", encoding="utf-8", buffering=1)
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = subprocess.CREATE_NO_WINDOW
+
+    logger.bind(tag=TAG).info(
+        "启动 voiceprint-api: "
+        f"python={python_path}, script={script_path}, health={health_url}"
+    )
+    _voiceprint_process = await asyncio.create_subprocess_exec(
+        python_path,
+        str(script_path),
+        cwd=str(root),
+        stdout=_voiceprint_log_handle,
+        stderr=subprocess.STDOUT,
+        creationflags=creationflags,
+    )
+
+    deadline = asyncio.get_running_loop().time() + max(startup_timeout, 1.0)
+    while asyncio.get_running_loop().time() < deadline:
+        if _voiceprint_health_ok(health_url):
+            logger.bind(tag=TAG).info("voiceprint-api 启动成功，健康检查通过")
+            return _voiceprint_process
+        if _voiceprint_process.returncode is not None:
+            logger.bind(tag=TAG).warning(
+                "voiceprint-api 进程提前退出: "
+                f"returncode={_voiceprint_process.returncode}, log={log_file}"
+            )
+            return _voiceprint_process
+        await asyncio.sleep(1.0)
+
+    logger.bind(tag=TAG).warning(
+        "voiceprint-api 启动后健康检查仍未通过: "
+        f"timeout={startup_timeout}s, log={log_file}"
+    )
+    return _voiceprint_process
+
+
+async def stop_managed_voiceprint_service():
+    global _voiceprint_process, _voiceprint_log_handle
+
+    process = _voiceprint_process
+    _voiceprint_process = None
+    if process is not None and process.returncode is None:
+        logger.bind(tag=TAG).info("停止由 xiaozhi 启动的 voiceprint-api")
+        try:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=8.0)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(f"停止 voiceprint-api 失败: {exc}")
+
+    if _voiceprint_log_handle is not None:
+        try:
+            _voiceprint_log_handle.close()
+        except Exception:
+            pass
+        _voiceprint_log_handle = None
+
+
 async def monitor_stdin():
     while True:
         await ainput()
@@ -44,11 +200,12 @@ async def monitor_stdin():
 async def main():
     check_ffmpeg_installed()
     config = load_config()
+    await ensure_voiceprint_service(config)
 
     auth_key = config["server"].get("auth_key", "")
-    if not auth_key or "浣?" in auth_key:
+    if _looks_like_placeholder(auth_key):
         auth_key = config.get("manager-api", {}).get("secret", "")
-        if not auth_key or "浣?" in auth_key:
+        if _looks_like_placeholder(auth_key):
             auth_key = str(uuid.uuid4().hex)
     config["server"]["auth_key"] = auth_key
 
@@ -65,41 +222,37 @@ async def main():
 
     read_config_from_api = config.get("read_config_from_api", False)
     port = int(config["server"].get("http_port", 8003))
+    local_ip = get_local_ip()
     if not read_config_from_api:
         logger.bind(tag=TAG).info(
-            "OTA鎺ュ彛鏄痋t\thttp://{}:{}/xiaozhi/ota/",
-            get_local_ip(),
-            port,
+            "OTA接口是\t{}",
+            f"http://{local_ip}:{port}/xiaozhi/ota/",
         )
     logger.bind(tag=TAG).info(
-        "瑙嗚鍒嗘瀽鎺ュ彛鏄痋thttp://{}:{}/mcp/vision/explain",
-        get_local_ip(),
-        port,
+        "视觉分析接口是\t{}",
+        f"http://{local_ip}:{port}/mcp/vision/explain",
     )
     logger.bind(tag=TAG).info(
-        "Take photo trigger URL is\thttp://{}:{}/mcp/device/take_photo",
-        get_local_ip(),
-        port,
+        "Take photo trigger URL is\t{}",
+        f"http://{local_ip}:{port}/mcp/device/take_photo",
     )
     logger.bind(tag=TAG).info(
-        "Preview local file URL is\thttp://{}:{}/mcp/device/preview_local_file",
-        get_local_ip(),
-        port,
+        "Preview local file URL is\t{}",
+        f"http://{local_ip}:{port}/mcp/device/preview_local_file",
     )
     logger.bind(tag=TAG).info(
-        "Session list URL is\thttp://{}:{}/mcp/device/sessions",
-        get_local_ip(),
-        port,
+        "Session list URL is\t{}",
+        f"http://{local_ip}:{port}/mcp/device/sessions",
     )
 
     mcp_endpoint = str(config.get("mcp_endpoint") or "").strip()
     if mcp_endpoint:
         normalized_mcp_endpoint = normalize_mcp_endpoint_for_ws(mcp_endpoint)
         if normalized_mcp_endpoint:
-            logger.bind(tag=TAG).info("mcp鎺ュ叆鐐规槸\t{}", mcp_endpoint)
+            logger.bind(tag=TAG).info("MCP接入点是\t{}", mcp_endpoint)
             config["mcp_endpoint"] = normalized_mcp_endpoint
         else:
-            logger.bind(tag=TAG).warning("mcp鎺ュ叆鐐逛笉绗﹀悎瑙勮寖")
+            logger.bind(tag=TAG).warning("MCP接入点不符合规范")
             config["mcp_endpoint"] = ""
 
     websocket_port = 8000
@@ -108,15 +261,14 @@ async def main():
         websocket_port = int(server_config.get("port", 8000))
 
     logger.bind(tag=TAG).info(
-        "Websocket鍦板潃鏄痋tws://{}:{}/xiaozhi/v1/",
-        get_local_ip(),
-        websocket_port,
+        "WebSocket地址是\t{}",
+        f"ws://{local_ip}:{websocket_port}/xiaozhi/v1/",
     )
     logger.bind(tag=TAG).info(
-        "=======涓婇潰鐨勫湴鍧€鏄痺ebsocket鍗忚鍦板潃锛岃鍕跨敤娴忚鍣ㄨ闂?======"
+        "=======上面的地址是 WebSocket 协议地址，请勿用浏览器访问======"
     )
     logger.bind(tag=TAG).info(
-        "濡傛兂娴嬭瘯websocket璇风敤璋锋瓕娴忚鍣ㄦ墦寮€test鐩綍涓嬬殑test_page.html"
+        "如想测试 WebSocket，请用浏览器打开 test 目录下的 test_page.html"
     )
     logger.bind(tag=TAG).info(
         "=============================================================\n"
@@ -125,8 +277,9 @@ async def main():
     try:
         await wait_for_exit()
     except asyncio.CancelledError:
-        print("浠诲姟琚彇娑堬紝娓呯悊璧勬簮涓?..")
+        print("任务被取消，正在清理资源...")
     finally:
+        await stop_managed_voiceprint_service()
         await gc_manager.stop()
 
         try:
@@ -152,11 +305,11 @@ async def main():
             timeout=3.0,
             return_when=asyncio.ALL_COMPLETED,
         )
-        print("鏈嶅姟鍣ㄥ凡鍏抽棴锛岀▼搴忛€€鍑恒€?")
+        print("服务器已关闭，程序退出。")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("鎵嬪姩涓柇锛岀▼搴忕粓姝€?")
+        print("手动中断，程序终止。")

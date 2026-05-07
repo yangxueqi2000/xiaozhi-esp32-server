@@ -16,6 +16,20 @@ from .mcp_endpoint import MCPEndpointExecutor
 from core.utils.util import normalize_mcp_endpoint_for_ws
 
 
+def _is_enabled(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+            "disabled",
+        }
+    return bool(value)
+
+
 class UnifiedToolHandler:
     """统一工具处理器"""
 
@@ -26,10 +40,15 @@ class UnifiedToolHandler:
 
         # 创建工具管理器
         self.tool_manager = ToolManager(conn)
+        self.server_mcp_enabled = _is_enabled(
+            self.config.get("enable_server_mcp_client"), True
+        )
 
         # 创建各类执行器
         self.server_plugin_executor = ServerPluginExecutor(conn)
-        self.server_mcp_executor = ServerMCPExecutor(conn)
+        self.server_mcp_executor = (
+            ServerMCPExecutor(conn) if self.server_mcp_enabled else None
+        )
         self.device_iot_executor = DeviceIoTExecutor(conn)
         self.device_mcp_executor = DeviceMCPExecutor(conn)
         self.mcp_endpoint_executor = MCPEndpointExecutor(conn)
@@ -38,9 +57,10 @@ class UnifiedToolHandler:
         self.tool_manager.register_executor(
             ToolType.SERVER_PLUGIN, self.server_plugin_executor
         )
-        self.tool_manager.register_executor(
-            ToolType.SERVER_MCP, self.server_mcp_executor
-        )
+        if self.server_mcp_executor is not None:
+            self.tool_manager.register_executor(
+                ToolType.SERVER_MCP, self.server_mcp_executor
+            )
         self.tool_manager.register_executor(
             ToolType.DEVICE_IOT, self.device_iot_executor
         )
@@ -61,7 +81,12 @@ class UnifiedToolHandler:
             auto_import_modules("plugins_func.functions")
 
             # 初始化服务端MCP
-            await self.server_mcp_executor.initialize()
+            if self.server_mcp_executor is not None:
+                await self.server_mcp_executor.initialize()
+            else:
+                self.logger.info(
+                    "Server MCP client disabled; MCP tools are mounted by Codex app-server"
+                )
 
             # 初始化MCP接入点
             await self._initialize_mcp_endpoint()
@@ -222,7 +247,8 @@ class UnifiedToolHandler:
     async def cleanup(self):
         """清理资源"""
         try:
-            await self.server_mcp_executor.cleanup()
+            if self.server_mcp_executor is not None:
+                await self.server_mcp_executor.cleanup()
 
             # 清理MCP接入点连接
             if (

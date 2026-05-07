@@ -164,7 +164,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             log_path = experiment_resume.append_experiment_interaction_log(
                 config,
                 "94:a9:90:27:3c:84",
-                "鍙互鎷嶇収銆?,
+                "\u53ef\u4ee5\u62cd\u7167\u3002",
                 role="USER",
                 source="asr",
                 current_step_id="step_photo_confirm_sample_1",
@@ -179,7 +179,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("[TRANSCRIPT] [USER]", content)
             self.assertIn("[source=asr]", content)
             self.assertIn("[current_step_id=step_photo_confirm_sample_1]", content)
-            self.assertIn("鍙互鎷嶇収銆?, content)
+            self.assertIn("\u53ef\u4ee5\u62cd\u7167\u3002", content)
 
     def test_build_resume_context_extracts_latest_step_from_transcript_log(self):
         with TemporaryDirectory() as temp_dir:
@@ -909,6 +909,47 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual({"h2o2_added_to_all": True}, result)
+
+    def test_current_step_confirmation_fields_accepts_already_joined_report(self):
+        schema_by_name = {
+            "sodium_citrate_added_to_all": {
+                "type": "bool",
+                "description": "\u5df2\u6309 1-5 \u53f7\u987a\u5e8f\u5b8c\u6210\u5168\u90e8\u67e0\u6aac\u9178\u94a0\u52a0\u5165",
+            }
+        }
+
+        result = intentHandler._build_experiment_current_step_confirmation_fields(
+            "1\u52305\u53f7\u6837\u54c1\u90fd\u5df2\u7ecf\u6309\u987a\u5e8f\u52a0\u5165\u4e861.00\u6beb\u5347\u67e0\u6aac\u9178\u94a0\u3002",
+            schema_by_name,
+            ["sodium_citrate_added_to_all"],
+            allow_confirmation_autofill=True,
+        )
+
+        self.assertEqual({"sodium_citrate_added_to_all": True}, result)
+
+    def test_current_step_confirmation_fields_accepts_stirring_mixed_report(self):
+        schema_by_name = {
+            "stirring_started": {
+                "type": "bool",
+                "description": "\u5df2\u540c\u65f6\u542f\u52a8 1-5 \u53f7\u70e7\u676f\u7684\u6405\u62cc",
+            },
+            "mixed_uniformly": {
+                "type": "bool",
+                "description": "\u5df2\u786e\u8ba4\u5168\u90e8\u5171\u540c\u6eb6\u6db2\u6df7\u5408\u5747\u5300",
+            },
+        }
+
+        result = intentHandler._build_experiment_current_step_confirmation_fields(
+            "1\u52305\u53f7\u6837\u54c1\u90fd\u5df2\u7ecf\u5f00\u59cb\u6405\u62cc\uff0c\u5e76\u4e14\u6df7\u5408\u5747\u5300\u3002",
+            schema_by_name,
+            ["stirring_started", "mixed_uniformly"],
+            allow_confirmation_autofill=True,
+        )
+
+        self.assertEqual(
+            {"stirring_started": True, "mixed_uniformly": True},
+            result,
+        )
 
     def test_repeat_reply_is_direct_and_requests_completion(self):
         reply = intentHandler._compose_experiment_step_reply(

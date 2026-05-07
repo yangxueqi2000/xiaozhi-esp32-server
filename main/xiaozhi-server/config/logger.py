@@ -10,6 +10,29 @@ SERVER_VERSION = "0.8.11"
 _logger_initialized = False
 
 
+def _enable_utf8_console():
+    """Best-effort UTF-8 console setup for Windows terminals."""
+    if os.name != "nt":
+        return
+
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+
+
 def get_module_abbreviation(module_name, module_dict):
     """获取模块名称的缩写，如果为空则返回00
     如果名称中包含下划线，则返回下划线后面的前两个字符
@@ -58,6 +81,7 @@ def setup_logging():
     # 第一次初始化时配置日志
     if not _logger_initialized:
         # 使用默认的模块字符串进行初始化
+        _enable_utf8_console()
         logger.configure(
             extra={
                 "selected_module": log_config.get("selected_module", "00000000000000"),

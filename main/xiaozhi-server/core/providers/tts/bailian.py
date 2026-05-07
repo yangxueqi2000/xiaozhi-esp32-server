@@ -24,7 +24,8 @@ logger = setup_logging()
 
 DEFAULT_MODEL = "qwen-tts"
 DEFAULT_VOICE = "Cherry"
-DEFAULT_SAMPLE_RATE = 24000
+DEFAULT_PROVIDER_SAMPLE_RATE = 24000
+DEFAULT_STREAM_SAMPLE_RATE = 16000
 DEFAULT_LANGUAGE_TYPE = "Chinese"
 SUPPORTED_TTS_MODEL_PREFIXES = ("qwen-tts",)
 
@@ -72,7 +73,14 @@ class TTSProvider(TTSProviderBase):
         ).strip().lower()
         self.output_file = config.get("output_dir", "tmp/")
         self.audio_file_type = "pcm"
-        self.stream_sample_rate = DEFAULT_SAMPLE_RATE
+        self.provider_sample_rate = self._parse_sample_rate(
+            config.get("provider_sample_rate") or config.get("source_sample_rate"),
+            DEFAULT_PROVIDER_SAMPLE_RATE,
+        )
+        self.stream_sample_rate = self._parse_sample_rate(
+            config.get("sample_rate") or config.get("stream_sample_rate"),
+            DEFAULT_STREAM_SAMPLE_RATE,
+        )
 
         self.opus_encoder = opus_encoder_utils.OpusEncoderUtils(
             sample_rate=self.stream_sample_rate,
@@ -91,6 +99,14 @@ class TTSProvider(TTSProviderBase):
             parsed = 1.0
         return min(max(parsed, 0.85), 1.35)
 
+    @staticmethod
+    def _parse_sample_rate(value, default):
+        try:
+            parsed = int(value or default)
+        except (TypeError, ValueError):
+            parsed = int(default)
+        return parsed if parsed > 0 else int(default)
+
     def _prepare_spoken_text(self, text: str) -> str:
         clean_text = MarkdownCleaner.clean_markdown(text)
         if getattr(self, "conn", None) is not None:
@@ -101,17 +117,21 @@ class TTSProvider(TTSProviderBase):
             clean_text = textUtils.prepare_runtime_spoken_text(clean_text)
         return self._normalize_text_for_tts(clean_text)
 
-    def _apply_speech_rate_to_pcm(self, pcm_bytes: bytes, state=None):
-        if not pcm_bytes or abs(self.speech_rate - 1.0) < 1e-3:
+    def _prepare_pcm_for_stream(self, pcm_bytes: bytes, state=None):
+        if not pcm_bytes:
             return pcm_bytes, state
 
-        source_rate = max(1, int(round(self.stream_sample_rate * self.speech_rate)))
+        source_rate = max(1, int(round(self.provider_sample_rate * self.speech_rate)))
+        target_rate = max(1, int(self.stream_sample_rate))
+        if source_rate == target_rate:
+            return pcm_bytes, state
+
         converted, next_state = audioop.ratecv(
             pcm_bytes,
             2,
             1,
             source_rate,
-            self.stream_sample_rate,
+            target_rate,
             state,
         )
         return converted, next_state
@@ -296,7 +316,7 @@ class TTSProvider(TTSProviderBase):
                 sent_first_packet = True
             if not pcm_chunk:
                 continue
-            pcm_chunk, rate_state = self._apply_speech_rate_to_pcm(
+            pcm_chunk, rate_state = self._prepare_pcm_for_stream(
                 pcm_chunk, rate_state
             )
             if not pcm_chunk:
@@ -330,7 +350,7 @@ class TTSProvider(TTSProviderBase):
             raise RuntimeError("Bailian TTS returned no audio data")
 
         pcm_bytes = b"".join(pcm_chunks)
-        pcm_bytes, _ = self._apply_speech_rate_to_pcm(pcm_bytes, None)
+        pcm_bytes, _ = self._prepare_pcm_for_stream(pcm_bytes, None)
         if output_file:
             output_path = Path(output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)

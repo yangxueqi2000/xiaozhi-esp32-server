@@ -53,7 +53,7 @@ def _load_local_store(store_path: str) -> Dict:
         return {"bindings": {}}
 
     try:
-        with open(store_path, "r", encoding="utf-8") as f:
+        with open(store_path, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
     except Exception:
         return {"bindings": {}}

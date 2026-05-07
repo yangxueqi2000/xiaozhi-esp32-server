@@ -147,7 +147,12 @@ class DeviceMCPHandlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["success"])
         self.assertEqual("self_camera_take_photo", captured["tool_name"])
         self.assertEqual(
-            {"question": "Please photograph sample 1."},
+            {
+                "question": (
+                    'Please photograph sample 1.\n'
+                    '[XIAOZHI_META]{"photo_name":"sample_1"}'
+                )
+            },
             captured["tool_args"],
         )
 

@@ -8,6 +8,32 @@ from config.manage_api_client import init_service, get_server_config, get_agent_
 
 DEFAULT_CONFIG_CANDIDATES = ("config.yaml", "config_back.yaml")
 _CONFIG_TEMPLATE_RE = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
+_CONFIG_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_CONFIG_PATH_KEY_HINTS = (
+    "path",
+    "dir",
+    "root",
+    "folder",
+    "file",
+    "workspace",
+    "template",
+    "csv",
+    "json",
+    "png",
+    "wav",
+    "yaml",
+)
+_CONFIG_ROUTE_KEY_HINTS = ("url", "endpoint", "http", "sse", "message", "mount", "route")
+_CONFIG_PATH_VARIABLE_KEYS = {
+    "workspace_root",
+    "lab_runs_root",
+    "experiment_root",
+    "experiment_config_root",
+    "experiment_data_root",
+    "experiment_yaml_path",
+    "prompt_template_path",
+    "uvvis_scan_output_root",
+}
 
 
 def get_project_dir():
@@ -55,8 +81,32 @@ def _expand_template_string(value: str, variables: Mapping[str, str]) -> str:
     return _CONFIG_TEMPLATE_RE.sub(_replace, text)
 
 
+def _has_unexpanded_template(value: str) -> bool:
+    return bool(_CONFIG_TEMPLATE_RE.search(str(value or "")))
+
+
 def _join_config_path(base: str, *parts: str) -> str:
-    return Path(base, *parts).as_posix()
+    return str(Path(base, *parts))
+
+
+def _looks_like_config_path_key(key: str) -> bool:
+    normalized_key = str(key or "").strip().lower()
+    if any(hint in normalized_key for hint in _CONFIG_ROUTE_KEY_HINTS):
+        return False
+    return any(hint in normalized_key for hint in _CONFIG_PATH_KEY_HINTS)
+
+
+def _normalize_config_path_string(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or _CONFIG_URL_RE.match(text):
+        return text
+    return str(Path(text))
+
+
+def _normalize_config_path_variable(key: str, value: str) -> str:
+    if key in _CONFIG_PATH_VARIABLE_KEYS:
+        return _normalize_config_path_string(value)
+    return value
 
 
 def _build_experiment_path_variables(config: Mapping) -> dict[str, str]:
@@ -88,7 +138,10 @@ def _build_experiment_path_variables(config: Mapping) -> dict[str, str]:
 
     for _ in range(6):
         variables = {
-            key: _expand_template_string(value, variables)
+            key: _normalize_config_path_variable(
+                key,
+                _expand_template_string(value, variables),
+            )
             for key, value in variables.items()
         }
         if not variables.get("lab_runs_root") and variables.get("workspace_root"):
@@ -136,18 +189,21 @@ def _build_experiment_path_variables(config: Mapping) -> dict[str, str]:
     return variables
 
 
-def _expand_config_templates(value, variables: Mapping[str, str]):
+def _expand_config_templates(value, variables: Mapping[str, str], key_name: str = ""):
     if isinstance(value, Mapping):
         return {
-            key: _expand_config_templates(sub_value, variables)
+            key: _expand_config_templates(sub_value, variables, str(key))
             for key, sub_value in value.items()
         }
     if isinstance(value, list):
-        return [_expand_config_templates(item, variables) for item in value]
+        return [_expand_config_templates(item, variables, key_name) for item in value]
     if isinstance(value, tuple):
-        return tuple(_expand_config_templates(item, variables) for item in value)
+        return tuple(_expand_config_templates(item, variables, key_name) for item in value)
     if isinstance(value, str):
-        return _expand_template_string(value, variables)
+        expanded = _expand_template_string(value, variables)
+        if _looks_like_config_path_key(key_name):
+            return _normalize_config_path_string(expanded)
+        return expanded
     return value
 
 
@@ -280,11 +336,12 @@ def ensure_directories(config):
         selected_provider = selected_modules.get(module_type)
         if not selected_provider:
             continue
-        if config.get(module) is None:
+        module_config = config.get(module_type)
+        if not isinstance(module_config, Mapping):
             continue
-        if config.get(selected_provider) is None:
+        provider_config = module_config.get(selected_provider, {})
+        if not isinstance(provider_config, Mapping):
             continue
-        provider_config = config.get(module_type, {}).get(selected_provider, {})
         output_dir = provider_config.get("output_dir")
         if output_dir:
             full_model_dir = os.path.join(project_dir, output_dir)
@@ -292,6 +349,9 @@ def ensure_directories(config):
 
     # 统一创建目录（保留原data目录创建）
     for dir_path in dirs_to_create:
+        if _has_unexpanded_template(dir_path):
+            print(f"警告：跳过未展开模板路径 {dir_path}")
+            continue
         try:
             os.makedirs(dir_path, exist_ok=True)
         except PermissionError:

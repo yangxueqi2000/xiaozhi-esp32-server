@@ -84,6 +84,10 @@ class SimpleHttpServer:
                             "/mcp/device/preview_local_file",
                             self.device_mcp_handler.handle_preview_local_file_post,
                         ),
+                        web.post(
+                            "/mcp/device/call_tool",
+                            self.device_mcp_handler.handle_call_tool_post,
+                        ),
                         web.get(
                             "/mcp/device/local_files/{file_name}",
                             self.device_mcp_handler.handle_local_file_get,
@@ -98,6 +102,10 @@ class SimpleHttpServer:
                         ),
                         web.options(
                             "/mcp/device/preview_local_file",
+                            self.device_mcp_handler.handle_options,
+                        ),
+                        web.options(
+                            "/mcp/device/call_tool",
                             self.device_mcp_handler.handle_options,
                         ),
                         web.options(

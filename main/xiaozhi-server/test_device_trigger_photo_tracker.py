@@ -91,6 +91,38 @@ class PhotoPathTrackerTest(unittest.TestCase):
             self.assertTrue(Path(photo_meta["mirrored_path"]).is_file())
             self.assertIn("一号样品_20260430_100100", Path(photo_meta["mirrored_path"]).stem)
 
+    def test_grouped_photo_stays_under_group_directory(self):
+        with TemporaryDirectory() as vision_dir, TemporaryDirectory() as by_device_dir:
+            tracker = PhotoPathTracker(
+                vision_dir=vision_dir,
+                by_device_dir=by_device_dir,
+                detect_interval_ms=1,
+                enable_mirror=True,
+            )
+            device_id = "94:a9:90:27:3c:84"
+            shared_photo = Path(vision_dir) / "94-a9-90-27-3c-84_20260430_100100.png"
+            shared_photo.write_bytes(b"group-photo")
+
+            photo_meta = tracker.resolve_photo_after_take_photo(
+                device_id=device_id,
+                requested_photo_name="sample_2",
+                baseline=None,
+                detect_timeout=0.01,
+                group_number=2,
+            )
+
+            mirrored = Path(photo_meta["mirrored_path"])
+            self.assertEqual(2, photo_meta["group_number"])
+            self.assertEqual("group_02", photo_meta["group_dir_name"])
+            self.assertEqual("group_02", mirrored.parent.name)
+            self.assertEqual("94_a9_90_27_3c_84", mirrored.parent.parent.name)
+
+            latest_group_2 = tracker.find_latest(device_id, group_number=2)
+            latest_no_group = tracker.find_latest(device_id)
+            self.assertEqual(str(mirrored.resolve()), latest_group_2["local_path"])
+            self.assertEqual(str(shared_photo.resolve()), latest_no_group["local_path"])
+            self.assertFalse((Path(by_device_dir) / "94_a9_90_27_3c_84" / "sample_2.png").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

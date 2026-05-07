@@ -556,8 +556,6 @@ _DEFAULT_TTS_SPOKEN_ALIASES = {
     "H2SO3": "亚硫酸",
     "H3PO4": "磷酸",
     "NaBH4": "硼氢化钠",
-    # Bailian TTS occasionally misreads "硼" here, so use a homophone for speech only.
-    "硼氢化钠": "彭氢化钠",
     "Na3Cit": "柠檬酸钠",
     "NH3·H2O": "氨水",
     "NH4OH": "氨水",
@@ -2428,6 +2426,45 @@ def _get_current_turn_server_mcp_payload(conn):
     return getattr(conn, "_last_server_mcp_payload", None)
 
 
+def _current_turn_had_experiment_graph_tool(conn) -> bool:
+    if conn is None:
+        return False
+
+    current_sentence_id = str(getattr(conn, "sentence_id", "") or "").strip()
+    tracked_sentence_id = str(
+        getattr(conn, "_current_turn_server_mcp_sentence_id", "") or ""
+    ).strip()
+    if not current_sentence_id or current_sentence_id != tracked_sentence_id:
+        return False
+
+    graph_tools = {
+        "create_session",
+        "close_session",
+        "get_state",
+        "get_overview",
+        "list_steps",
+        "get_step",
+        "get_schema",
+        "get_progress_summary",
+        "get_current_progress",
+        "get_modifiable_records",
+        "export_records",
+        "export_records_to_yaml",
+        "start_trial",
+        "cancel_trial",
+        "add_field",
+        "add_fields",
+        "finish_trial",
+        "can_proceed",
+        "proceed_to_next_step",
+        "redirect_to_step",
+        "redo_trial",
+        "modify_record",
+    }
+    tool_names = getattr(conn, "_current_turn_server_mcp_tool_names", []) or []
+    return any(str(tool_name or "").strip() in graph_tools for tool_name in tool_names)
+
+
 def _payload_text_for_tool_failure_guard(payload) -> str:
     if payload is None:
         return ""
@@ -2544,6 +2581,9 @@ def _apply_experiment_graph_alignment_guard(conn, text: str) -> str:
         return normalized
 
     if not _looks_like_experiment_step_or_scan_guidance(normalized):
+        return normalized
+
+    if _current_turn_had_experiment_graph_tool(conn):
         return normalized
 
     trusted_reply = _compose_trusted_current_step_reply(conn)

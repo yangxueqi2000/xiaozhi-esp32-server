@@ -39,6 +39,18 @@ class DeviceMCPHandler(BaseHandler):
         safe = "".join(chars).strip("._-")
         return safe or "unknown"
 
+    def _normalize_group_number(self, value):
+        if isinstance(value, bool) or value in (None, ""):
+            return None
+        try:
+            group_number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return group_number if group_number >= 1 else None
+
+    def _format_group_dir_name(self, group_number: int) -> str:
+        return f"group_{int(group_number):02d}"
+
     def _derive_experiment_data_root(self) -> str:
         cfg = self.config or {}
         llm_map = cfg.get("LLM") or {}
@@ -114,13 +126,16 @@ class DeviceMCPHandler(BaseHandler):
         )
         return _coerce_positive_int(provided_timeout, configured_default)
 
-    def _list_saved_device_photo_items(self, device_id: str) -> list[dict]:
+    def _list_saved_device_photo_items(self, device_id: str, group_number=None) -> list[dict]:
         data_root = self._derive_experiment_data_root()
         if not data_root:
             return []
 
         safe_device = self._sanitize_device_for_path(device_id)
         device_dir = os.path.join(data_root, safe_device)
+        normalized_group = self._normalize_group_number(group_number)
+        if normalized_group is not None:
+            device_dir = os.path.join(device_dir, self._format_group_dir_name(normalized_group))
         if not os.path.isdir(device_dir):
             return []
 
@@ -160,8 +175,8 @@ class DeviceMCPHandler(BaseHandler):
             return []
         return items
 
-    def _find_latest_saved_photo(self, device_id: str) -> dict:
-        items = self._list_saved_device_photo_items(device_id)
+    def _find_latest_saved_photo(self, device_id: str, group_number=None) -> dict:
+        items = self._list_saved_device_photo_items(device_id, group_number=group_number)
         if not items:
             return {}
         latest = max(items, key=lambda item: float(item.get("mtime", 0.0)))
@@ -225,11 +240,12 @@ class DeviceMCPHandler(BaseHandler):
         requested_photo_name: str,
         capture_started_at: float,
         max_wait_seconds: float,
+        group_number=None,
     ) -> dict | None:
         safe_wait = max(0.0, float(max_wait_seconds or 0.0))
         deadline = time.time() + safe_wait
         while True:
-            latest_photo = self._find_latest_saved_photo(device_id)
+            latest_photo = self._find_latest_saved_photo(device_id, group_number=group_number)
             if self._is_new_saved_photo(
                 latest_photo,
                 baseline_photo,
@@ -467,6 +483,7 @@ class DeviceMCPHandler(BaseHandler):
         photo_name = ""
         baseline_photo = {}
         capture_started_at = 0.0
+        group_number = None
         try:
             if not self.ws_server:
                 response = self._json_response(
@@ -488,6 +505,7 @@ class DeviceMCPHandler(BaseHandler):
             session_id, device_id = self._resolve_target_params(body)
             question = str(body.get("question", "Please take a photo.")).strip()
             photo_name = str(body.get("photo_name", "")).strip()
+            group_number = self._normalize_group_number(body.get("group_number"))
             tool_name_raw = str(
                 body.get("tool_name", "self.camera.take_photo")
             ).strip()
@@ -502,12 +520,26 @@ class DeviceMCPHandler(BaseHandler):
                 return response
 
             capture_device_id = str(conn.device_id or device_id or "").strip()
-            baseline_photo = self._find_latest_saved_photo(capture_device_id)
+            baseline_photo = self._find_latest_saved_photo(
+                capture_device_id,
+                group_number=group_number,
+            )
             capture_started_at = time.time()
 
             # The device-side camera tool only declares `question`. Keep any
             # save/mirroring metadata on the server side instead of passing
             # undeclared arguments through the MCP tool call.
+            if "[XIAOZHI_META]" not in question and (photo_name or group_number is not None):
+                meta = {}
+                if photo_name:
+                    meta["photo_name"] = photo_name
+                if group_number is not None:
+                    meta["group_number"] = group_number
+                    meta["group_dir_name"] = self._format_group_dir_name(group_number)
+                question = (
+                    f"{question}\n[XIAOZHI_META]"
+                    f"{json.dumps(meta, ensure_ascii=False, separators=(',', ':'))}"
+                )
             tool_args = {"question": question}
 
             try:
@@ -537,7 +569,10 @@ class DeviceMCPHandler(BaseHandler):
                 else:
                     raise
 
-            saved_photo = self._find_latest_saved_photo(capture_device_id)
+            saved_photo = self._find_latest_saved_photo(
+                capture_device_id,
+                group_number=group_number,
+            )
             response = self._json_response(
                 {
                     "success": True,
@@ -545,6 +580,7 @@ class DeviceMCPHandler(BaseHandler):
                     "tool_sanitized": tool_name,
                     "session_id": conn.session_id,
                     "device_id": conn.device_id,
+                    "group_number": group_number,
                     "requested_photo_name": photo_name,
                     "result": result,
                     "saved_photo_path": str(
@@ -565,6 +601,7 @@ class DeviceMCPHandler(BaseHandler):
                 requested_photo_name=photo_name,
                 capture_started_at=capture_started_at,
                 max_wait_seconds=self._resolve_take_photo_recovery_timeout_seconds(),
+                group_number=group_number,
             )
             if recovered_photo:
                 self.logger.bind(tag=TAG).info(
@@ -576,6 +613,7 @@ class DeviceMCPHandler(BaseHandler):
                         "success": True,
                         "message": "photo recovered after timeout",
                         "device_id": capture_device_id,
+                        "group_number": group_number,
                         "requested_photo_name": photo_name,
                         "saved_photo_path": str(
                             recovered_photo.get("local_path", "") or ""
@@ -596,6 +634,7 @@ class DeviceMCPHandler(BaseHandler):
                 requested_photo_name=photo_name,
                 capture_started_at=capture_started_at,
                 max_wait_seconds=self._resolve_take_photo_recovery_timeout_seconds(),
+                group_number=group_number,
             )
             if recovered_photo:
                 self.logger.bind(tag=TAG).warning(
@@ -607,6 +646,7 @@ class DeviceMCPHandler(BaseHandler):
                         "success": True,
                         "message": "photo recovered after tool error",
                         "device_id": capture_device_id,
+                        "group_number": group_number,
                         "requested_photo_name": photo_name,
                         "saved_photo_path": str(
                             recovered_photo.get("local_path", "") or ""
@@ -745,6 +785,98 @@ class DeviceMCPHandler(BaseHandler):
             )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"preview_local_file failed: {e}")
+            response = self._json_response(
+                {"success": False, "message": str(e)},
+                status=500,
+            )
+        finally:
+            if response:
+                self._add_cors_headers(response)
+            return response
+
+    async def handle_call_tool_post(self, request):
+        response = None
+        try:
+            if not self.ws_server:
+                response = self._json_response(
+                    {"success": False, "message": "ws server is not available"},
+                    status=500,
+                )
+                return response
+
+            try:
+                body = await request.json()
+            except Exception:
+                response = self._json_response(
+                    {"success": False, "message": "request body must be json"},
+                    status=400,
+                )
+                return response
+
+            self._read_json_body(body)
+            session_id, device_id = self._resolve_target_params(body)
+            tool_name_raw = str(body.get("tool_name", "")).strip()
+            if not tool_name_raw:
+                response = self._json_response(
+                    {"success": False, "message": "tool_name is required"},
+                    status=400,
+                )
+                return response
+
+            args = body.get("args", {})
+            if args is None:
+                args = {}
+            if not isinstance(args, (dict, str)):
+                response = self._json_response(
+                    {"success": False, "message": "args must be object or json string"},
+                    status=400,
+                )
+                return response
+
+            timeout = int(body.get("timeout", 30) or 30)
+            if timeout <= 0:
+                timeout = 30
+            allow_unlisted = bool(body.get("allow_unlisted", False))
+            tool_name = sanitize_tool_name(tool_name_raw)
+
+            conn, mcp_client, error_resp = await self._resolve_target_conn(
+                session_id, device_id
+            )
+            if error_resp:
+                response = error_resp
+                return response
+
+            result = await call_mcp_tool(
+                conn,
+                mcp_client,
+                tool_name,
+                args,
+                timeout=timeout,
+                allow_unlisted=allow_unlisted,
+                raw_tool_name=tool_name_raw,
+            )
+            response = self._json_response(
+                {
+                    "success": True,
+                    "tool": tool_name_raw,
+                    "tool_sanitized": tool_name,
+                    "session_id": conn.session_id,
+                    "device_id": conn.device_id,
+                    "result": result,
+                }
+            )
+        except ValueError as e:
+            response = self._json_response(
+                {"success": False, "message": str(e)},
+                status=400,
+            )
+        except TimeoutError:
+            response = self._json_response(
+                {"success": False, "message": "tool call timeout"},
+                status=504,
+            )
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"call_tool failed: {e}")
             response = self._json_response(
                 {"success": False, "message": str(e)},
                 status=500,

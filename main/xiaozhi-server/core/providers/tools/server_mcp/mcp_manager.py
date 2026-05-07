@@ -392,6 +392,19 @@ class ServerMCPManager:
         if experiment_session_id:
             meta["experiment_session_id"] = experiment_session_id
 
+        group_number = getattr(self.conn, "experiment_current_group_number", None)
+        if isinstance(group_number, bool):
+            group_number = None
+        else:
+            try:
+                group_number = int(group_number)
+            except (TypeError, ValueError):
+                group_number = None
+        if isinstance(group_number, int) and group_number >= 1:
+            meta["group_number"] = group_number
+            meta["current_group_number"] = group_number
+            meta["experiment_group_number"] = group_number
+
         return meta
 
     def is_mcp_tool(self, tool_name: str) -> bool:

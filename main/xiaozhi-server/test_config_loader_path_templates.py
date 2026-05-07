@@ -31,6 +31,8 @@ class ConfigLoaderPathTemplatesTest(unittest.TestCase):
             },
             "prompt_template": "${experiment_config_root}/local_prompt.txt",
             "uvvis_scan_output_root": "${experiment_data_root}/uv_data_common",
+            "streamable_http_path": "/mcp",
+            "base_url": "http://127.0.0.1:8766/mcp",
             "LLM": {
                 "codex_app_server": {
                     "workspace": "${workspace_root}",
@@ -43,21 +45,52 @@ class ConfigLoaderPathTemplatesTest(unittest.TestCase):
         expanded = apply_config_path_templates(config)
 
         self.assertEqual(
-            "C:/demo/workspace/lab_runs/exp_demo/configs/local_prompt.txt",
-            expanded["prompt_template"].replace("\\", "/"),
+            str(
+                Path("C:/demo/workspace")
+                / "lab_runs"
+                / "exp_demo"
+                / "configs"
+                / "local_prompt.txt"
+            ),
+            expanded["prompt_template"],
         )
         self.assertEqual(
-            "C:/demo/workspace/lab_runs/exp_demo/data/uv_data_common",
-            expanded["uvvis_scan_output_root"].replace("\\", "/"),
+            str(
+                Path("C:/demo/workspace")
+                / "lab_runs"
+                / "exp_demo"
+                / "data"
+                / "uv_data_common"
+            ),
+            expanded["uvvis_scan_output_root"],
         )
         self.assertEqual(
-            "C:/demo/workspace/lab_runs/exp_demo/configs/experiments.yaml",
-            expanded["LLM"]["codex_app_server"]["yaml_path"].replace("\\", "/"),
+            str(
+                Path("C:/demo/workspace")
+                / "lab_runs"
+                / "exp_demo"
+                / "configs"
+                / "experiments.yaml"
+            ),
+            expanded["LLM"]["codex_app_server"]["yaml_path"],
         )
         self.assertEqual(
-            "C:/demo/workspace/lab_runs/exp_demo/data",
-            expanded["experiment_paths"]["experiment_data_root"].replace("\\", "/"),
+            str(Path("C:/demo/workspace") / "lab_runs" / "exp_demo" / "data"),
+            expanded["experiment_paths"]["experiment_data_root"],
         )
+        self.assertEqual(
+            str(
+                Path("C:/demo/workspace")
+                / "lab_runs"
+                / "exp_demo"
+                / "data"
+                / "{device_id}"
+                / "{device_id}.log"
+            ),
+            expanded["LLM"]["codex_app_server"]["stream_log_path"],
+        )
+        self.assertEqual("/mcp", expanded["streamable_http_path"])
+        self.assertEqual("http://127.0.0.1:8766/mcp", expanded["base_url"])
 
 
 if __name__ == "__main__":

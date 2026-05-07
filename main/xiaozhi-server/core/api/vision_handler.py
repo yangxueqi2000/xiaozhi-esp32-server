@@ -73,6 +73,18 @@ class VisionHandler(BaseHandler):
         safe = "".join(chars).strip("._-")
         return safe or "unknown"
 
+    def _normalize_group_number(self, value) -> Optional[int]:
+        if isinstance(value, bool) or value in (None, ""):
+            return None
+        try:
+            group_number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return group_number if group_number >= 1 else None
+
+    def _format_group_dir_name(self, group_number: int) -> str:
+        return f"group_{int(group_number):02d}"
+
     def _derive_experiment_data_root(self) -> str:
         cfg = self.config or {}
         llm_map = cfg.get("LLM") or {}
@@ -124,30 +136,35 @@ class VisionHandler(BaseHandler):
                 return os.path.abspath(os.path.join(exp_root, "data"))
         return ""
 
-    def _extract_question_meta(self, question: str) -> Tuple[str, str]:
+    def _extract_question_meta(self, question: str) -> Tuple[str, str, Optional[int]]:
         src = str(question or "")
         idx = src.rfind(self._question_meta_prefix)
         if idx < 0:
-            return src, ""
+            return src, "", None
 
         meta_raw = src[idx + len(self._question_meta_prefix) :].strip()
         clean_question = src[:idx].rstrip()
         if not meta_raw:
-            return clean_question, ""
+            return clean_question, "", None
 
         try:
             meta_obj = json.loads(meta_raw)
         except Exception:
-            return src, ""
+            return src, "", None
 
         if not isinstance(meta_obj, dict):
-            return clean_question, ""
+            return clean_question, "", None
 
         requested = self._sanitize_filename_stem(str(meta_obj.get("photo_name", "")))
-        return clean_question, requested
+        group_number = self._normalize_group_number(meta_obj.get("group_number"))
+        return clean_question, requested, group_number
 
     def _save_image(
-        self, image_data: bytes, device_id: str, requested_photo_name: str = ""
+        self,
+        image_data: bytes,
+        device_id: str,
+        requested_photo_name: str = "",
+        group_number: Optional[int] = None,
     ) -> str:
         data_root = self._derive_experiment_data_root()
         if not data_root:
@@ -155,6 +172,9 @@ class VisionHandler(BaseHandler):
 
         safe_device = self._sanitize_device_for_path(device_id)
         device_dir = os.path.join(data_root, safe_device)
+        normalized_group = self._normalize_group_number(group_number)
+        if normalized_group is not None:
+            device_dir = os.path.join(device_dir, self._format_group_dir_name(normalized_group))
         os.makedirs(device_dir, exist_ok=True)
         ext = self._guess_image_ext(image_data)
         save_data = image_data
@@ -274,11 +294,15 @@ class VisionHandler(BaseHandler):
             if question_field is None:
                 raise ValueError("缺少问题字段")
             question = await question_field.text()
-            question, requested_photo_name = self._extract_question_meta(question)
+            question, requested_photo_name, group_number = self._extract_question_meta(question)
             self.logger.bind(tag=TAG).debug(f"Question: {question}")
             if requested_photo_name:
                 self.logger.bind(tag=TAG).debug(
                     f"Requested photo name: {requested_photo_name}"
+                )
+            if group_number is not None:
+                self.logger.bind(tag=TAG).debug(
+                    f"Requested photo group_number: {group_number}"
                 )
 
             # 读取图片文件
@@ -306,7 +330,10 @@ class VisionHandler(BaseHandler):
             # 落盘保存图片
             try:
                 saved_path = self._save_image(
-                    image_data, device_id, requested_photo_name
+                    image_data,
+                    device_id,
+                    requested_photo_name,
+                    group_number=group_number,
                 )
                 self.logger.bind(tag=TAG).info(f"Saved vision image: {saved_path}")
             except Exception as e:

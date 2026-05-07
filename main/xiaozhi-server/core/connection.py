@@ -452,6 +452,8 @@ class ConnectionHandler:
         return context
 
     def _experiment_prewarm_enabled(self) -> bool:
+        if self.config.get("enable_server_mcp_client") is False:
+            return False
         return bool(self.config.get("codex_app", {}).get("prewarm_on_hello", False))
 
     def _experiment_prewarm_wait_seconds(self) -> float:
@@ -3523,6 +3525,7 @@ class ConnectionHandler:
             llm_route_kwargs = {}
             if depth == 0:
                 llm_route_kwargs = self._llm_route_context_kwargs()
+                llm_route_kwargs["state_conn"] = self
                 should_wait_for_prewarm = (
                     is_real_user_turn
                     and query is not None

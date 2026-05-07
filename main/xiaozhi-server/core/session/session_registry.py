@@ -162,7 +162,7 @@ def _resolve_local_store_path(config: Dict) -> str:
 def _load_local_store(store_path: str) -> Dict:
     if not os.path.exists(store_path):
         return {"bindings": {}}
-    with open(store_path, "r", encoding="utf-8") as f:
+    with open(store_path, "r", encoding="utf-8-sig") as f:
         raw = json.load(f)
     if not isinstance(raw, dict):
         return {"bindings": {}}

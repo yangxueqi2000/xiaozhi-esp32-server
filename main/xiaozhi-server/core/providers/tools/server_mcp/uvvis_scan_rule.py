@@ -393,6 +393,20 @@ class UVVisScanRule:
         safe = re.sub(r"[^0-9a-zA-Z._-]+", "_", raw).strip("._-")
         return safe or "unknown_device"
 
+    @staticmethod
+    def _normalize_group_number(group_number) -> int | None:
+        if isinstance(group_number, bool) or group_number in (None, ""):
+            return None
+        try:
+            normalized = int(group_number)
+        except (TypeError, ValueError):
+            return None
+        return normalized if normalized >= 1 else None
+
+    @staticmethod
+    def _format_group_dir_name(group_number: int) -> str:
+        return f"group_{int(group_number):02d}"
+
     def _resolve_uvvis_output_root_dir(self) -> Path:
         override_root = str(self.conn.config.get("uvvis_scan_output_root", "")).strip()
         if override_root:
@@ -404,7 +418,12 @@ class UVVisScanRule:
 
         return (Path("data") / "uv_data_common").resolve()
 
-    def _resolve_runtime_device_dir(self) -> Path:
+    def _resolve_runtime_group_number(self) -> int | None:
+        return self._normalize_group_number(
+            getattr(self.conn, "experiment_current_group_number", None)
+        )
+
+    def _resolve_runtime_device_dir(self, *, include_group: bool = False) -> Path:
         device_id = str(getattr(self.conn, "device_id", "") or "").strip()
         if not device_id and isinstance(getattr(self.conn, "headers", None), dict):
             headers = getattr(self.conn, "headers", {}) or {}
@@ -416,7 +435,12 @@ class UVVisScanRule:
             ).strip()
 
         normalized_device_id = self._normalize_device_id(device_id)
-        return (self._resolve_uvvis_output_root_dir() / normalized_device_id).resolve()
+        device_dir = (self._resolve_uvvis_output_root_dir() / normalized_device_id).resolve()
+        if include_group:
+            group_number = self._resolve_runtime_group_number()
+            if group_number is not None:
+                device_dir = (device_dir / self._format_group_dir_name(group_number)).resolve()
+        return device_dir
 
     def _resolve_uvvis_shared_output_dir(self) -> Path:
         return self._resolve_uvvis_output_root_dir()
@@ -464,7 +488,7 @@ class UVVisScanRule:
         if self._should_use_shared_uvvis_output_dir(actual_tool_name, arguments):
             target_dir = self._resolve_uvvis_shared_output_dir()
         else:
-            target_dir = self._resolve_runtime_device_dir()
+            target_dir = self._resolve_runtime_device_dir(include_group=True)
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
@@ -488,7 +512,7 @@ class UVVisScanRule:
                 sample_name = pick_text(context.get("sample_name"))
 
         sample_folder = self._normalize_sample_folder_name(sample_name)
-        device_dir = self._resolve_runtime_device_dir()
+        device_dir = self._resolve_runtime_device_dir(include_group=True)
         target_dir = device_dir / sample_folder
 
         try:

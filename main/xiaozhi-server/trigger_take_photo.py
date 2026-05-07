@@ -65,11 +65,26 @@ def build_photo_name(base_name: str, time_format: str = "%Y%m%d_%H%M%S") -> str:
     return f"{name}_{timestamp}" if timestamp else name
 
 
-def build_question_with_photo_name(question: str, photo_name: str) -> str:
+def build_question_with_photo_name(
+    question: str,
+    photo_name: str,
+    group_number: Optional[int] = None,
+) -> str:
     q = str(question or "").strip()
-    if not photo_name:
+    meta_payload: Dict[str, Any] = {}
+    if photo_name:
+        meta_payload["photo_name"] = photo_name
+    if group_number is not None:
+        try:
+            normalized_group = int(group_number)
+        except (TypeError, ValueError):
+            normalized_group = 0
+        if normalized_group >= 1:
+            meta_payload["group_number"] = normalized_group
+            meta_payload["group_dir_name"] = f"group_{normalized_group:02d}"
+    if not meta_payload:
         return q
-    meta = json.dumps({"photo_name": photo_name}, ensure_ascii=False, separators=(",", ":"))
+    meta = json.dumps(meta_payload, ensure_ascii=False, separators=(",", ":"))
     if q:
         return f"{q}\n[XIAOZHI_META]{meta}"
     return f"[XIAOZHI_META]{meta}"
@@ -82,6 +97,7 @@ def trigger_take_photo(
     device_id: str = "",
     question: str = "Please take a photo.",
     photo_name: str = "",
+    group_number: Optional[int] = None,
     tool_name: str = "self.camera.take_photo",
     tool_timeout: int = DEFAULT_TAKE_PHOTO_TOOL_TIMEOUT,
     request_timeout: int = DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT,
@@ -112,6 +128,8 @@ def trigger_take_photo(
         payload["device_id"] = device_id
     if photo_name:
         payload["photo_name"] = photo_name
+    if group_number is not None:
+        payload["group_number"] = group_number
 
     url = f"{base_url.rstrip('/')}/mcp/device/take_photo"
     return _request_json("POST", url, payload=payload, timeout=safe_request_timeout)
@@ -140,6 +158,12 @@ def parse_args() -> argparse.Namespace:
         "--photo-name",
         default="",
         help="Base photo name. Current time will be auto-appended.",
+    )
+    parser.add_argument(
+        "--group-number",
+        type=int,
+        default=0,
+        help="Optional experiment group number used for group_XX photo storage.",
     )
     parser.add_argument(
         "--time-format",
@@ -209,7 +233,8 @@ def main() -> int:
             print(json.dumps({"success": False, "message": str(e)}, ensure_ascii=False))
             return 1
 
-    question = build_question_with_photo_name(args.question, photo_name)
+    group_number = args.group_number if args.group_number and args.group_number > 0 else None
+    question = build_question_with_photo_name(args.question, photo_name, group_number)
 
     try:
         result = trigger_take_photo(
@@ -218,6 +243,7 @@ def main() -> int:
             device_id=device_id,
             question=question,
             photo_name=photo_name,
+            group_number=group_number,
             tool_name=args.tool_name,
             tool_timeout=args.tool_timeout,
             request_timeout=args.request_timeout,

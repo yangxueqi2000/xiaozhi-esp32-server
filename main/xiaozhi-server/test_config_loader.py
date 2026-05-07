@@ -29,6 +29,26 @@ class ConfigLoaderTest(unittest.TestCase):
                     config_loader.get_default_config_path(),
                 )
 
+    def test_ensure_directories_creates_selected_provider_output_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_dir = Path(temp_dir)
+            config = {
+                "log": {"log_dir": "logs"},
+                "selected_module": {"LLM": "codex_app_server"},
+                "LLM": {
+                    "codex_app_server": {"output_dir": "models/codex_app_server"}
+                },
+            }
+
+            with mock.patch.object(
+                config_loader,
+                "get_project_dir",
+                return_value=f"{project_dir}{os.sep}",
+            ):
+                config_loader.ensure_directories(config)
+
+            self.assertTrue((project_dir / "models" / "codex_app_server").is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from datetime import datetime
@@ -42,6 +43,11 @@ from trigger_take_photo import (
 
 LOGGER = logging.getLogger("device_trigger_mcp_server")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_GROUP_STORAGE_SUPPORT_CACHE: Optional[Tuple[str, bool]] = None
+_IMAGE_NAME_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+_STABLE_SAMPLE_PHOTO_NAME_RE = re.compile(
+    r"^\s*(?:\d+|[一二三四五六七八九十]+)\s*号样品照片\s*$"
+)
 
 
 def _default_data_path(*parts: str) -> str:
@@ -50,6 +56,25 @@ def _default_data_path(*parts: str) -> str:
 
 def _norm(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _normalize_capture_photo_name(value: Any) -> str:
+    name = _norm(value)
+    # Device-side photo_name is a logical stem; the device/server appends the
+    # image extension when mirroring the actual file.
+    while True:
+        lowered = name.lower()
+        matched_ext = next(
+            (ext for ext in _IMAGE_NAME_EXTENSIONS if lowered.endswith(ext)),
+            "",
+        )
+        if not matched_ext:
+            return name
+        name = name[: -len(matched_ext)].rstrip()
+
+
+def _requires_stable_photo_name(photo_name: str) -> bool:
+    return bool(_STABLE_SAMPLE_PHOTO_NAME_RE.match(_norm(photo_name)))
 
 
 def _json_safe(value: Any) -> Any:
@@ -144,6 +169,61 @@ def _sanitize_device_for_path(device_id: str) -> str:
     return safe or "unknown"
 
 
+def _normalize_group_number(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        group_number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if group_number < 1:
+        return None
+    if not _experiment_supports_group_storage():
+        return None
+    return group_number
+
+
+def _experiment_supports_group_storage() -> bool:
+    global _GROUP_STORAGE_SUPPORT_CACHE
+
+    yaml_path = _norm(os.environ.get("EXPERIMENT_YAML_PATH"))
+    if not yaml_path:
+        return True
+
+    cached = _GROUP_STORAGE_SUPPORT_CACHE
+    if cached and cached[0] == yaml_path:
+        return cached[1]
+
+    supports_group_storage = True
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+        if isinstance(config, dict) and isinstance(config.get("experiment"), dict):
+            config = config["experiment"]
+        workflow = config.get("workflow") or {}
+        supports_group_storage = bool(workflow.get("group_start_steps"))
+        if not supports_group_storage:
+            for step in config.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                record_schema = step.get("record_schema") or {}
+                if isinstance(record_schema, dict) and "group_number" in record_schema:
+                    supports_group_storage = True
+                    break
+    except Exception as exc:
+        LOGGER.warning(
+            "failed to inspect experiment YAML for group storage support: %s", exc
+        )
+        supports_group_storage = True
+
+    _GROUP_STORAGE_SUPPORT_CACHE = (yaml_path, supports_group_storage)
+    return supports_group_storage
+
+
+def _format_group_dir_name(group_number: int) -> str:
+    return f"group_{int(group_number):02d}"
+
+
 def _derive_experiment_photo_root() -> str:
     """
     Try resolving experiment data root from xiaozhi runtime config:
@@ -236,6 +316,25 @@ def _to_mapping(obj: Any) -> Dict[str, Any]:
     if isinstance(as_dict, dict):
         return as_dict
     return {}
+
+
+def _request_metadata(ctx: Optional[Context]) -> Dict[str, Any]:
+    if ctx is None:
+        return {}
+    request_context = getattr(ctx, "request_context", None)
+    meta = _to_mapping(getattr(request_context, "meta", None))
+    session = getattr(request_context, "session", None)
+    client_params = _to_mapping(getattr(session, "client_params", None))
+    return {**client_params, **meta}
+
+
+def _resolve_context_group_number(ctx: Optional[Context]) -> Optional[int]:
+    meta = _request_metadata(ctx)
+    for key in ("group_number", "current_group_number", "experiment_group_number"):
+        group_number = _normalize_group_number(meta.get(key))
+        if group_number is not None:
+            return group_number
+    return None
 
 
 def _add_unique(values: List[str], value: Any):
@@ -614,6 +713,14 @@ class PhotoPathTracker:
                 ordered.append(item)
         return ordered
 
+    def _device_dir(self, device_id: str, group_number: Optional[int] = None) -> str:
+        safe_device = _sanitize_device_for_path(device_id)
+        device_dir = os.path.join(self.by_device_dir, safe_device)
+        normalized_group = _normalize_group_number(group_number)
+        if normalized_group is not None:
+            device_dir = os.path.join(device_dir, _format_group_dir_name(normalized_group))
+        return device_dir
+
     def _list_files_in_dir(self, directory: str) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
         if not os.path.isdir(directory):
@@ -665,8 +772,14 @@ class PhotoPathTracker:
             items.append(item)
         return items
 
-    def _collect_visible_candidates(self, device_id: str) -> List[Dict[str, Any]]:
-        mirrored = self._collect_mirrored_candidates(device_id)
+    def _collect_visible_candidates(
+        self,
+        device_id: str,
+        group_number: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        mirrored = self._collect_mirrored_candidates(device_id, group_number=group_number)
+        if _normalize_group_number(group_number) is not None:
+            return mirrored
         if mirrored:
             return mirrored
         return self._collect_shared_candidates(device_id)
@@ -676,15 +789,22 @@ class PhotoPathTracker:
         device_id: str,
         *,
         include_shared: bool,
+        group_number: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         target_device = _norm(device_id)
         if not target_device:
             return None
 
-        candidates = list(self._collect_mirrored_candidates(target_device))
+        candidates = list(
+            self._collect_mirrored_candidates(
+                target_device,
+                group_number=group_number,
+            )
+        )
+        normalized_group = _normalize_group_number(group_number)
         if include_shared:
             candidates.extend(self._collect_shared_candidates(target_device))
-        elif not candidates:
+        elif not candidates and normalized_group is None:
             candidates.extend(self._collect_shared_candidates(target_device))
 
         if not candidates:
@@ -692,12 +812,19 @@ class PhotoPathTracker:
         best = max(candidates, key=lambda item: float(item.get("mtime", 0.0)))
         return self._format_photo_meta(target_device, best)
 
-    def _collect_mirrored_candidates(self, device_id: str) -> List[Dict[str, Any]]:
-        safe_device = _sanitize_device_for_path(device_id)
-        device_dir = os.path.join(self.by_device_dir, safe_device)
+    def _collect_mirrored_candidates(
+        self,
+        device_id: str,
+        group_number: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        normalized_group = _normalize_group_number(group_number)
+        device_dir = self._device_dir(device_id, normalized_group)
         items: List[Dict[str, Any]] = []
         for item in self._list_files_in_dir(device_dir):
             item["source"] = "by_device_dir"
+            if normalized_group is not None:
+                item["group_number"] = normalized_group
+                item["group_dir_name"] = _format_group_dir_name(normalized_group)
             items.append(item)
         return items
 
@@ -715,16 +842,31 @@ class PhotoPathTracker:
             "mtime_iso": datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
             if mtime > 0
             else "",
+            "group_number": _normalize_group_number(item.get("group_number")),
+            "group_dir_name": _norm(item.get("group_dir_name", "")),
         }
 
-    def find_latest(self, device_id: str) -> Optional[Dict[str, Any]]:
-        return self._find_latest_candidate(device_id, include_shared=False)
+    def find_latest(
+        self,
+        device_id: str,
+        group_number: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return self._find_latest_candidate(
+            device_id,
+            include_shared=False,
+            group_number=group_number,
+        )
 
-    def list_recent(self, device_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+    def list_recent(
+        self,
+        device_id: str,
+        limit: int = 20,
+        group_number: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         target_device = _norm(device_id)
         if not target_device:
             return []
-        raw_items = self._collect_visible_candidates(target_device)
+        raw_items = self._collect_visible_candidates(target_device, group_number=group_number)
         if not raw_items:
             return []
 
@@ -746,12 +888,17 @@ class PhotoPathTracker:
         safe_limit = max(1, int(limit or 20))
         return [self._format_photo_meta(target_device, item) for item in items[:safe_limit]]
 
-    def find_by_file_name(self, device_id: str, file_name: str) -> Optional[Dict[str, Any]]:
+    def find_by_file_name(
+        self,
+        device_id: str,
+        file_name: str,
+        group_number: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
         target_device = _norm(device_id)
         target_name = _norm(file_name)
         if not target_device or not target_name:
             return None
-        candidates = self.list_recent(target_device, limit=200)
+        candidates = self.list_recent(target_device, limit=200, group_number=group_number)
         if not candidates:
             return None
 
@@ -773,6 +920,7 @@ class PhotoPathTracker:
         device_id: str,
         baseline: Optional[Dict[str, Any]],
         max_wait_seconds: float,
+        group_number: Optional[int] = None,
     ) -> Tuple[Optional[Dict[str, Any]], str]:
         wait_seconds = max(0.0, float(max_wait_seconds))
         baseline_path = _norm((baseline or {}).get("local_path", ""))
@@ -780,7 +928,11 @@ class PhotoPathTracker:
 
         deadline = time.time() + wait_seconds
         while True:
-            latest = self._find_latest_candidate(device_id, include_shared=True)
+            latest = self._find_latest_candidate(
+                device_id,
+                include_shared=True,
+                group_number=group_number,
+            )
             if latest:
                 latest_path = _norm(latest.get("local_path", ""))
                 latest_mtime = float(latest.get("mtime", 0.0))
@@ -793,7 +945,11 @@ class PhotoPathTracker:
                 break
             time.sleep(self.detect_interval_s)
 
-        latest = self._find_latest_candidate(device_id, include_shared=True)
+        latest = self._find_latest_candidate(
+            device_id,
+            include_shared=True,
+            group_number=group_number,
+        )
         if latest:
             return latest, "timeout_latest_snapshot"
         return None, "not_found_after_timeout"
@@ -803,6 +959,7 @@ class PhotoPathTracker:
         device_id: str,
         local_path: str,
         requested_photo_name: str = "",
+        group_number: Optional[int] = None,
     ) -> Tuple[str, str]:
         if not self.enable_mirror:
             return "", "mirror_disabled"
@@ -810,8 +967,7 @@ class PhotoPathTracker:
         if not src or not os.path.isfile(src):
             return "", "source_missing"
 
-        safe_device = _sanitize_device_for_path(device_id)
-        dst_dir = os.path.join(self.by_device_dir, safe_device)
+        dst_dir = self._device_dir(device_id, group_number)
         os.makedirs(dst_dir, exist_ok=True)
         src_name = os.path.basename(src)
         requested_stem = _norm(requested_photo_name)
@@ -851,11 +1007,13 @@ class PhotoPathTracker:
         requested_photo_name: str,
         baseline: Optional[Dict[str, Any]],
         detect_timeout: float,
+        group_number: Optional[int] = None,
     ) -> Dict[str, Any]:
         latest, detected_by = self.wait_for_new_photo(
             device_id=device_id,
             baseline=baseline,
             max_wait_seconds=detect_timeout,
+            group_number=group_number,
         )
         if not latest:
             return {
@@ -863,15 +1021,20 @@ class PhotoPathTracker:
                 "device_id": _norm(device_id),
                 "requested_photo_name": _norm(requested_photo_name),
                 "detected_by": detected_by,
+                "group_number": _normalize_group_number(group_number),
             }
 
         mirrored_path, mirror_state = self.mirror_to_device_dir(
             _norm(device_id),
             _norm(latest.get("local_path", "")),
             _norm(requested_photo_name),
+            group_number=group_number,
         )
         latest["found"] = True
         latest["requested_photo_name"] = _norm(requested_photo_name)
+        latest["group_number"] = _normalize_group_number(group_number)
+        if latest["group_number"] is not None:
+            latest["group_dir_name"] = _format_group_dir_name(latest["group_number"])
         latest["detected_by"] = detected_by
         latest["is_new_photo"] = detected_by in {
             "first_detected_for_device",
@@ -1017,6 +1180,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
         append_timestamp: bool = True,
         time_format: str = "",
         device_id: Optional[str] = None,
+        group_number: Optional[int] = None,
         tool_name: str = "",
         timeout: int = DEFAULT_TAKE_PHOTO_TOOL_TIMEOUT,
         request_timeout: int = DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT,
@@ -1029,22 +1193,37 @@ def build_server(args: argparse.Namespace) -> FastMCP:
             )
             _log_route_resolution("xiaozhi_take_photo", resolved)
             route = resolved["connection"]
-            baseline_photo = photo_tracker.find_latest(route["device_id"])
+            resolved_group_number = (
+                _normalize_group_number(group_number)
+                or _resolve_context_group_number(ctx)
+            )
+            baseline_photo = photo_tracker.find_latest(
+                route["device_id"],
+                group_number=resolved_group_number,
+            )
 
-            final_photo_name = _norm(photo_name)
-            if final_photo_name and append_timestamp:
+            final_photo_name = _normalize_capture_photo_name(photo_name)
+            should_append_timestamp = bool(append_timestamp)
+            if _requires_stable_photo_name(final_photo_name):
+                should_append_timestamp = False
+            if final_photo_name and should_append_timestamp:
                 final_photo_name = build_photo_name(
                     final_photo_name,
                     _norm(time_format) or args.default_time_format,
                 )
 
-            final_question = build_question_with_photo_name(question, final_photo_name)
+            final_question = build_question_with_photo_name(
+                question,
+                final_photo_name,
+                resolved_group_number,
+            )
             result = do_take_photo(
                 args.server,
                 session_id=route["session_id"],
                 device_id=route["device_id"],
                 question=final_question,
                 photo_name=final_photo_name,
+                group_number=resolved_group_number,
                 tool_name=_norm(tool_name) or args.default_take_photo_tool_name,
                 tool_timeout=int(timeout),
                 request_timeout=int(request_timeout),
@@ -1054,6 +1233,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 requested_photo_name=final_photo_name,
                 baseline=baseline_photo,
                 detect_timeout=float(args.photo_detect_timeout),
+                group_number=resolved_group_number,
             )
             raw_success = bool(result.get("success", False))
             recovered_success = bool(photo_meta.get("is_new_photo", False))
@@ -1062,6 +1242,8 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 "recovered_after_error": (not raw_success) and recovered_success,
                 "route": resolved,
                 "requested_photo_name": final_photo_name,
+                "append_timestamp": should_append_timestamp,
+                "group_number": resolved_group_number,
                 "photo_meta": photo_meta,
                 "result": result,
             }
@@ -1078,6 +1260,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
     )
     def xiaozhi_get_latest_photo(
         device_id: Optional[str] = None,
+        group_number: Optional[int] = None,
         ctx: Optional[Context] = None,
     ) -> Dict[str, Any]:
         try:
@@ -1086,7 +1269,14 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 ctx=ctx,
             )
             route = resolved["connection"]
-            latest = photo_tracker.find_latest(route["device_id"])
+            resolved_group_number = (
+                _normalize_group_number(group_number)
+                or _resolve_context_group_number(ctx)
+            )
+            latest = photo_tracker.find_latest(
+                route["device_id"],
+                group_number=resolved_group_number,
+            )
             if not latest:
                 return {
                     "success": False,
@@ -1096,6 +1286,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
             return {
                 "success": True,
                 "route": resolved,
+                "group_number": resolved_group_number,
                 "photo_meta": latest,
             }
         except Exception as exc:
@@ -1111,6 +1302,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
     def xiaozhi_save_latest_photo_as(
         photo_name: str,
         device_id: Optional[str] = None,
+        group_number: Optional[int] = None,
         ctx: Optional[Context] = None,
     ) -> Dict[str, Any]:
         try:
@@ -1119,19 +1311,27 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 ctx=ctx,
             )
             route = resolved["connection"]
+            resolved_group_number = (
+                _normalize_group_number(group_number)
+                or _resolve_context_group_number(ctx)
+            )
             requested_name = _norm(photo_name)
             if not requested_name:
                 raise RuntimeError("photo_name is required")
 
-            latest = photo_tracker.find_latest(route["device_id"])
+            latest = photo_tracker.find_latest(
+                route["device_id"],
+                group_number=resolved_group_number,
+            )
             if not latest:
                 raise RuntimeError("no local photo found for resolved device")
             source_path = _norm(latest.get("local_path", ""))
             if not source_path:
                 raise RuntimeError("latest photo path is empty")
 
-            safe_device = _sanitize_device_for_path(route["device_id"])
-            device_dir = os.path.abspath(os.path.join(photo_tracker.by_device_dir, safe_device))
+            device_dir = os.path.abspath(
+                photo_tracker._device_dir(route["device_id"], resolved_group_number)
+            )
             os.makedirs(device_dir, exist_ok=True)
             src_abs = os.path.abspath(source_path)
             src_ext = os.path.splitext(src_abs)[1] or ".png"
@@ -1150,6 +1350,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                     route["device_id"],
                     source_path,
                     requested_name,
+                    group_number=resolved_group_number,
                 )
                 if not saved_path:
                     raise RuntimeError(f"save latest photo failed: {save_state}")
@@ -1171,6 +1372,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
             return {
                 "success": True,
                 "route": resolved,
+                "group_number": resolved_group_number,
                 "requested_photo_name": requested_name,
                 "source_photo_meta": latest,
                 "saved_photo_meta": saved_meta,
@@ -1188,6 +1390,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
     )
     def xiaozhi_list_recent_photos(
         device_id: Optional[str] = None,
+        group_number: Optional[int] = None,
         limit: int = 10,
         ctx: Optional[Context] = None,
     ) -> Dict[str, Any]:
@@ -1197,10 +1400,19 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 ctx=ctx,
             )
             route = resolved["connection"]
-            items = photo_tracker.list_recent(route["device_id"], limit=limit)
+            resolved_group_number = (
+                _normalize_group_number(group_number)
+                or _resolve_context_group_number(ctx)
+            )
+            items = photo_tracker.list_recent(
+                route["device_id"],
+                limit=limit,
+                group_number=resolved_group_number,
+            )
             return {
                 "success": True,
                 "route": resolved,
+                "group_number": resolved_group_number,
                 "photos": items,
                 "count": len(items),
             }
@@ -1220,6 +1432,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
         photo_index: Optional[int] = None,
         file_name: str = "",
         device_id: Optional[str] = None,
+        group_number: Optional[int] = None,
         tool_name: str = "",
         timeout: int = 90,
         request_timeout: int = 120,
@@ -1232,6 +1445,10 @@ def build_server(args: argparse.Namespace) -> FastMCP:
             )
             _log_route_resolution("xiaozhi_preview_local_file", resolved)
             route = resolved["connection"]
+            resolved_group_number = (
+                _normalize_group_number(group_number)
+                or _resolve_context_group_number(ctx)
+            )
             resolved_file_path = _norm(file_path)
             latest_meta: Optional[Dict[str, Any]] = None
             selected_meta: Optional[Dict[str, Any]] = None
@@ -1239,7 +1456,9 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 normalized_file_name = _norm(file_name)
                 if normalized_file_name:
                     selected_meta = photo_tracker.find_by_file_name(
-                        route["device_id"], normalized_file_name
+                        route["device_id"],
+                        normalized_file_name,
+                        group_number=resolved_group_number,
                     )
                     if not selected_meta:
                         raise RuntimeError(
@@ -1247,7 +1466,11 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                         )
                     resolved_file_path = _norm(selected_meta.get("local_path", ""))
                 elif photo_index is not None:
-                    recent = photo_tracker.list_recent(route["device_id"], limit=200)
+                    recent = photo_tracker.list_recent(
+                        route["device_id"],
+                        limit=200,
+                        group_number=resolved_group_number,
+                    )
                     idx = int(photo_index)
                     if idx < 0:
                         raise RuntimeError("photo_index must be >= 0 (0 means latest)")
@@ -1258,7 +1481,10 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                     selected_meta = recent[idx]
                     resolved_file_path = _norm(selected_meta.get("local_path", ""))
                 else:
-                    latest_meta = photo_tracker.find_latest(route["device_id"])
+                    latest_meta = photo_tracker.find_latest(
+                        route["device_id"],
+                        group_number=resolved_group_number,
+                    )
                     if not latest_meta:
                         raise RuntimeError(
                             "file_path is empty and no latest photo found for resolved device"
@@ -1278,6 +1504,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
             return {
                 "success": bool(result.get("success", False)),
                 "route": resolved,
+                "group_number": resolved_group_number,
                 "file_path": resolved_file_path,
                 "file_meta": latest_meta,
                 "selected_photo_meta": selected_meta,
@@ -1295,6 +1522,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
     )
     def xiaozhi_preview_previous_photo(
         device_id: Optional[str] = None,
+        group_number: Optional[int] = None,
         tool_name: str = "",
         timeout: int = 90,
         request_timeout: int = 120,
@@ -1306,7 +1534,15 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 ctx=ctx,
             )
             route = resolved["connection"]
-            recent = photo_tracker.list_recent(route["device_id"], limit=200)
+            resolved_group_number = (
+                _normalize_group_number(group_number)
+                or _resolve_context_group_number(ctx)
+            )
+            recent = photo_tracker.list_recent(
+                route["device_id"],
+                limit=200,
+                group_number=resolved_group_number,
+            )
             if len(recent) < 2:
                 raise RuntimeError("no previous photo available for resolved device")
             selected = recent[1]
@@ -1326,6 +1562,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
             return {
                 "success": bool(result.get("success", False)),
                 "route": resolved,
+                "group_number": resolved_group_number,
                 "file_path": resolved_file_path,
                 "selected_photo_meta": selected,
                 "result": result,

@@ -982,6 +982,10 @@ def _looks_like_experiment_detail_request(norm: str) -> bool:
         "依据",
         "详细",
         "注意事项",
+        "是什么",
+        "做什么",
+        "要做什么",
+        "需要什么",
         "多少",
         "浓度",
         "体积",
@@ -1376,9 +1380,18 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
     norm = _normalize_text_for_match(filtered_text)
     if not norm:
         return ""
-    if len(norm) > 24:
-        return ""
     if _looks_like_experiment_detail_request(norm):
+        return ""
+
+    waiting_for_step_start = _assistant_waiting_for_step_start(conn)
+    waiting_for_step_completion = _assistant_waiting_for_step_completion(conn)
+    if waiting_for_step_completion and (
+        _looks_like_explicit_completion_report(filtered_text)
+        or _looks_like_explicit_added_completion_report(filtered_text)
+    ):
+        return "advance"
+
+    if len(norm) > 24:
         return ""
 
     clarify_tokens = (
@@ -1398,13 +1411,20 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
     if _contains_any(norm, clarify_tokens):
         return "repeat"
 
-    waiting_for_step_start = _assistant_waiting_for_step_start(conn)
     if waiting_for_step_start and _is_explicit_ready_to_start_reply(filtered_text):
         return "guide"
 
     advance_tokens = (
         "继续下一步",
         "下一步",
+        "下一组",
+        "下一组继续",
+        "继续下一组",
+        "换下一组",
+        "下一批",
+        "继续下一批",
+        "下一组学生",
+        "下一批学生",
         "往下走",
         "往后走",
         "做完了",
@@ -1420,7 +1440,7 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
     if _contains_any(norm, advance_tokens):
         return "advance"
 
-    if _assistant_waiting_for_step_completion(conn) and _looks_like_pure_short_completion_control(
+    if waiting_for_step_completion and _looks_like_pure_short_completion_control(
         norm
     ):
         return "advance"
@@ -1444,7 +1464,7 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
         "ok了",
     )
     if norm in neutral_ack_tokens or _ends_with_any(norm, neutral_ack_tokens):
-        if _assistant_waiting_for_step_completion(conn):
+        if waiting_for_step_completion:
             return "advance"
         if waiting_for_step_start:
             return "guide"
@@ -1514,6 +1534,13 @@ def _is_experiment_fast_path_action_enabled(conn, action: str) -> bool:
     if allowed_actions is None:
         return True
     return normalized_action in allowed_actions
+
+
+def _is_experiment_strict_graph_path_enabled(conn) -> bool:
+    raw_enabled = conn.config.get("experiment_strict_graph_path_enabled", True)
+    if isinstance(raw_enabled, str):
+        return raw_enabled.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw_enabled)
 
 
 async def _call_experiment_graph_tool_fast(
@@ -1800,6 +1827,12 @@ def _looks_like_explicit_completion_report(filtered_text: str) -> bool:
         "全都混匀了",
         "已经全部混匀",
         "已全部混匀",
+        "混合均匀",
+        "混匀了",
+        "开始搅拌",
+        "已经开始搅拌",
+        "已开始搅拌",
+        "都已经开始搅拌",
         "搅拌好了",
     )
     return _contains_any(norm, completion_tokens)
@@ -1822,6 +1855,15 @@ def _looks_like_explicit_added_completion_report(filtered_text: str) -> bool:
         "全都加完了",
         "已经加完了",
         "已加完了",
+        "全部加入",
+        "都加入了",
+        "全都加入了",
+        "已经加入",
+        "已加入",
+        "都已经加入",
+        "全都已经加入",
+        "按顺序加入",
+        "顺序加入",
     )
     return _contains_any(norm, completion_tokens)
 
@@ -7651,6 +7693,9 @@ async def handle_experiment_control_strict_graph_intent(
     original_text: str,
     filtered_text: str,
 ) -> bool:
+    if not _is_experiment_strict_graph_path_enabled(conn):
+        return False
+
     if _is_experiment_fast_path_available(conn):
         return False
 
@@ -7942,6 +7987,18 @@ def _extract_photo_result_meta(payload) -> dict:
     requested_photo_name = str(
         photo_meta.get("requested_photo_name") or data.get("requested_photo_name") or ""
     ).strip()
+    group_number = None
+    for candidate in (
+        photo_meta.get("group_number"),
+        data.get("group_number"),
+    ):
+        try:
+            group_number = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if group_number >= 1:
+            break
+        group_number = None
     try:
         mtime = float(photo_meta.get("mtime", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -7952,6 +8009,7 @@ def _extract_photo_result_meta(payload) -> dict:
         "file_name": file_name,
         "photo_path": photo_path,
         "requested_photo_name": requested_photo_name,
+        "group_number": group_number,
         "mtime": mtime,
     }
 

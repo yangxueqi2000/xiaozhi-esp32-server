@@ -20,13 +20,16 @@ except ModuleNotFoundError:  # Python < 3.11
 from config.logger import setup_logging
 from core.providers.llm.base import LLMProviderBase
 from core.providers.llm.system_prompt import get_system_prompt_for_function
+from core.providers.tools.server_mcp.payload_utils import sync_server_mcp_payload_state
 
 TAG = __name__
 logger = setup_logging()
 _SERVER_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_MCP_SETTINGS_PATH = _SERVER_ROOT / "data" / ".mcp_server_settings.json"
 _DEFAULT_CODEX_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
-_DEFAULT_APP_SERVER_CONFIG_OVERRIDES = ("allow_login_shell=false",)
+_DEFAULT_APP_SERVER_CONFIG_OVERRIDES = (
+    "allow_login_shell=false",
+)
 _RUNTIME_CODEX_HOME_COPY_FILES = (
     "AGENTS.md",
     "auth.json",
@@ -41,6 +44,65 @@ _RUNTIME_CODEX_HOME_COPY_DIRS = (
     "skills",
     "vendor_imports",
 )
+_AGENT_INTERNAL_LEAK_MARKERS = tuple(
+    marker.lower()
+    for marker in (
+        "We need respond",
+        "We need to respond",
+        "Need to respond",
+        "respond as assistant",
+        "We must follow instructions",
+        "We need continue",
+        "Need continue",
+        "Need to decide",
+        "Need assistant",
+        "Need proceed",
+        "Need ensure",
+        "Need verify",
+        "Let's execute",
+        "Let's craft",
+        "Let's produce final",
+        "Let's final",
+        "Use functions",
+        "call mcp",
+        "analysis done",
+        "Wait conversation",
+        "Wait now",
+        "Wait given",
+        "Actually conversation",
+        "We'll continue",
+        "Let's see upcoming",
+        "Let's process next hypothetical",
+        "as ChatGPT",
+        "final channel",
+        "No user message",
+        "No more?",
+        "We need final answer",
+        "Already done",
+        "next user maybe",
+        "tool calls before final",
+        "Sequence quick:",
+    )
+)
+_AGENT_INTERNAL_LEAK_HOLD_CHARS = max(len(marker) for marker in _AGENT_INTERNAL_LEAK_MARKERS) - 1
+_PHOTO_AUTHORIZATION_PHRASES = (
+    "可以拍照",
+    "可以拍",
+    "能拍照",
+    "能拍",
+    "拍吧",
+    "拍照吧",
+    "开始拍",
+    "现在拍",
+    "拍一下",
+    "准备好了",
+    "可以了",
+    "行拍",
+    "行，拍",
+    "好拍",
+    "好，拍",
+)
+_PHOTO_QUESTION_MARKERS = ("?", "？", "吗", "么")
 
 if os.name == "nt":
     try:
@@ -454,6 +516,24 @@ def _merge_codex_mcp_server_configs(
     return merged
 
 
+def _inject_experiment_yaml_env(
+    server_configs: Dict[str, Dict[str, Any]],
+    experiment_yaml_path: str,
+) -> None:
+    yaml_path = str(experiment_yaml_path or "").strip()
+    if not yaml_path:
+        return
+
+    for server_cfg in server_configs.values():
+        if not isinstance(server_cfg, dict) or "command" not in server_cfg:
+            continue
+        env = server_cfg.get("env")
+        if not isinstance(env, dict):
+            env = {}
+            server_cfg["env"] = env
+        env["EXPERIMENT_YAML_PATH"] = yaml_path
+
+
 def _split_toml_table_items(
     value: Dict[str, Any],
 ) -> Tuple[List[Tuple[str, Any]], List[Tuple[str, Dict[str, Any]]]]:
@@ -548,17 +628,62 @@ def _is_server_request(msg: Dict) -> bool:
     )
 
 
-def _accept_server_request(proc: subprocess.Popen, msg: Dict, auto_approve: bool) -> None:
+def _extract_elicitation_tool_name(params: Dict, meta: Dict) -> str:
+    for key in ("tool", "tool_name", "name"):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            return value
+    message = str(params.get("message") or "")
+    match = re.search(r'tool\s+"([^"]+)"', message)
+    return match.group(1).strip() if match else ""
+
+
+def _user_text_authorizes_photo(user_text: str) -> bool:
+    text = str(user_text or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _PHOTO_QUESTION_MARKERS):
+        return False
+    return any(phrase in text for phrase in _PHOTO_AUTHORIZATION_PHRASES)
+
+
+def _accept_server_request(
+    proc: subprocess.Popen,
+    msg: Dict,
+    auto_approve: bool,
+    mcp_tool_guard=None,
+) -> None:
     method = str(msg.get("method") or "")
     decision = "accept" if auto_approve else "decline"
 
     if method == "mcpServer/elicitation/request":
         # Newer Codex app-server versions use RMCP elicitation semantics here.
-        # This provider has no UI to collect structured input, so do not fake
-        # accepted content; decline cleanly to satisfy the protocol.
-        result = {"action": "decline", "content": None}
+        params = msg.get("params", {}) or {}
+        meta = params.get("_meta", {}) or {}
+        if auto_approve and meta.get("codex_approval_kind") == "mcp_tool_call":
+            allow_tool_call = True
+            if callable(mcp_tool_guard):
+                try:
+                    allow_tool_call = bool(mcp_tool_guard(params, meta))
+                except Exception as exc:
+                    logger.bind(tag=TAG).warning(
+                        f"codex mcp tool guard failed open: {exc}"
+                    )
+                    allow_tool_call = True
+            if allow_tool_call:
+                result = {"action": "accept", "content": {}}
+            else:
+                result = {"action": "decline", "content": None}
+        else:
+            # This provider has no UI to collect structured input, so do not
+            # fake accepted content for non-approval elicitation forms.
+            result = {"action": "decline", "content": None}
     elif method == "item/tool/requestUserInput":
         result = {"answers": {}}
+    elif method == "item/commandExecution/requestApproval":
+        result = {"decision": "approved" if auto_approve else "denied"}
+    elif method == "execCommandApproval":
+        result = {"decision": "approved" if auto_approve else "denied"}
     elif method == "item/permissions/requestApproval":
         result = {
             "permissions": {
@@ -910,6 +1035,44 @@ def _format_action_desc(item: Dict) -> str:
     return desc
 
 
+def _sync_native_mcp_function_call_state(conn: Any, item: Dict[str, Any]) -> None:
+    """Mirror app-server native MCP calls into xiaozhi's per-turn MCP state."""
+    if conn is None or not isinstance(item, dict):
+        return
+    if item.get("type") != "function_call":
+        return
+    if str(item.get("status") or "").strip() != "completed":
+        return
+
+    namespace = str(item.get("namespace") or "").strip()
+    tool_name = str(item.get("name") or "").strip()
+    if not namespace.startswith("mcp__") or not tool_name:
+        return
+
+    arguments = {}
+    raw_arguments = item.get("arguments")
+    if isinstance(raw_arguments, dict):
+        arguments = raw_arguments
+    elif isinstance(raw_arguments, str) and raw_arguments.strip():
+        try:
+            parsed_arguments = json.loads(raw_arguments)
+            if isinstance(parsed_arguments, dict):
+                arguments = parsed_arguments
+        except Exception:
+            arguments = {}
+
+    # Native Codex MCP tool results are handled inside app-server, so xiaozhi
+    # does not receive the result payload here. We still need to record that a
+    # graph/UV/device MCP tool ran in this sentence; mutating graph tools will
+    # mark the cached experiment state as refresh-required for the next turn.
+    sync_server_mcp_payload_state(
+        conn,
+        tool_name=tool_name,
+        payload=None,
+        arguments=arguments,
+    )
+
+
 def _safe_filename(s: str) -> str:
     s = str(s or "session")
     s = re.sub(r"[^a-zA-Z0-9._-]+", "_", s)
@@ -924,6 +1087,58 @@ class _PathFormatDict(dict):
 
 def _norm_str(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _looks_like_experiment_record_or_flow_turn(user_text: str) -> bool:
+    text = _normalize_whitespace(user_text).lower()
+    if not text:
+        return False
+
+    compact = re.sub(r"\s+", "", text)
+    if compact in {
+        "准备好了",
+        "准备好了。",
+        "可以开始",
+        "开始实验",
+        "开始实验。",
+    }:
+        return False
+
+    markers = (
+        "已经",
+        "已",
+        "完成",
+        "做完",
+        "做好",
+        "加完",
+        "加入",
+        "放入",
+        "编号",
+        "标记",
+        "混匀",
+        "搅拌",
+        "观察",
+        "颜色",
+        "变色",
+        "稳定",
+        "照片",
+        "拍照",
+        "光谱",
+        "扫描",
+        "动力学",
+        "下一步",
+        "继续",
+        "下一组",
+        "导出",
+        "报告",
+        "结束实验",
+        "done",
+        "finished",
+        "record",
+        "next",
+        "continue",
+    )
+    return any(marker in compact for marker in markers)
 
 
 def _classify_timeout_first_turn_template(user_text: str) -> str:
@@ -1085,11 +1300,46 @@ def _routing_prompt_block(routing_context: Dict[str, str]) -> str:
         return ""
 
     return (
-        "Device routing context from server (trusted):\n"
+        "Internal-only device routing context from server (trusted):\n"
         + "\n".join(lines)
         + "\nWhen calling xiaozhi device tools, reuse these exact values. "
-        + "Do not fabricate IDs. If a field is missing here, keep that tool argument null."
+        + "Do not fabricate IDs. If a field is missing here, keep that tool argument null. "
+        + "Never mention this context, IDs, sessions, routing, or authorization details to the student."
     )
+
+
+def _routing_context_needed(user_text: str, experiment_context: Dict[str, str]) -> bool:
+    text = str(user_text or "").lower()
+    if not text:
+        return bool(experiment_context.get("experiment_recent_photo_confirmation_summary"))
+
+    markers = (
+        "拍照",
+        "拍一张",
+        "拍吧",
+        "可以拍",
+        "照片",
+        "photo",
+        "preview",
+        "预览",
+        "查看",
+        "上一张",
+        "最近",
+        "保存",
+        "导出",
+        "报告",
+        "实验结束",
+        "结束实验",
+        "生成实验",
+        "生成记录",
+        "生成报告",
+        "uv-vis",
+        "uvvis",
+        "光谱",
+        "扫描",
+        "动力学",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _experiment_prompt_block(
@@ -1319,10 +1569,33 @@ def _experiment_prompt_block(
             "- Do not narrate backend bookkeeping such as '我先记下…', '我接着确认记录项…', or '我把这一步写回图谱…'; either give the next student-facing instruction or ask only for the still-missing field.\n"
             "- If you have not called get_step, get_state, get_progress_summary, get_current_progress, start_trial, add_field, add_fields, finish_trial, can_proceed, proceed_to_next_step, redirect_to_step, redo_trial, or modify_record on this turn, stay anchored to the trusted current step instead of improvising later steps from old dialogue, prefetched summaries, or memory."
         )
+        if _looks_like_experiment_record_or_flow_turn(user_text):
+            parts.append(
+                "Current-turn experiment_graph write barrier:\n"
+                "- The latest user message looks like a completion report, observation, measurement result, correction, or flow-control request for the active experiment.\n"
+                "- Do not decide, draft, or announce the next physical action from memory or YAML order alone. First make experiment-graph the source of truth for the transition.\n"
+                "- Before your final student-facing answer, call the connected experiment-graph MCP tools needed to make the graph truthful: get_state/get_current_progress if the active step may be stale, start_trial if no active trial exists, add_field/add_fields for the confirmed facts, finish_trial(validate=true) when required fields are complete, and proceed_to_next_step when you are about to give the next step. You may call can_proceed first, but proceed_to_next_step itself is the required transition gate and must return ok=true before you speak the next step.\n"
+                "- Hot path: when add_field/add_fields returns ok=true and missing_fields is empty, immediately call finish_trial(validate=true). When finish_trial returns ok=true and you plan to give the next physical action, immediately call proceed_to_next_step. Do not insert extra schema/reference reads or long reasoning between these calls.\n"
+                "- Always copy the full exact experiment_session_id into experiment-graph calls. A session_id containing '...' or '…' is invalid; replace it with the latest full session id before retrying.\n"
+                "- If a graph write, finish, proceed, redirect, or export tool returns ok=false or a session_id-not-found error, retry once with the latest full exact session id. If it still fails, do not claim the record, photo, step transition, group transition, or export succeeded.\n"
+                "- Only pass group_number to photo/export/UV tools when the experiment YAML explicitly has group_number fields or workflow.group_start_steps. In non-group experiments, current_group_number=1 is bookkeeping only and must not be used for storage.\n"
+                "- Before calling xiaozhi_take_photo, the latest student message must explicitly authorize taking a photo. If it does not, do not call the tool on this turn; ask only '现在可以拍照吗？'. If a photo tool call is rejected with 'user rejected MCP tool call', treat that as missing authorization, not as a camera, device, network, or permission failure.\n"
+                "- If the latest student message explicitly authorizes taking a photo and the current graph step is a required photo-confirmation step, you must call xiaozhi_take_photo on this turn. Do not ask the student to take the photo manually, do not say '拍完告诉我', and do not move on until the tool succeeds and the graph record is updated.\n"
+                "- If the current step requires a photo and the student has granted permission, call the connected xiaozhi_take_photo tool before claiming the photo exists; then write the returned photo result into the graph before moving on.\n"
+                "- Prefer add_fields with native JSON booleans/numbers for obvious current-step confirmations; do not write boolean facts as strings such as \"true\" unless the schema requires a string.\n"
+                "- Only after proceed_to_next_step returns ok=true may you use its returned current_step_id/current step message to decide and speak the next physical action.\n"
+                "- If proceed_to_next_step fails, or if no proceed_to_next_step result was obtained on this turn, do not give the next step; remain on the current graph step and ask only for the missing action-level detail.\n"
+                "- A final answer that says the step is complete, gives the next physical action, enters the next group, or ends/exports the experiment without those successful MCP calls and returned graph state is invalid.\n"
+                "- If a required field is missing or a graph tool rejects the write/advance, do not give the next step; ask only for the missing action-level detail."
+            )
     parts.append(
         "MCP execution guard:\n"
         "- The experiment-graph, UV-Vis, and xiaozhi device capabilities for this runtime are already exposed through connected MCP tools when configured.\n"
+        "- Student-facing answers must not contain English scratch text, self-corrections, or reasoning artifacts such as 'correction:', 'not right', 'Need to', or 'I should'. If you notice a draft mistake, silently replace it and output only the corrected Chinese lab instruction.\n"
+        "- Local shell/commandExecution may be available for environment checks, but experiment state changes, photos, UV-Vis actions, and report export must use the connected MCP tools instead of shell substitutes.\n"
         "- Do not launch local MCP server scripts, wrapper processes, or ad-hoc Python MCP clients from shell commands just to inspect or call those capabilities.\n"
+        "- When the user asks to generate/export an experiment record or report, do not use shell, commandExecution, or filesystem inspection as a substitute; call the connected experiment-graph export_records_to_yaml tool and wait for ok=true.\n"
+        "- After export_records_to_yaml returns ok=true, tell the student exactly '实验报告已经生成'. Do not mention YAML, PDF, file_path, yaml_path, pdf_path, URLs, or local directories unless the user explicitly asks for the path.\n"
         "- In particular, do not run local paths such as experimental_graph_mcp.py, experiment_graph_mcp_server.py, uvvis_http_wrapper.py, or device_trigger_mcp_server.py from shell or Python probes; call the connected MCP tools directly instead.\n"
         "- If a needed MCP tool is unavailable on this turn, continue with non-tool guidance or explain what is missing, but do not bypass the runtime by spawning replacement shell-based MCP sessions."
     )
@@ -1353,6 +1626,8 @@ class _CodexSession:
         self.workspace = str(Path(config.get("workspace", os.getcwd())).resolve())
         self.auto_approve = bool(config.get("auto_approve", True))
         self.approval_policy = config.get("approval_policy")
+        if self.approval_policy is None and self.auto_approve:
+            self.approval_policy = "never"
         self.network_access = bool(config.get("network_access", True))
         self.thread_sandbox = config.get("sandbox", "workspace-write")
         self.sandbox_policy = config.get("sandbox_policy")
@@ -1361,6 +1636,11 @@ class _CodexSession:
         self.service_tier = config.get("service_tier") or config.get("serviceTier")
         self.system_prompt_mode = (config.get("system_prompt_mode") or "first_turn").lower()
         self.bootstrap_mode = (config.get("bootstrap_mode") or "none").lower()
+        configured_yaml_path = config.get("yaml_path")
+        resolved_yaml_path = _resolve_optional_path(configured_yaml_path, _SERVER_ROOT)
+        self.experiment_yaml_path = str(
+            resolved_yaml_path or configured_yaml_path or ""
+        ).strip()
         self.api_key = config.get("api_key")
         self.export_api_key = bool(config.get("export_api_key", False))
         self.env_overrides = config.get("env", {}) or {}
@@ -1566,6 +1846,7 @@ class _CodexSession:
         if not server_configs:
             self._runtime_codex_home = None
             return None
+        _inject_experiment_yaml_env(server_configs, self.experiment_yaml_path)
 
         runtime_codex_home = self._resolve_runtime_codex_home_path()
         if runtime_codex_home is None:
@@ -1579,6 +1860,10 @@ class _CodexSession:
 
             base_config = _load_toml_document(self.codex_config_path)
             merged_config = _merge_codex_mcp_server_configs(base_config, server_configs)
+            if self.model:
+                merged_config["model"] = self.model
+            if self.effort:
+                merged_config["model_reasoning_effort"] = self.effort
             (runtime_codex_home / "config.toml").write_text(
                 _dump_toml_document(merged_config),
                 encoding="utf-8",
@@ -1695,6 +1980,10 @@ class _CodexSession:
         env = os.environ.copy()
         if self.api_key and self.export_api_key and "OPENAI_API_KEY" not in env:
             env["OPENAI_API_KEY"] = self.api_key
+        if "${" in self.workspace:
+            raise ValueError(
+                f"Codex workspace contains an unresolved config template: {self.workspace}"
+            )
         if not Path(self.workspace).exists():
             raise FileNotFoundError(
                 f"Codex workspace not found: {self.workspace}"
@@ -1872,7 +2161,12 @@ class _CodexSession:
             else:
                 last_user = f"Tool results:\n{tool_context}"
 
-        routing_block = _routing_prompt_block(routing_context or {})
+        experiment_context = experiment_context or {}
+        routing_block = (
+            _routing_prompt_block(routing_context or {})
+            if _routing_context_needed(strategy_user_text, experiment_context)
+            else ""
+        )
         if routing_block:
             if last_user:
                 last_user = f"{last_user}\n\n{routing_block}"
@@ -1880,7 +2174,7 @@ class _CodexSession:
                 last_user = routing_block
 
         experiment_block = _experiment_prompt_block(
-            experiment_context or {},
+            experiment_context,
             user_text=strategy_user_text,
         )
         if experiment_block:
@@ -1957,7 +2251,10 @@ class _CodexSession:
 
         if self.sandbox_policy:
             turn_params["sandboxPolicy"] = self.sandbox_policy
-        else:
+        elif str(self.thread_sandbox or "").strip().lower() not in {
+            "danger-full-access",
+            "dangerfullaccess",
+        }:
             turn_params["sandboxPolicy"] = {
                 "type": "workspaceWrite",
                 "writableRoots": [self.workspace],
@@ -2036,6 +2333,23 @@ class _CodexSession:
             safe_delta = delta.replace("\r", "\\r").replace("\n", "\\n")
             file_append(f"\n[{_ts()}] [THINKING_DEBUG] {method}: {safe_delta}\n")
 
+        def mcp_tool_guard(params: Dict, meta: Dict) -> bool:
+            tool_name = _extract_elicitation_tool_name(params, meta)
+            if tool_name != "xiaozhi_take_photo":
+                return True
+            if _user_text_authorizes_photo(user_text):
+                return True
+
+            if self.log_stream:
+                file_append(
+                    f"\n[{_ts()}] [BLOCKED_UNAUTHORIZED_PHOTO_TOOL_CALL]\n"
+                )
+            tlog.warning(
+                "blocked_unauthorized_photo_tool_call",
+                user_text=_short(user_text, 200),
+            )
+            return False
+
         # Log turn start
         if self.log_stream:
             file_append(f"[{_ts()}] [TURN_START] session={self.session_key} thread={self.thread_id} turn={turn_id}\n")
@@ -2050,6 +2364,65 @@ class _CodexSession:
         final_text = None
         thinking_buffer = ""
         out_buffer = ""
+        agent_pending_text = ""
+        agent_internal_leak_suppressed = False
+
+        def find_agent_internal_leak(text: str) -> int:
+            lowered = text.lower()
+            positions = [
+                lowered.find(marker)
+                for marker in _AGENT_INTERNAL_LEAK_MARKERS
+                if lowered.find(marker) >= 0
+            ]
+            return min(positions) if positions else -1
+
+        def emit_agent_text(text: str) -> List[str]:
+            nonlocal out_buffer
+            if not text:
+                return []
+            out_buffer += text
+            if self.log_stream:
+                file_append(text)
+            return [text]
+
+        def flush_agent_text(force: bool = False) -> List[str]:
+            nonlocal agent_pending_text, agent_internal_leak_suppressed
+            if agent_internal_leak_suppressed:
+                agent_pending_text = ""
+                return []
+            if not agent_pending_text:
+                return []
+
+            marker_at = find_agent_internal_leak(agent_pending_text)
+            if marker_at >= 0:
+                visible_text = agent_pending_text[:marker_at].rstrip()
+                agent_pending_text = ""
+                agent_internal_leak_suppressed = True
+                chunks = emit_agent_text(visible_text)
+                if self.log_stream:
+                    file_append(f"\n[{_ts()}] [FILTERED_INTERNAL_LEAK]\n")
+                if self.log_stream and self.stream_debug:
+                    tlog.warning("codex_agent_internal_leak_filtered")
+                return chunks
+
+            if not force and len(agent_pending_text) <= _AGENT_INTERNAL_LEAK_HOLD_CHARS:
+                return []
+
+            if force:
+                visible_text = agent_pending_text
+                agent_pending_text = ""
+                return emit_agent_text(visible_text)
+
+            emit_len = len(agent_pending_text) - _AGENT_INTERNAL_LEAK_HOLD_CHARS
+            visible_text = agent_pending_text[:emit_len]
+            agent_pending_text = agent_pending_text[emit_len:]
+            return emit_agent_text(visible_text)
+
+        def append_agent_text(delta: str) -> List[str]:
+            nonlocal agent_pending_text
+            if delta:
+                agent_pending_text += delta
+            return flush_agent_text(force=False)
 
         try:
             while True:
@@ -2061,7 +2434,12 @@ class _CodexSession:
                         raw_payload = str(msg)
                     raw_append(f"[{_ts()}] raw_{raw_payload}\n")
                 if _is_server_request(msg):
-                    _accept_server_request(self.proc, msg, self.auto_approve)
+                    _accept_server_request(
+                        self.proc,
+                        msg,
+                        self.auto_approve,
+                        mcp_tool_guard=mcp_tool_guard,
+                    )
                     continue
 
                 if not _matches_thread_turn(msg, self.thread_id, turn_id):
@@ -2075,17 +2453,14 @@ class _CodexSession:
                     delta = params.get("delta", "")
                     if delta:
                         saw_tokens = True
-                        out_buffer += delta
-
-                        # write assistant text as-is to the log file (streaming)
-                        if self.log_stream:
-                            file_append(delta)
+                        visible_deltas = append_agent_text(delta)
 
                         # per-token debug (config-only gate)
                         if self.log_stream and self.stream_debug:
                             tlog.debug("codex_stream_delta", delta=_short(delta, 400))
 
-                        yield delta
+                        for visible_delta in visible_deltas:
+                            yield visible_delta
 
                 # --- emitted events (thinking/action) ---
                 if emit_events and self.thinking_mode != "off":
@@ -2133,18 +2508,24 @@ class _CodexSession:
                 # --- final text fallback ---
                 if method == "item/completed":
                     item = params.get("item", {}) or {}
+                    _sync_native_mcp_function_call_state(
+                        kwargs.get("state_conn"),
+                        item,
+                    )
                     if item.get("type") == "agentMessage":
                         final_text = item.get("text") or item.get("content") or ""
 
                 if method == "turn/completed":
+                    for visible_delta in flush_agent_text(force=True):
+                        yield visible_delta
                     break
 
             # fallback if the server didn't stream deltas but gave final text
             if not saw_tokens and final_text:
-                out_buffer += final_text
-                if self.log_stream:
-                    file_append(final_text)
-                yield final_text
+                for visible_delta in append_agent_text(final_text):
+                    yield visible_delta
+                for visible_delta in flush_agent_text(force=True):
+                    yield visible_delta
 
         finally:
             self._active_turn_id = None
@@ -2276,8 +2657,11 @@ class LLMProvider(LLMProviderBase):
 
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):
         patched_dialogue = deepcopy(dialogue)
+        inject_legacy_function_prompt = bool(
+            self.config.get("inject_legacy_function_prompt", True)
+        )
 
-        if len(patched_dialogue) == 2 and functions:
+        if inject_legacy_function_prompt and len(patched_dialogue) == 2 and functions:
             last_msg = str(patched_dialogue[-1].get("content", ""))
             function_str = json.dumps(functions, ensure_ascii=False)
             patched_dialogue[-1]["content"] = (
