@@ -750,6 +750,11 @@ def _strip_markdown_layout_for_tts(text: str) -> str:
 
 
 _DEFAULT_TTS_SPOKEN_ALIASES = {
+    "Ag NPs": "银纳米粒子",
+    "UV-Vis": "紫外可见",
+    "UV Vis": "紫外可见",
+    "4-硝基苯酚": "对硝基苯酚",
+    "4-氨基苯酚": "对氨基苯酚",
     "AgNPs": "银纳米粒子",
     "AuNPs": "金纳米粒子",
     "H2O": "水",
@@ -1001,6 +1006,17 @@ def _replace_lab_dash_terms_for_tts(text: str) -> str:
         return f"{aromatic_prefix.get(match.group(1), match.group(1))}{match.group(2)}"
 
     return aromatic_re.sub(_aromatic_repl, result)
+
+
+def _replace_negative_temperature_for_tts(text: str) -> str:
+    negative_temp_re = re.compile(
+        rf"(?<![\dA-Za-z])[-−－]\s*(\d+(?:\.\d+)?)\s*(?:°C|℃|摄氏度)"
+    )
+
+    def _repl(match: re.Match) -> str:
+        return f"零下{match.group(1)}摄氏度"
+
+    return negative_temp_re.sub(_repl, text)
 
 
 def _replace_measurement_ranges_for_tts(text: str) -> str:
@@ -1372,6 +1388,7 @@ def normalize_tts_text(text, custom_aliases=None):
         return ""
 
     normalized = _replace_lab_dash_terms_for_tts(normalized)
+    normalized = _replace_negative_temperature_for_tts(normalized)
     normalized = _replace_range_for_tts(normalized)
     normalized = _replace_numbered_hao_labels_for_tts(normalized)
     normalized = _replace_units_for_tts(normalized)
@@ -3007,7 +3024,8 @@ def prepare_runtime_spoken_text(text):
     filtered = _strip_spoken_future_step_clauses(filtered)
     filtered = _strip_spoken_technical_details(filtered)
     filtered = _compact_spoken_step_guidance_text(filtered)
-    filtered = _limit_spoken_sentence_count(filtered, max_sentences=2)
+    max_sentences = 3 if "继续做实验" in filtered or "继续实验" in filtered else 2
+    filtered = _limit_spoken_sentence_count(filtered, max_sentences=max_sentences)
     filtered = _ensure_spoken_step_completion_prompt(filtered)
     return normalize_spoken_text(filtered)
 

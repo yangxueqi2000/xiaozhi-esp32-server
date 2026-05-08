@@ -1645,6 +1645,13 @@ def _experiment_prompt_block(
             "- Do not narrate backend bookkeeping such as '我先记下…', '我接着确认记录项…', or '我把这一步写回图谱…'; either give the next student-facing instruction or ask only for the still-missing field.\n"
             "- If you have not called get_step, get_state, get_progress_summary, get_current_progress, start_trial, add_field, add_fields, finish_trial, can_proceed, proceed_to_next_step, redirect_to_step, redo_trial, or modify_record on this turn, stay anchored to the trusted current step instead of improvising later steps from old dialogue, prefetched summaries, or memory."
         )
+        parts.append(
+            "Student sidetrack question rule:\n"
+            "- If the latest user message asks a conceptual, safety, reagent, instrument, data-meaning, troubleshooting, or other explanatory question, and it does not itself report completion, observations, measurements, photos, scan results, corrections, or a request to advance, answer the question first.\n"
+            "- For these sidetrack questions, do not call experiment-graph tools solely to remind an unfinished current step, do not repeat the whole unfinished step, and do not tell the student they must finish the step before you answer.\n"
+            "- After answering, append exactly one short Chinese sentence: '我们现在能继续做实验了吗？'\n"
+            "- If the experiment is already at a completed final step and the user asks a question, answer normally; do not keep urging the student to complete the final step again."
+        )
         if _looks_like_experiment_record_or_flow_turn(user_text):
             parts.append(
                 "Current-turn experiment_graph write barrier:\n"
