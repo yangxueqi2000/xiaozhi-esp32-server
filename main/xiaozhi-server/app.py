@@ -257,12 +257,18 @@ async def main():
 
     websocket_port = 8000
     server_config = config.get("server", {})
+    websocket_url = ""
     if isinstance(server_config, dict):
         websocket_port = int(server_config.get("port", 8000))
+        websocket_config = str(server_config.get("websocket", "") or "").strip()
+        if websocket_config.startswith(("ws://", "wss://")):
+            websocket_url = websocket_config
+    if not websocket_url:
+        websocket_url = f"ws://{local_ip}:{websocket_port}/xiaozhi/v1/"
 
     logger.bind(tag=TAG).info(
         "WebSocket地址是\t{}",
-        f"ws://{local_ip}:{websocket_port}/xiaozhi/v1/",
+        websocket_url,
     )
     logger.bind(tag=TAG).info(
         "=======上面的地址是 WebSocket 协议地址，请勿用浏览器访问======"
