@@ -30,6 +30,30 @@ UNKNOWN_SPEAKER_RETRY_PROMPT = "未知说话人，请重新说"
 UNKNOWN_SPEAKER_STATUSES = {"unknown", "rejected"}
 
 
+def _parse_nonnegative_int(value, default=0):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+def _selected_vad_config(conn) -> dict:
+    config = getattr(conn, "config", {}) or {}
+    selected = str((config.get("selected_module") or {}).get("VAD", "") or "").strip()
+    vad_config = config.get("VAD") or {}
+    if selected and isinstance(vad_config.get(selected), dict):
+        return vad_config.get(selected) or {}
+    return {}
+
+
+def _tail_merge_window_ms(conn) -> int:
+    return _parse_nonnegative_int(
+        _selected_vad_config(conn).get("tail_merge_window_ms"),
+        0,
+    )
+
+
 class ASRProviderBase(ABC):
     def __init__(self):
         pass
@@ -85,6 +109,23 @@ class ASRProviderBase(ABC):
 
             # 自动模式下通过 VAD 检测到语音停止时触发识别
             if conn.client_voice_stop:
+                if have_voice:
+                    conn.client_voice_stop = False
+                    conn._asr_voice_stop_deadline_ms = 0.0
+                    return
+
+                tail_merge_ms = _tail_merge_window_ms(conn)
+                if tail_merge_ms > 0:
+                    now_ms = time.time() * 1000
+                    deadline_ms = float(
+                        getattr(conn, "_asr_voice_stop_deadline_ms", 0.0) or 0.0
+                    )
+                    if deadline_ms <= 0.0:
+                        conn._asr_voice_stop_deadline_ms = now_ms + tail_merge_ms
+                        return
+                    if now_ms < deadline_ms:
+                        return
+
                 asr_audio_task = conn.asr_audio.copy()
                 pcm_audio_task = (
                     conn.asr_pcm_audio.copy() if hasattr(conn, "asr_pcm_audio") else None
@@ -92,6 +133,7 @@ class ASRProviderBase(ABC):
                 conn.asr_audio.clear()
                 if hasattr(conn, "asr_pcm_audio"):
                     conn.asr_pcm_audio.clear()
+                conn._asr_voice_stop_deadline_ms = 0.0
                 conn.reset_vad_states()
 
                 if len(asr_audio_task) > 15:

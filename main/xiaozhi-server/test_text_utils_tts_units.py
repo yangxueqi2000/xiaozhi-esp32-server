@@ -15,6 +15,19 @@ class TextUtilsTTSUnitsTest(unittest.TestCase):
 
         self.assertIn("546纳米", result)
 
+    def test_normalize_tts_text_reads_sample_range_dash_as_to(self):
+        result = textUtils.normalize_tts_text("请把1-5号样品放好。")
+
+        self.assertIn("到", result)
+        self.assertIn("号样品", result)
+        self.assertNotIn("-5", result)
+
+    def test_normalize_tts_text_reads_aromatic_dash_without_minus(self):
+        result = textUtils.normalize_tts_text("加入4-硝基苯酚。")
+
+        self.assertIn("硝基苯酚", result)
+        self.assertNotIn("-", result)
+
 
 if __name__ == "__main__":
     unittest.main()

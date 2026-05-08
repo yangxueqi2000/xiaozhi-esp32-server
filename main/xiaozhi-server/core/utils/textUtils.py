@@ -975,6 +975,34 @@ def _replace_range_for_tts(text: str) -> str:
     return result
 
 
+_TTS_DASH_CHARS = r"\-‐‑‒–—―－−"
+
+
+def _replace_lab_dash_terms_for_tts(text: str) -> str:
+    """Rewrite lab-specific dash notation so TTS does not read it as minus."""
+
+    range_re = re.compile(
+        rf"(?<![\dA-Za-z])(\d+)\s*[{_TTS_DASH_CHARS}~～]\s*(\d+)\s*"
+        r"(号(?:样品|样本|烧杯|试管|比色皿|样品位|位)?|组|号位)"
+    )
+
+    def _range_repl(match: re.Match) -> str:
+        return f"{match.group(1)}到{match.group(2)}{match.group(3)}"
+
+    result = range_re.sub(_range_repl, text)
+
+    aromatic_re = re.compile(
+        rf"(?<![\dA-Za-z])([234])\s*[{_TTS_DASH_CHARS}]\s*"
+        r"(硝基苯酚|氨基苯酚|硝基苯甲酸|氨基苯甲酸|氯苯酚|甲基苯酚)"
+    )
+    aromatic_prefix = {"2": "邻", "3": "间", "4": "对"}
+
+    def _aromatic_repl(match: re.Match) -> str:
+        return f"{aromatic_prefix.get(match.group(1), match.group(1))}{match.group(2)}"
+
+    return aromatic_re.sub(_aromatic_repl, result)
+
+
 def _replace_measurement_ranges_for_tts(text: str) -> str:
     suffixes = (
         "转每分钟",
@@ -1343,6 +1371,7 @@ def normalize_tts_text(text, custom_aliases=None):
     if not normalized:
         return ""
 
+    normalized = _replace_lab_dash_terms_for_tts(normalized)
     normalized = _replace_range_for_tts(normalized)
     normalized = _replace_numbered_hao_labels_for_tts(normalized)
     normalized = _replace_units_for_tts(normalized)
