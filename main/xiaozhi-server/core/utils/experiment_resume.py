@@ -66,7 +66,10 @@ def is_experiment_record_request(text: Any) -> bool:
 
 
 def should_load_device_log_context(text: Any) -> bool:
-    return is_resume_experiment_request(text) or is_experiment_record_request(text)
+    # Pure resume/continue requests must be handled by intentHandler so the
+    # experiment graph is replayed or redirected before the assistant continues.
+    # Only report/export requests may use passive log context in the LLM turn.
+    return is_experiment_record_request(text)
 
 
 def _iter_codex_llm_configs(config: Dict[str, Any]):

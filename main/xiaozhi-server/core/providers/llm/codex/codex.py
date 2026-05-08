@@ -21,6 +21,7 @@ from config.logger import setup_logging
 from core.providers.llm.base import LLMProviderBase
 from core.providers.llm.system_prompt import get_system_prompt_for_function
 from core.providers.tools.server_mcp.payload_utils import sync_server_mcp_payload_state
+from core.utils import textUtils
 
 TAG = __name__
 logger = setup_logging()
@@ -39,10 +40,12 @@ _RUNTIME_CODEX_HOME_COPY_FILES = (
 )
 _RUNTIME_CODEX_HOME_COPY_DIRS = (
     "mcp-proxies",
-    "plugins",
     "rules",
-    "skills",
     "vendor_imports",
+)
+_RUNTIME_CODEX_HOME_DISABLED_DIRS = (
+    "plugins",
+    "skills",
 )
 _AGENT_INTERNAL_LEAK_MARKERS = tuple(
     marker.lower()
@@ -97,6 +100,22 @@ _PHOTO_AUTHORIZATION_PHRASES = (
     "拍一下",
     "准备好了",
     "可以了",
+    "行拍",
+    "行，拍",
+    "好拍",
+    "好，拍",
+)
+_EXPLICIT_PHOTO_HOT_PATH_PHRASES = (
+    "可以拍照",
+    "可以拍",
+    "能拍照",
+    "能拍",
+    "拍吧",
+    "拍照吧",
+    "开始拍",
+    "现在拍",
+    "拍一个",
+    "拍一下",
     "行拍",
     "行，拍",
     "好拍",
@@ -462,6 +481,15 @@ def _load_codex_mcp_server_configs(settings_path: Optional[Path]) -> Dict[str, D
         url = str(server_cfg.get("url", "") or "").strip()
         if url:
             merged_entry: Dict[str, Any] = {"url": url}
+            for option_name in (
+                "transport",
+                "timeout",
+                "sse_read_timeout",
+                "initialize_timeout",
+                "terminate_on_close",
+            ):
+                if option_name in server_cfg:
+                    merged_entry[option_name] = server_cfg.get(option_name)
 
             headers = _coerce_string_map(server_cfg.get("headers"))
             if headers:
@@ -645,6 +673,33 @@ def _user_text_authorizes_photo(user_text: str) -> bool:
     if any(marker in text for marker in _PHOTO_QUESTION_MARKERS):
         return False
     return any(phrase in text for phrase in _PHOTO_AUTHORIZATION_PHRASES)
+
+
+def _user_text_explicit_photo_hot_path(user_text: str) -> bool:
+    text = str(user_text or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _PHOTO_QUESTION_MARKERS):
+        return False
+    return any(phrase in text for phrase in _EXPLICIT_PHOTO_HOT_PATH_PHRASES)
+
+
+def _photo_authorization_hot_path_prompt_block(user_text: str) -> str:
+    if not _user_text_explicit_photo_hot_path(user_text):
+        return ""
+    return (
+        "Current-turn photo authorization hot path:\n"
+        "- The latest student message is an explicit authorization to take a photo.\n"
+        "- Before any student-facing reply, your next action must be the connected "
+        "xiaozhi_take_photo MCP tool call, using the current step/sample photo name "
+        "when available.\n"
+        "- Do not explain first, do not wait, do not ask again, do not call unrelated "
+        "overview/reference/schema tools first, and do not tell the student to take "
+        "the photo manually.\n"
+        "- After the photo tool succeeds, write the photo result to experiment_graph "
+        "if the current experiment step requires a graph record; only then give a "
+        "brief confirmation or the next graph-approved action."
+    )
 
 
 def _accept_server_request(
@@ -906,6 +961,27 @@ def _should_suppress_stderr_warning(text: str) -> bool:
     if _is_benign_powershell_profile_warning(text):
         return True
 
+    if _is_benign_codex_loader_warning(text):
+        return True
+
+    return False
+
+
+def _is_benign_codex_loader_warning(text: str) -> bool:
+    normalized = str(text or "")
+    if not normalized:
+        return False
+
+    # These are emitted by optional Codex plugin/skill metadata loaders. They
+    # are not actionable in the voice assistant runtime and can flood the
+    # per-turn monitor logs when Codex refreshes its app-server state.
+    if "codex_core_plugins::manifest" in normalized:
+        return "ignoring interface.defaultPrompt" in normalized
+    if "codex_core_skills::loader" in normalized:
+        return (
+            "ignoring interface.icon_small" in normalized
+            or "ignoring interface.icon_large" in normalized
+        )
     return False
 
 
@@ -1580,6 +1656,9 @@ def _experiment_prompt_block(
                 "- If a graph write, finish, proceed, redirect, or export tool returns ok=false or a session_id-not-found error, retry once with the latest full exact session id. If it still fails, do not claim the record, photo, step transition, group transition, or export succeeded.\n"
                 "- Only pass group_number to photo/export/UV tools when the experiment YAML explicitly has group_number fields or workflow.group_start_steps. In non-group experiments, current_group_number=1 is bookkeeping only and must not be used for storage.\n"
                 "- Before calling xiaozhi_take_photo, the latest student message must explicitly authorize taking a photo. If it does not, do not call the tool on this turn; ask only '现在可以拍照吗？'. If a photo tool call is rejected with 'user rejected MCP tool call', treat that as missing authorization, not as a camera, device, network, or permission failure.\n"
+                "- Photo authorization hot path: if the latest student message explicitly says '可以拍照', '拍吧', '现在拍', '能拍', '行，拍', or another clear short photo authorization, your next action must be the connected xiaozhi_take_photo MCP tool call. Do not explain first, do not wait, do not ask again, do not call unrelated overview/reference/schema tools first, and do not produce a student-facing reply before the photo tool returns.\n"
+                "- Retake photo hot path: if the latest student message says '重拍/重新拍/再拍/补拍 N号样品照片', call xiaozhi_take_photo immediately with photo_name='N号样品照片' and append_timestamp=true. Treat this as an extra photo capture only: do not redirect_to_step, redo_trial, modify_record, cancel prior records, or roll back completed experiment steps.\n"
+                "- For numbered sample photos, every new xiaozhi_take_photo call must preserve old files by using append_timestamp=true, producing names like 'N号样品照片_YYYYMMDD_HHMMSS'.\n"
                 "- If the latest student message explicitly authorizes taking a photo and the current graph step is a required photo-confirmation step, you must call xiaozhi_take_photo on this turn. Do not ask the student to take the photo manually, do not say '拍完告诉我', and do not move on until the tool succeeds and the graph record is updated.\n"
                 "- If the current step requires a photo and the student has granted permission, call the connected xiaozhi_take_photo tool before claiming the photo exists; then write the returned photo result into the graph before moving on.\n"
                 "- Prefer add_fields with native JSON booleans/numbers for obvious current-step confirmations; do not write boolean facts as strings such as \"true\" unless the schema requires a string.\n"
@@ -1602,9 +1681,9 @@ def _experiment_prompt_block(
     parts.append(
         "UV-Vis execution guard:\n"
         "- The UV-Vis MCP tools are available in this runtime.\n"
-        "- If the current experiment step or local prompt explicitly requires uvvis_prepare_dark_current, call it first before the follow-up UV-Vis measurement tool defined for that step.\n"
-        "- For shared dark-current and air-baseline preparation, use uvvis_measure_spectra with ready_for_samples=false after any step-required uvvis_prepare_dark_current call has completed.\n"
-        "- Use uvvis_prepare_dark_current as a standalone manual dark-current action only when the active experiment step does not already define a larger shared-preparation sequence.\n"
+        "- If the current experiment step or local prompt explicitly requires uvvis_prepare_dark_current, call only uvvis_prepare_dark_current for that preparation step and wait for its result before advancing.\n"
+        "- Do not call uvvis_measure_spectra with ready_for_samples=false after uvvis_prepare_dark_current unless the active experiment step explicitly asks for an additional separate blank scan.\n"
+        "- Do not start any real sample scan until the experiment graph has advanced to the sample-loading or sample-recording step and the student has confirmed the real samples are loaded.\n"
         "- Before re-measuring a shared pure-water blank, inspect the shared uv_data_common directory for reusable blank artifacts and skip the blank scan when reusable data already exists there.\n"
         "- If the shared pure-water blank is missing, keep the positions empty and call uvvis_measure_spectra with ready_for_samples=false once to prepare the shared prerequisites in the background before you ask the student to place pure water.\n"
         "- After those shared prerequisites are ready, ask for six pure-water cuvettes only when the shared pure-water blank is still missing, then use uvvis_measure_spectra with ready_for_samples=true to record the pure-water blank.\n"
@@ -1615,6 +1694,24 @@ def _experiment_prompt_block(
     )
     parts.append(reuse_rule)
     return "\n\n".join(parts)
+
+
+def _experiment_bootstrap_prompt_block(
+    experiment_context: Dict[str, str], experiment_yaml_path: str, user_text: str = ""
+) -> str:
+    yaml_path = _norm_str(experiment_yaml_path)
+    if not yaml_path or experiment_context.get("experiment_session_id"):
+        return ""
+
+    return (
+        "No experiment_graph session has been confirmed for this Codex thread yet.\n"
+        f"- The configured experiment YAML is: {yaml_path}\n"
+        "- If you have already called experiment-graph create_session earlier in this same Codex thread and received a full session_id, reuse that exact session_id even if the xiaozhi server-side context below still shows experiment_session_id as missing. Do not create another graph session just because the xiaozhi-side prewarm context is empty.\n"
+        "- If this Codex thread has not yet received any experiment_graph session_id and the latest user message is starting or continuing the lab, confirming readiness, reporting a completed action, authorizing a scan/photo, asking for next step/group, or giving measurement/observation data, your next backend action must be experiment-graph create_session with that exact yaml_path.\n"
+        "- After create_session succeeds, immediately call get_current_progress or get_state for the returned full session_id and remember that session_id for later turns in this thread.\n"
+        "- Before create_session/get_current_progress succeeds, do not claim dark current, UV-Vis scan, photo, record writing, step transition, group transition, or experiment completion has happened.\n"
+        "- If a UV-Vis or photo tool is required on this same turn, create or recover the graph session first, then call the device/instrument MCP tool, then write the result back to experiment-graph before speaking the next physical step.\n"
+    )
 
 
 class _CodexSession:
@@ -1658,6 +1755,7 @@ class _CodexSession:
         self.app_server_config_overrides = _merge_app_server_config_overrides(
             config.get("app_server_config_overrides")
         )
+        self.disable_plugins = bool(config.get("disable_plugins", True))
         self.emit_events = bool(config.get("emit_events", False))
         self.thinking_mode = (config.get("thinking_mode") or "off").lower()
         self.show_actions = bool(config.get("show_actions", False))
@@ -1834,6 +1932,18 @@ class _CodexSession:
                 continue
             shutil.copy2(source_path, target_home / file_name)
 
+        for dir_name in _RUNTIME_CODEX_HOME_DISABLED_DIRS:
+            target_path = target_home / dir_name
+            if not target_path.exists():
+                continue
+            if target_path.is_dir():
+                shutil.rmtree(target_path, ignore_errors=True)
+            else:
+                try:
+                    target_path.unlink()
+                except OSError:
+                    pass
+
         for dir_name in _RUNTIME_CODEX_HOME_COPY_DIRS:
             source_path = source_home / dir_name
             target_path = target_home / dir_name
@@ -1880,6 +1990,9 @@ class _CodexSession:
 
     def _build_app_server_command(self) -> List[str]:
         cmd = [self.codex_bin, "app-server"]
+
+        if self.disable_plugins:
+            cmd.extend(["--disable", "plugins"])
 
         for override in self.app_server_config_overrides:
             cmd.extend(["-c", override])
@@ -2173,6 +2286,15 @@ class _CodexSession:
             else:
                 last_user = routing_block
 
+        duration_note = textUtils.build_spoken_duration_normalization_note(
+            strategy_user_text
+        )
+        if duration_note:
+            if last_user:
+                last_user = f"{last_user}\n\n{duration_note}"
+            else:
+                last_user = duration_note
+
         experiment_block = _experiment_prompt_block(
             experiment_context,
             user_text=strategy_user_text,
@@ -2182,6 +2304,26 @@ class _CodexSession:
                 last_user = f"{last_user}\n\n{experiment_block}"
             else:
                 last_user = experiment_block
+
+        bootstrap_block = _experiment_bootstrap_prompt_block(
+            experiment_context,
+            self.experiment_yaml_path,
+            user_text=strategy_user_text,
+        )
+        if bootstrap_block:
+            if last_user:
+                last_user = f"{last_user}\n\n{bootstrap_block}"
+            else:
+                last_user = bootstrap_block
+
+        photo_hot_path_block = _photo_authorization_hot_path_prompt_block(
+            strategy_user_text
+        )
+        if photo_hot_path_block:
+            if last_user:
+                last_user = f"{last_user}\n\n{photo_hot_path_block}"
+            else:
+                last_user = photo_hot_path_block
 
         if not last_user:
             return ""

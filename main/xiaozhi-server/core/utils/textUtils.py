@@ -3,6 +3,183 @@ import re
 
 TAG = __name__
 
+_CHINESE_DIGIT_VALUES = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CHINESE_UNIT_VALUES = {
+    "十": 10,
+    "百": 100,
+    "千": 1000,
+    "万": 10000,
+}
+_DURATION_NUMBER_TOKEN = r"[0-9０-９零〇一二两三四五六七八九十百千万点半]+(?:\.\d+)?"
+_DURATION_COMBINED_RE = re.compile(
+    rf"(?P<minutes>{_DURATION_NUMBER_TOKEN})\s*(?:分钟|分)\s*"
+    rf"(?P<seconds>{_DURATION_NUMBER_TOKEN})\s*(?:秒钟|秒)?"
+)
+_DURATION_SINGLE_RE = re.compile(
+    rf"(?P<value>{_DURATION_NUMBER_TOKEN})\s*(?P<unit>分钟|分|秒钟|秒)"
+)
+
+
+def _normalize_number_token(token):
+    return str(token or "").strip().translate(
+        str.maketrans("０１２３４５６７８９", "0123456789")
+    )
+
+
+def _parse_chinese_integer_token(token):
+    text = _normalize_number_token(token).replace("两", "二")
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if all(ch in _CHINESE_DIGIT_VALUES for ch in text):
+        # ASR occasionally emits digit-by-digit numerals such as "一二".
+        return int("".join(str(_CHINESE_DIGIT_VALUES[ch]) for ch in text))
+
+    total = 0
+    section = 0
+    number = 0
+    seen = False
+    for ch in text:
+        if ch in _CHINESE_DIGIT_VALUES:
+            number = _CHINESE_DIGIT_VALUES[ch]
+            seen = True
+            continue
+        unit = _CHINESE_UNIT_VALUES.get(ch)
+        if unit is None:
+            return None
+        seen = True
+        if unit == 10000:
+            section = (section + (number or 0)) or 1
+            total += section * unit
+            section = 0
+        else:
+            section += (number or 1) * unit
+        number = 0
+    if not seen:
+        return None
+    return total + section + number
+
+
+def parse_spoken_number(token):
+    """Parse a small spoken Chinese/Arabic number token into a float."""
+    text = _normalize_number_token(token).replace("两", "二")
+    if not text:
+        return None
+    if text == "半":
+        return 0.5
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    if text.endswith("半") and len(text) > 1:
+        base = parse_spoken_number(text[:-1])
+        return None if base is None else base + 0.5
+    if "点" in text:
+        left, right = text.split("点", 1)
+        if not right:
+            return None
+        integer = _parse_chinese_integer_token(left or "零")
+        if integer is None:
+            return None
+        digits = []
+        for ch in right:
+            if ch.isdigit():
+                digits.append(ch)
+            elif ch in _CHINESE_DIGIT_VALUES:
+                digits.append(str(_CHINESE_DIGIT_VALUES[ch]))
+            else:
+                return None
+        if not digits:
+            return None
+        return float(f"{integer}.{''.join(digits)}")
+    integer = _parse_chinese_integer_token(text)
+    return None if integer is None else float(integer)
+
+
+def _duration_overlaps(span, spans):
+    start, end = span
+    return any(start < old_end and end > old_start for old_start, old_end in spans)
+
+
+def extract_spoken_duration_expressions(text):
+    """Return spoken duration expressions as seconds/minutes for lab records."""
+    normalized = normalize_spoken_text(text or "")
+    if not normalized:
+        return []
+
+    results = []
+    consumed_spans = []
+    for match in _DURATION_COMBINED_RE.finditer(normalized):
+        minutes_value = parse_spoken_number(match.group("minutes"))
+        seconds_token = _normalize_number_token(match.group("seconds"))
+        if minutes_value is None:
+            continue
+        if seconds_token == "半":
+            seconds_value = 30.0
+        else:
+            seconds_value = parse_spoken_number(seconds_token)
+        if seconds_value is None:
+            continue
+        total_seconds = minutes_value * 60.0 + seconds_value
+        consumed_spans.append(match.span())
+        results.append(
+            {
+                "text": match.group(0),
+                "seconds": round(total_seconds, 4),
+                "minutes": round(total_seconds / 60.0, 4),
+            }
+        )
+
+    for match in _DURATION_SINGLE_RE.finditer(normalized):
+        if _duration_overlaps(match.span(), consumed_spans):
+            continue
+        value = parse_spoken_number(match.group("value"))
+        if value is None:
+            continue
+        unit = match.group("unit")
+        total_seconds = value if "秒" in unit else value * 60.0
+        results.append(
+            {
+                "text": match.group(0),
+                "seconds": round(total_seconds, 4),
+                "minutes": round(total_seconds / 60.0, 4),
+            }
+        )
+    return results
+
+
+def build_spoken_duration_normalization_note(text):
+    durations = extract_spoken_duration_expressions(text)
+    if not durations:
+        return ""
+    lines = ["Deterministic spoken-duration parse from latest user message:"]
+    for item in durations:
+        seconds = item["seconds"]
+        minutes = item["minutes"]
+        seconds_text = str(int(seconds)) if float(seconds).is_integer() else str(seconds)
+        lines.append(
+            f"- {item['text']} = {seconds_text} seconds = {minutes:.4f} minutes."
+        )
+    lines.append(
+        "For reaction_time, stable-time, duration, and spoken confirmation, use these exact parsed values; do not infer or rewrite a different time."
+    )
+    return "\n".join(lines)
+
 EMOJI_MAP = {
     "😀": "happy",
     "😃": "happy",
@@ -540,6 +717,36 @@ def normalize_spoken_text(text):
     if text is None:
         return ""
     return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def _strip_markdown_layout_for_tts(text: str) -> str:
+    """Remove Markdown layout marks that TTS may pronounce as words."""
+    if text is None:
+        return ""
+
+    cleaned_lines = []
+    for raw_line in str(text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Markdown table separator rows, e.g. | --- | :---: |.
+        if re.fullmatch(r"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?", line):
+            continue
+        # Standalone horizontal rules.
+        if re.fullmatch(r"[-*_]{3,}", line):
+            continue
+
+        line = re.sub(r"^\s*[-+*]\s+", "", raw_line)
+        if "|" in line:
+            line = line.strip().strip("|")
+            line = re.sub(r"\s*\|\s*", "，", line)
+        cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines)
+    # Standalone dash separators are layout, not negative signs.
+    cleaned = re.sub(r"(?<!\d)\s+[-–—]+\s+(?!\d)", "，", cleaned)
+    return cleaned
 
 
 _DEFAULT_TTS_SPOKEN_ALIASES = {
@@ -1132,7 +1339,7 @@ def _replace_generic_formulae_for_tts(text: str) -> str:
 
 def normalize_tts_text(text, custom_aliases=None):
     """Normalize final spoken text for Chinese TTS pronunciation."""
-    normalized = normalize_spoken_text(text)
+    normalized = normalize_spoken_text(_strip_markdown_layout_for_tts(text))
     if not normalized:
         return ""
 

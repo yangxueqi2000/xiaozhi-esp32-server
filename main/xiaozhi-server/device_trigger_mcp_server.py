@@ -1204,8 +1204,6 @@ def build_server(args: argparse.Namespace) -> FastMCP:
 
             final_photo_name = _normalize_capture_photo_name(photo_name)
             should_append_timestamp = bool(append_timestamp)
-            if _requires_stable_photo_name(final_photo_name):
-                should_append_timestamp = False
             if final_photo_name and should_append_timestamp:
                 final_photo_name = build_photo_name(
                     final_photo_name,

@@ -61,9 +61,10 @@
                        "uvvis":  {
                                       "url":  "http://127.0.0.1:8766/mcp",
                                       "transport":  "streamable-http",
-                                      "timeout":  60,
+                                      "timeout":  600,
                                       "sse_read_timeout":  null,
                                       "terminate_on_close":  false,
+                                      "initialize_timeout":  120,
                                       "startup":  {
                                                       "command":  "C:\\Users\\11979\\anaconda3\\envs\\py314\\python.exe",
                                                       "args":  [
@@ -85,9 +86,9 @@
                                                                    "--log-level",
                                                                    "INFO",
                                                                    "--startup-timeout",
-                                                                   "45"
+                                                                   "120"
                                                                ],
-                                                      "timeout":  60
+                                                      "timeout":  120
                                                   },
                                       "des":  "UV-Vis MCP server with unbounded read timeout for long kinetics measurements."
                                                       },

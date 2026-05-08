@@ -47,6 +47,19 @@ async def handle_user_intent(conn, text):
     if await checkWakeupWords(conn, filtered_text):
         return True
 
+    # Resume must synchronize the experiment graph before the assistant speaks.
+    # Do not let a "continue previous experiment" request fall through to the
+    # generic LLM path, where device-log context can make the dialogue continue
+    # while the graph is still at the beginning.
+    if _is_explicit_experiment_resume_request(filtered_text):
+        try:
+            return await _handle_explicit_experiment_resume_request(conn, text)
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"experiment explicit resume handler failed: {exc}"
+            )
+            return False
+
     # Keep photo and UV-Vis direct handlers ahead of the generic experiment fast
     # path so confirmations like "可以拍照" still follow the device shortcut.
     await _maybe_refresh_experiment_state_before_direct_handlers(
@@ -1223,13 +1236,21 @@ async def _handle_explicit_experiment_resume_request(
         return True
 
     if not target_step_id:
-        reply = (
-            "我找到了这个设备之前的实验日志，但里面没有可靠的步骤定位，"
-            "现在只能重新开始。你说开始今天的实验，我就从第一步带你做。"
-        )
-        await _start_direct_intent_turn(conn, original_text)
-        speak_txt(conn, reply)
-        return True
+        target_step_id = _infer_experiment_resume_target_step_from_log(conn, log_path)
+        if target_step_id:
+            conn.logger.bind(tag=TAG).info(
+                "experiment explicit resume inferred target step from log: "
+                f"device_id={getattr(conn, 'device_id', '')}, "
+                f"target_step_id={target_step_id}, log_path={log_path}"
+            )
+        else:
+            reply = (
+                "我找到了这个设备之前的实验日志，但还不能可靠判断现在实际做到哪一步。"
+                "请直接告诉我当前实际步骤，比如“现在做到2号样品拍照”或“现在做到丁达尔观察”。"
+            )
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, reply)
+            return True
 
     recovered, recovery_reply = await _replay_experiment_progress_from_resume_log(
         conn,
@@ -1762,16 +1783,182 @@ def _resume_log_has_global_completion_signal(user_texts) -> bool:
     return False
 
 
+def _resume_log_text_authorizes_photo(user_texts, *, allow_short_reply: bool = False) -> bool:
+    positive_tokens = (
+        "可以拍照",
+        "可以拍",
+        "能拍照",
+        "能拍",
+        "拍吧",
+        "拍照吧",
+        "现在拍",
+        "开始拍",
+        "拍一下",
+        "拍一张",
+        "同意拍照",
+        "授权拍照",
+    )
+    short_positive_tokens = ("可以", "好", "行", "同意")
+    for text in user_texts or []:
+        norm = _normalize_confirmation_signature(text)
+        if not norm or _contains_any(norm, _RESUME_LOG_NEGATIVE_TOKENS):
+            continue
+        if _contains_any(norm, positive_tokens):
+            return True
+        if allow_short_reply and norm in short_positive_tokens:
+            return True
+    return False
+
+
+def _step_meta_looks_like_photo_permission(step_meta: dict, schema_by_name: dict) -> bool:
+    haystack = _normalize_confirmation_signature(
+        " ".join(
+            str(value or "")
+            for value in (
+                step_meta.get("step_id", ""),
+                step_meta.get("title", ""),
+                step_meta.get("instruction", ""),
+                step_meta.get("description", ""),
+                " ".join(schema_by_name.keys()),
+            )
+        )
+    )
+    if not haystack:
+        return False
+    return _contains_any(
+        haystack,
+        (
+            "photo_permission",
+            "拍照权限",
+            "授权拍照",
+            "是否拍照",
+            "询问是否拍照",
+            "同意拍照",
+            "可以拍照",
+        ),
+    )
+
+
+def _build_resume_photo_permission_fields(
+    user_texts,
+    schema_by_name: dict,
+    missing_fields,
+    step_meta: dict,
+) -> dict:
+    if not _step_meta_looks_like_photo_permission(step_meta, schema_by_name):
+        return {}
+    if not _resume_log_text_authorizes_photo(user_texts, allow_short_reply=True):
+        return {}
+
+    result = {}
+    for field_name in missing_fields or []:
+        field = schema_by_name.get(field_name, {})
+        type_text = str(field.get("type", "")).strip().lower()
+        if type_text not in {"bool", "boolean"}:
+            continue
+        haystack = _normalize_confirmation_signature(
+            f"{field_name} {_clean_field_description(field.get('description', ''))}"
+        )
+        if _contains_any(
+            haystack,
+            (
+                "photo_permission",
+                "拍照权限",
+                "授权拍照",
+                "同意拍照",
+                "允许拍照",
+                "请求拍照",
+                "询问拍照",
+            ),
+        ):
+            result[field_name] = True
+    return result
+
+
+def _find_resume_photo_meta_for_step(
+    log_path: str,
+    current_step_id: str,
+    step_meta: dict,
+    user_texts,
+) -> dict:
+    data_dir = Path(str(log_path or "")).parent
+    if not data_dir.exists() or not data_dir.is_dir():
+        return {}
+
+    sample_index = _extract_sample_index_from_text(
+        " ".join(
+            str(value or "")
+            for value in (
+                current_step_id,
+                step_meta.get("title", ""),
+                step_meta.get("instruction", ""),
+                step_meta.get("description", ""),
+                " ".join(str(text or "") for text in user_texts or []),
+            )
+        )
+    )
+
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    candidates = [
+        path
+        for path in data_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in image_suffixes
+    ]
+    if not candidates:
+        return {}
+
+    def _rank(path: Path) -> tuple[int, float]:
+        name = _normalize_confirmation_signature(path.stem)
+        score = 0
+        if sample_index is not None:
+            sample_tokens = (
+                f"{sample_index}号样品",
+                f"{sample_index}号",
+                f"样品{sample_index}",
+            )
+            if any(token in name for token in sample_tokens):
+                score += 100
+            else:
+                return (-1, 0.0)
+        if _contains_any(name, ("照片", "拍照", "photo", "image", "img")):
+            score += 20
+        if "重拍" in name or "补拍" in name:
+            score += 5
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        return (score, mtime)
+
+    ranked = sorted(
+        ((rank, path) for path in candidates for rank in [_rank(path)] if rank[0] >= 0),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if not ranked:
+        return {}
+
+    selected = ranked[0][1]
+    return {
+        "found": True,
+        "file_name": selected.name,
+        "photo_path": str(selected.resolve()),
+    }
+
+
 def _build_experiment_resume_log_autofill_fields(
     user_texts,
     schema_by_name: dict,
     missing_fields,
     *,
     allow_confirmation_autofill: bool = False,
+    allow_observation_autofill: bool = False,
+    allow_photo_autofill: bool = False,
+    step_payload=None,
+    step_meta: dict | None = None,
+    current_step_id: str = "",
+    log_path: str = "",
 ) -> dict:
-    if not allow_confirmation_autofill:
-        return {}
-
     signatures = []
     for text in user_texts or []:
         norm = _normalize_confirmation_signature(text)
@@ -1779,26 +1966,92 @@ def _build_experiment_resume_log_autofill_fields(
             continue
         signatures.append(norm)
 
-    if not signatures:
+    if not signatures and not allow_photo_autofill:
         return {}
 
     global_completion = _resume_log_has_global_completion_signal(user_texts)
     result = {}
-    for field_name in missing_fields or []:
-        field = schema_by_name.get(field_name, {})
-        type_text = str(field.get("type", "")).strip().lower()
-        if type_text not in {"bool", "boolean"}:
-            continue
-        description = _normalize_confirmation_signature(
-            _clean_field_description(field.get("description", ""))
+    if allow_confirmation_autofill:
+        for field_name in missing_fields or []:
+            field = schema_by_name.get(field_name, {})
+            type_text = str(field.get("type", "")).strip().lower()
+            if type_text not in {"bool", "boolean"}:
+                continue
+            description = _normalize_confirmation_signature(
+                _clean_field_description(field.get("description", ""))
+            )
+            if not description:
+                continue
+            if global_completion or any(
+                _looks_like_confirmation_signature_match(signature, description)
+                for signature in signatures
+            ):
+                result[field_name] = True
+
+    remaining_fields = [
+        field_name for field_name in (missing_fields or []) if field_name not in result
+    ]
+    meta = step_meta or _extract_experiment_step_meta(step_payload)
+    if remaining_fields:
+        result.update(
+            _build_resume_photo_permission_fields(
+                user_texts,
+                schema_by_name,
+                remaining_fields,
+                meta,
+            )
         )
-        if not description:
-            continue
-        if global_completion or any(
-            _looks_like_confirmation_signature_match(signature, description)
-            for signature in signatures
-        ):
-            result[field_name] = True
+
+    if allow_observation_autofill and _step_supports_observation_report(
+        step_payload,
+        schema_by_name,
+    ):
+        for text in user_texts or []:
+            remaining_fields = [
+                field_name
+                for field_name in (missing_fields or [])
+                if field_name not in result
+            ]
+            if not remaining_fields:
+                break
+            observation_fields = _build_experiment_current_step_observation_fields(
+                text,
+                schema_by_name,
+                remaining_fields,
+                allow_bool_completion=True,
+            )
+            result.update(
+                {
+                    key: value
+                    for key, value in observation_fields.items()
+                    if value not in (None, "")
+                }
+            )
+
+    remaining_fields = [
+        field_name for field_name in (missing_fields or []) if field_name not in result
+    ]
+    if allow_photo_autofill and remaining_fields and (
+        _step_meta_looks_like_photo_confirmation(meta)
+        or bool(set(remaining_fields) & _PHOTO_CONFIRMATION_FIELD_NAMES)
+    ):
+        photo_meta = _find_resume_photo_meta_for_step(
+            log_path,
+            current_step_id,
+            meta,
+            user_texts,
+        )
+        if photo_meta:
+            result.update(
+                {
+                    key: value
+                    for key, value in _build_experiment_photo_writeback_fields(
+                        schema_by_name,
+                        photo_meta,
+                    ).items()
+                    if key in remaining_fields and value not in (None, "")
+                }
+            )
     return result
 
 
@@ -1975,6 +2228,10 @@ def _extract_observation_duration_minutes(filtered_text: str) -> float | None:
     text = textUtils.normalize_spoken_text(filtered_text or "")
     if not text:
         return None
+
+    parsed_durations = textUtils.extract_spoken_duration_expressions(text)
+    if parsed_durations:
+        return float(parsed_durations[0]["minutes"])
 
     numeric_match = re.search(r"(\d+(?:\.\d+)?)\s*(分钟|分|秒钟|秒)", text)
     if numeric_match:
@@ -2295,6 +2552,39 @@ def _collect_resume_log_user_texts_by_step(log_path: str) -> dict[str, list[str]
     return grouped
 
 
+def _infer_experiment_resume_target_step_from_log(conn, log_path: str) -> str:
+    path_text = str(log_path or "").strip()
+    if not path_text:
+        return ""
+    try:
+        log_tail = Path(path_text).read_text(encoding="utf-8", errors="ignore")[-8000:]
+    except Exception:
+        return ""
+    if not log_tail.strip():
+        return ""
+
+    order = _resolve_experiment_yaml_step_order(conn)
+    if not order:
+        return ""
+    step_by_id = _resolve_experiment_step_by_id(conn)
+
+    best_step_id = ""
+    best_score = 0.0
+    for index, step_id in enumerate(order):
+        step = step_by_id.get(step_id)
+        if not isinstance(step, dict):
+            continue
+        score = _yaml_step_context_match_score(log_tail, step)
+        score += min(0.08, index * 0.002)
+        if score > best_score:
+            best_step_id = step_id
+            best_score = score
+
+    if best_score < 0.46:
+        return ""
+    return best_step_id
+
+
 def _resolve_experiment_yaml_step_order(conn) -> list[str]:
     step_ids = []
     for step in _resolve_experiment_yaml_steps(conn):
@@ -2436,6 +2726,12 @@ async def _replay_experiment_progress_from_resume_log(
             allow_confirmation_autofill=_step_supports_confirmation_autofill(
                 step_payload
             ),
+            allow_observation_autofill=True,
+            allow_photo_autofill=True,
+            step_payload=step_payload,
+            step_meta=step_meta,
+            current_step_id=current_step_id,
+            log_path=log_path,
         )
         if autofill_fields:
             add_fields_payload = await _call_experiment_graph_tool_fast(
@@ -7781,6 +8077,10 @@ def _is_direct_photo_command(filtered_text: str) -> bool:
         "\u62cd\u5f20\u7167",
         "\u62cd\u5f20\u7167\u7247",
         "\u62cd\u4e00\u5f20\u7167\u7247",
+        "\u91cd\u62cd",
+        "\u91cd\u65b0\u62cd",
+        "\u518d\u62cd",
+        "\u8865\u62cd",
         "\u7167\u4e00\u4e0b",
         "\u770b\u4e00\u4e0b\u524d\u9762",
         "\u770b\u770b\u524d\u9762",
@@ -7791,6 +8091,33 @@ def _is_direct_photo_command(filtered_text: str) -> bool:
         "\u770b\u4e00\u773c\u524d\u9762",
     ]
     return _contains_any(norm, trigger_keywords)
+
+
+_PHOTO_SAMPLE_DIGIT_BY_CN = {
+    "\u4e00": "1",
+    "\u4e8c": "2",
+    "\u4e24": "2",
+    "\u4e09": "3",
+    "\u56db": "4",
+    "\u4e94": "5",
+}
+_PHOTO_SAMPLE_RE = re.compile(
+    r"([1-5\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94])\s*\u53f7?\s*\u6837\u54c1"
+)
+_PHOTO_RETAKE_RE = re.compile(r"\u91cd\u62cd|\u91cd\u65b0\u62cd|\u518d\u62cd|\u8865\u62cd")
+
+
+def _extract_sample_photo_stem_from_command(filtered_text: str) -> str:
+    match = _PHOTO_SAMPLE_RE.search(_normalize_text_for_match(filtered_text))
+    if not match:
+        return ""
+    sample = _PHOTO_SAMPLE_DIGIT_BY_CN.get(match.group(1), match.group(1))
+    return f"{sample}\u53f7\u6837\u54c1\u7167\u7247"
+
+
+def _is_sample_photo_retake_command(filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    return bool(_PHOTO_RETAKE_RE.search(norm) and _PHOTO_SAMPLE_RE.search(norm))
 
 
 def _classify_photo_nav_command(filtered_text: str) -> str:
@@ -8541,6 +8868,9 @@ def _build_pending_server_photo_request_fixed(conn) -> dict:
         sample_name = _extract_sample_photo_name_fixed(
             _get_recent_user_text(conn, limit=4)
         )
+    photo_name = sample_name
+    if photo_name and not photo_name.endswith("\u7167\u7247"):
+        photo_name = f"{photo_name}\u7167\u7247"
     safe_device_id = str(getattr(conn, "device_id", "") or "").strip()
 
     if sample_name:
@@ -8552,8 +8882,8 @@ def _build_pending_server_photo_request_fixed(conn) -> dict:
         "device_id": safe_device_id,
         "question": question,
     }
-    if sample_name:
-        request["photo_name"] = sample_name
+    if photo_name:
+        request["photo_name"] = photo_name
     return request
 
 
@@ -8793,7 +9123,12 @@ async def _execute_direct_photo_intent(
     return True
 
 
-async def _execute_server_photo_intent(conn, arguments: dict) -> bool:
+async def _execute_server_photo_intent(
+    conn,
+    arguments: dict,
+    *,
+    update_experiment_graph: bool = True,
+) -> bool:
     safe_device_id = str((arguments or {}).get("device_id", "") or "").strip()
     if not safe_device_id:
         speak_txt(conn, "\u8bbe\u5907\u8fde\u63a5\u4fe1\u606f\u7f3a\u5931\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002")
@@ -8870,25 +9205,28 @@ async def _execute_server_photo_intent(conn, arguments: dict) -> bool:
         payload,
         default_reply="\u62cd\u597d\u4e86\u3002",
     ) or _extract_text_from_result_payload(payload) or "\u62cd\u597d\u4e86\u3002"
-    try:
-        local_reply = await _advance_photo_confirmation_step_locally(
-            conn,
-            payload,
-            fallback_reply=reply,
-            requested_arguments=call_arguments,
-        )
-    except Exception as exc:
-        conn.logger.bind(tag=TAG).warning(
-            f"local server photo follow-up failed: {exc}"
-        )
-        local_reply = await _finalize_photo_followup_without_graph_advance(
-            conn,
-            str(getattr(conn, "experiment_session_id", "") or "").strip(),
-            payload,
-            requested_arguments=call_arguments,
-            confirmation_reply=reply,
-            reason="photo_followup_exception",
-        )
+    if update_experiment_graph:
+        try:
+            local_reply = await _advance_photo_confirmation_step_locally(
+                conn,
+                payload,
+                fallback_reply=reply,
+                requested_arguments=call_arguments,
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"local server photo follow-up failed: {exc}"
+            )
+            local_reply = await _finalize_photo_followup_without_graph_advance(
+                conn,
+                str(getattr(conn, "experiment_session_id", "") or "").strip(),
+                payload,
+                requested_arguments=call_arguments,
+                confirmation_reply=reply,
+                reason="photo_followup_exception",
+            )
+    else:
+        local_reply = reply
 
     if hasattr(conn, "enrich_latest_clean_user_utterance_snapshot"):
         try:
@@ -8964,17 +9302,8 @@ async def handle_pending_server_photo_confirmation(
     conn.sentence_id = str(uuid.uuid4().hex)
     conn.dialogue.put(Message(role="user", content=original_text))
     pending_request = _build_pending_server_photo_request_fixed(conn)
-    if _recent_server_photo_confirmation_matches_request(conn, pending_request):
-        recent_state = getattr(conn, "_recent_server_photo_confirmation", {}) or {}
-        reply = str(recent_state.get("next_step_reply", "") or "").strip()
-        if not reply:
-            sample_name = str(recent_state.get("sample_name", "") or "").strip() or "当前样品"
-            reply = f"{sample_name}刚才已经拍好了。我接着带你做下一步。"
-        conn.logger.bind(tag=TAG).info(
-            "reusing recent server photo confirmation instead of retaking photo"
-        )
-        speak_txt(conn, reply)
-        return True
+    if pending_request.get("photo_name"):
+        pending_request["append_timestamp"] = True
     conn.logger.bind(tag=TAG).info("confirmed pending server photo capture, executing xiaozhi_take_photo directly")
     await _maybe_wait_before_photo_capture(conn, "server_photo_confirmation")
     return await _execute_server_photo_intent(
@@ -9085,11 +9414,6 @@ async def handle_direct_photo_intent(conn, original_text: str, filtered_text: st
     conn.sentence_id = str(uuid.uuid4().hex)
     conn.dialogue.put(Message(role="user", content=original_text))
 
-    raw_tool_name = str(
-        shortcut_cfg.get("take_photo_tool_name", "self.camera.take_photo")
-    ).strip() or "self.camera.take_photo"
-    timeout = int(shortcut_cfg.get("photo_timeout", 45))
-
     default_question = str(
         shortcut_cfg.get(
             "default_photo_question",
@@ -9097,13 +9421,41 @@ async def handle_direct_photo_intent(conn, original_text: str, filtered_text: st
         )
     ).strip() or "\u63cf\u8ff0\u4e00\u4e0b\u770b\u5230\u7684\u7269\u54c1"
     question = _build_direct_photo_question(original_text, default_question)
-    conn._pending_direct_photo = {
-        "question": question,
-        "raw_tool_name": raw_tool_name,
-        "timeout": timeout,
-    }
-    speak_txt(conn, "\u53ef\u4ee5\u62cd\u7167\u5417\uff1f")
-    return True
+    sample_photo_name = _extract_sample_photo_stem_from_command(filtered_text)
+    if sample_photo_name:
+        question = f"\u8bf7\u62cd\u6444{sample_photo_name}\u3002"
+
+    safe_device_id = str(getattr(conn, "device_id", "") or "").strip()
+    if _get_server_mcp_manager(conn) is not None and safe_device_id:
+        request = {
+            "device_id": safe_device_id,
+            "question": question,
+        }
+        if sample_photo_name:
+            request["photo_name"] = sample_photo_name
+            request["append_timestamp"] = True
+        if _is_sample_photo_retake_command(filtered_text):
+            conn.logger.bind(tag=TAG).info(
+                "sample photo retake requested; taking a new timestamped photo without graph rollback"
+            )
+        await _maybe_wait_before_photo_capture(conn, "direct_photo_command")
+        return await _execute_server_photo_intent(
+            conn,
+            request,
+            update_experiment_graph=False,
+        )
+
+    raw_tool_name = str(
+        shortcut_cfg.get("take_photo_tool_name", "self.camera.take_photo")
+    ).strip() or "self.camera.take_photo"
+    timeout = int(shortcut_cfg.get("photo_timeout", 45))
+    await _maybe_wait_before_photo_capture(conn, "direct_photo_command")
+    return await _execute_direct_photo_intent(
+        conn,
+        question,
+        raw_tool_name,
+        timeout,
+    )
 
 
 async def process_intent_result(conn, intent_result, original_text):

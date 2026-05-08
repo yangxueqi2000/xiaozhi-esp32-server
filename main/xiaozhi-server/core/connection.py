@@ -2205,7 +2205,10 @@ class ConnectionHandler:
                 if not session_id:
                     create_payload = await self._call_experiment_graph_tool(
                         "create_session",
-                        {"yaml_path": yaml_path},
+                        {
+                            "yaml_path": yaml_path,
+                            "device_id": self.device_id or "",
+                        },
                         priority="prewarm_minimal",
                     )
                     session_id = self._extract_experiment_session_id(create_payload)
@@ -2253,6 +2256,22 @@ class ConnectionHandler:
                 self.experiment_session_id = session_id
                 self.experiment_current_step_id = current_step_id
                 self.experiment_progress_summary = progress_summary_payload
+                if self.experiment_session_id and self.device_id:
+                    try:
+                        await self._call_experiment_graph_tool(
+                            "configure_auto_export",
+                            {
+                                "session_id": self.experiment_session_id,
+                                "device_id": self.device_id or "",
+                            },
+                            priority="prewarm_minimal",
+                        )
+                    except Exception as exc:
+                        self.logger.bind(tag=TAG).warning(
+                            "experiment auto export configuration failed: "
+                            f"device_id={self.device_id}, "
+                            f"session_id={self.experiment_session_id}, error={exc}"
+                        )
                 if self.chat_session_id and self.experiment_session_id:
                     await save_experiment_session_binding(
                         self.config,

@@ -171,6 +171,14 @@ class MarkdownCleaner:
             text = regex.sub(replacement, text)
 
         # 去除emoji表情
+        text = re.sub(r'^\s*[-+*]\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(
+            r'^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$',
+            '',
+            text,
+            flags=re.MULTILINE,
+        )
+        text = re.sub(r'(?<!\d)\s+[-–—]+\s+(?!\d)', '，', text)
         text = normalize_spoken_text(text)
         text = check_emoji(text)
 
