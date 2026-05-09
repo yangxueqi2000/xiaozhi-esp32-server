@@ -1207,6 +1207,39 @@ async def _handle_explicit_experiment_resume_request(
         )
         return False
 
+    graph_step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+    graph_session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    graph_completed_steps = 0
+    if hasattr(conn, "_extract_experiment_completed_steps_count"):
+        try:
+            graph_completed_steps = int(
+                conn._extract_experiment_completed_steps_count(
+                    getattr(conn, "experiment_progress_summary", None)
+                )
+                or 0
+            )
+        except Exception:
+            graph_completed_steps = 0
+
+    if graph_session_id and graph_step_id and (
+        graph_completed_steps > 0 or graph_step_id != "step_prepare_setup_all"
+    ):
+        step_meta = await _safe_refresh_experiment_step_cache(
+            conn,
+            graph_session_id,
+            reason="explicit_resume_from_graph_state",
+        )
+        reply = _prepare_fastpath_spoken_reply(
+            _compose_experiment_step_reply(step_meta, mode="guide"),
+            fallback_step_meta=step_meta,
+            fallback_mode="guide",
+        )
+        if not reply:
+            reply = "我已经接回到上次实验记录对应的步骤了，你跟着这一步继续做。"
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
+
     resume_context_prepared = False
     if hasattr(conn, "_prepare_experiment_resume_recovery_context"):
         try:

@@ -235,6 +235,12 @@ async def sendAudioMessage(conn, sentenceType, audios, text, sentence_id=None):
             start_text = text if sentenceType == SentenceType.FIRST else None
             await send_tts_message(conn, "start", start_text)
             conn.client_is_speaking = True
+            # A fresh device-side TTS start must also start a fresh audio pacing
+            # timeline. This matters for turns that play a short cue, wait for a
+            # tool such as camera capture, then speak the lab instruction in the
+            # same LLM sentence_id; reusing the old timeline flushes audio too
+            # quickly and can make the device return to listening early.
+            conn._tts_pending_fresh_audio_cycle = True
             conn.logger.bind(tag=TAG).info(
                 "tts speaking state entered: "
                 f"sentence_id={active_sentence_id or 'unknown'}, "
@@ -407,6 +413,10 @@ def _get_or_create_rate_controller(conn, frame_duration, is_single_packet):
     # 检查是否需要重置控制器
     need_reset = False
 
+    pending_fresh_cycle = bool(
+        getattr(conn, "_tts_pending_fresh_audio_cycle", False)
+    )
+
     if not hasattr(conn, "audio_rate_controller"):
         # 控制器不存在，需要创建
         need_reset = True
@@ -414,7 +424,9 @@ def _get_or_create_rate_controller(conn, frame_duration, is_single_packet):
         rate_controller = conn.audio_rate_controller
 
         # 后台发送任务已停止, 则需要重置
-        if (
+        if pending_fresh_cycle:
+            need_reset = True
+        elif (
             not rate_controller.pending_send_task
             or rate_controller.pending_send_task.done()
         ):
@@ -447,6 +459,16 @@ def _get_or_create_rate_controller(conn, frame_duration, is_single_packet):
         _start_background_sender(
             conn, conn.audio_rate_controller, conn.audio_flow_control
         )
+        if pending_fresh_cycle:
+            conn.logger.bind(tag=TAG).info(
+                "tts fresh audio cycle reset: "
+                f"sentence_id={conn.sentence_id or 'unknown'}, "
+                f"frame_duration_ms={frame_duration}, "
+                f"is_single_packet={is_single_packet}"
+            )
+
+    if pending_fresh_cycle:
+        conn._tts_pending_fresh_audio_cycle = False
 
     return conn.audio_rate_controller, conn.audio_flow_control
 

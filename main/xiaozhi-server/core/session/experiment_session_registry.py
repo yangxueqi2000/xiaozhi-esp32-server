@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from config.config_loader import get_project_dir
 
@@ -115,6 +115,45 @@ async def load_experiment_session_binding(
     if not isinstance(entry, dict):
         return None
     return _normalize_entry(entry)
+
+
+async def load_experiment_session_bindings_for_device(
+    config: Dict,
+    *,
+    device_id: str,
+    yaml_path: str,
+    user_id: str = "",
+) -> List[Dict]:
+    normalized_device_id = str(device_id or "").strip()
+    normalized_user_id = str(user_id or "").strip()
+    normalized_yaml_path = _normalize_yaml_path(yaml_path)
+    if not normalized_device_id or not normalized_yaml_path:
+        return []
+
+    store_path = _resolve_local_store_path(config)
+
+    async with _local_store_lock:
+        store = _load_local_store(store_path)
+        bindings = store.get("bindings", {})
+        raw_entries = list(bindings.values()) if isinstance(bindings, dict) else []
+
+    entries: List[Dict] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = _normalize_entry(raw_entry)
+        if entry.get("normalized_yaml_path") != normalized_yaml_path:
+            continue
+        if entry.get("device_id") != normalized_device_id:
+            continue
+        if normalized_user_id and entry.get("user_id") not in {"", normalized_user_id}:
+            continue
+        if entry.get("status") and entry.get("status") != "active":
+            continue
+        entries.append(entry)
+
+    entries.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    return entries
 
 
 async def save_experiment_session_binding(

@@ -62,6 +62,7 @@ from core.providers.tools.server_mcp.payload_utils import (
 )
 from core.session import (
     load_experiment_session_binding,
+    load_experiment_session_bindings_for_device,
     save_experiment_session_binding,
     delete_experiment_session_binding,
 )
@@ -1349,6 +1350,13 @@ class ConnectionHandler:
         if not session_id:
             return False
 
+        if bool(
+            self.config.get("codex_app", {}).get(
+                "refresh_experiment_state_before_each_turn", False
+            )
+        ):
+            return True
+
         if bool(getattr(self, "_experiment_graph_refresh_required", False)):
             return True
 
@@ -1914,6 +1922,14 @@ class ConnectionHandler:
                             f"server MCP initialize not ready yet: {exc}"
                         )
                 manager = getattr(server_executor, "mcp_manager", None)
+                if manager is not None:
+                    try:
+                        if manager.is_mcp_tool("get_state") and manager.is_mcp_tool(
+                            "create_session"
+                        ):
+                            return True
+                    except Exception:
+                        pass
                 if manager is not None and getattr(func_handler, "finish_init", False):
                     return True
             await asyncio.sleep(0.1)
@@ -2202,6 +2218,113 @@ class ConnectionHandler:
                         f"chat_session_id={self.chat_session_id}, "
                         f"yaml_path={yaml_path}"
                     )
+                    device_resume_candidates = []
+                    try:
+                        device_resume_candidates = (
+                            await load_experiment_session_bindings_for_device(
+                                self.config,
+                                device_id=self.device_id or "",
+                                user_id=self.user_id or "",
+                                yaml_path=yaml_path,
+                            )
+                        )
+                    except Exception as exc:
+                        self.logger.bind(tag=TAG).warning(
+                            "experiment device resume lookup failed: "
+                            f"device_id={self.device_id}, yaml_path={yaml_path}, "
+                            f"error={exc}"
+                        )
+
+                    best_device_resume = None
+                    for candidate_binding in device_resume_candidates:
+                        candidate_session_id = str(
+                            candidate_binding.get("experiment_session_id", "")
+                        ).strip()
+                        if not candidate_session_id:
+                            continue
+                        try:
+                            candidate_state_payload = (
+                                await self._call_experiment_graph_tool(
+                                    "get_state",
+                                    {"session_id": candidate_session_id},
+                                    priority="prewarm_minimal",
+                                )
+                            )
+                            candidate_progress_payload = (
+                                await self._call_experiment_graph_tool(
+                                    "get_progress_summary",
+                                    {"session_id": candidate_session_id},
+                                    priority="prewarm_minimal",
+                                )
+                            )
+                        except Exception as exc:
+                            self.logger.bind(tag=TAG).warning(
+                                "experiment device resume candidate failed: "
+                                f"device_id={self.device_id}, "
+                                f"experiment_session_id={candidate_session_id}, "
+                                f"error={exc}"
+                            )
+                            continue
+
+                        candidate_status = self._classify_experiment_resume_candidate(
+                            candidate_state_payload,
+                            None,
+                            candidate_progress_payload,
+                        )
+                        if candidate_status != "active":
+                            continue
+
+                        candidate_completed = (
+                            self._extract_experiment_completed_steps_count(
+                                candidate_state_payload,
+                                candidate_progress_payload,
+                            )
+                        )
+                        candidate_step_id = self._extract_experiment_current_step_id(
+                            candidate_state_payload,
+                            candidate_progress_payload,
+                        )
+                        candidate_total_steps = self._extract_experiment_total_steps(
+                            candidate_progress_payload
+                        )
+                        candidate_score = (
+                            int(candidate_completed or 0),
+                            str(candidate_binding.get("updated_at", "")),
+                        )
+                        if (
+                            best_device_resume is None
+                            or candidate_score > best_device_resume["score"]
+                        ):
+                            best_device_resume = {
+                                "score": candidate_score,
+                                "session_id": candidate_session_id,
+                                "state_payload": candidate_state_payload,
+                                "progress_payload": candidate_progress_payload,
+                                "current_step_id": candidate_step_id,
+                                "completed_steps_count": candidate_completed,
+                                "total_steps": candidate_total_steps,
+                            }
+
+                    if best_device_resume is not None:
+                        session_id = best_device_resume["session_id"]
+                        session_source = "resume_device"
+                        state_payload = best_device_resume["state_payload"]
+                        progress_summary_payload = best_device_resume[
+                            "progress_payload"
+                        ]
+                        current_step_id = best_device_resume["current_step_id"]
+                        completed_steps_count = best_device_resume[
+                            "completed_steps_count"
+                        ]
+                        total_steps = best_device_resume["total_steps"]
+                        self.logger.bind(tag=TAG).info(
+                            "experiment session device resume ready: "
+                            f"device_id={self.device_id}, "
+                            f"chat_session_id={self.chat_session_id}, "
+                            f"experiment_session_id={session_id}, "
+                            f"current_step_id={current_step_id}, "
+                            f"completed_steps={completed_steps_count}/{total_steps or '?'}"
+                        )
 
                 if not session_id:
                     create_payload = await self._call_experiment_graph_tool(
