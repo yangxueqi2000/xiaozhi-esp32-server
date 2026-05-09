@@ -1649,6 +1649,8 @@ def _experiment_prompt_block(
             "Student sidetrack question rule:\n"
             "- If the latest user message asks a conceptual, safety, reagent, instrument, data-meaning, troubleshooting, or other explanatory question, and it does not itself report completion, observations, measurements, photos, scan results, corrections, or a request to advance, answer the question first.\n"
             "- For these sidetrack questions, do not call experiment-graph tools solely to remind an unfinished current step, do not repeat the whole unfinished step, and do not tell the student they must finish the step before you answer.\n"
+            "- During and after a sidetrack question, keep experiment_graph anchored at the original current step: do not start/finish/proceed a trial, write placeholder data, or change current_step_id just because the question was answered.\n"
+            "- If the student then says '可以继续', '继续做实验', or similar, treat that only as permission to resume guidance for the same current step. It is not evidence that the current step is complete and must not by itself justify proceed_to_next_step.\n"
             "- After answering, append exactly one short Chinese sentence: '我们现在能继续做实验了吗？'\n"
             "- If the experiment is already at a completed final step and the user asks a question, answer normally; do not keep urging the student to complete the final step again."
         )

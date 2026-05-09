@@ -1397,6 +1397,38 @@ def _looks_like_pure_short_completion_control(norm: str) -> bool:
     return _matches_any_pattern(norm, PURE_SHORT_COMPLETION_PATTERNS)
 
 
+def _assistant_waiting_after_sidetrack_question(conn) -> bool:
+    recent = _normalize_text_for_match(_get_recent_assistant_text(conn, limit=2))
+    return _contains_any(
+        recent,
+        (
+            "我们现在能继续做实验了吗",
+            "现在能继续做实验了吗",
+            "能继续做实验了吗",
+            "继续做实验了吗",
+        ),
+    )
+
+
+def _looks_like_sidetrack_continue_reply(filtered_text: str) -> bool:
+    norm = _normalize_text_for_match(filtered_text)
+    if not norm or len(norm) > 24:
+        return False
+    return _contains_any(
+        norm,
+        (
+            "可以继续",
+            "继续吧",
+            "继续做实验",
+            "继续进行实验",
+            "接着做",
+            "接着实验",
+            "往下做",
+            "能继续",
+        ),
+    )
+
+
 def _classify_short_experiment_control(conn, filtered_text: str) -> str:
     norm = _normalize_text_for_match(filtered_text)
     if not norm:
@@ -1406,6 +1438,11 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
 
     waiting_for_step_start = _assistant_waiting_for_step_start(conn)
     waiting_for_step_completion = _assistant_waiting_for_step_completion(conn)
+    if _assistant_waiting_after_sidetrack_question(
+        conn
+    ) and _looks_like_sidetrack_continue_reply(filtered_text):
+        return "guide"
+
     if waiting_for_step_completion and (
         _looks_like_explicit_completion_report(filtered_text)
         or _looks_like_explicit_added_completion_report(filtered_text)
