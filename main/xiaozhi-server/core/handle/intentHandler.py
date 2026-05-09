@@ -1634,6 +1634,13 @@ def _is_experiment_strict_graph_path_enabled(conn) -> bool:
     return bool(raw_enabled)
 
 
+def _is_server_mcp_client_enabled(conn) -> bool:
+    raw_enabled = conn.config.get("enable_server_mcp_client", True)
+    if isinstance(raw_enabled, str):
+        return raw_enabled.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw_enabled)
+
+
 async def _call_experiment_graph_tool_fast(
     conn,
     tool_name: str,
@@ -7717,6 +7724,16 @@ def _compose_uvvis_step_rejection_reply(step_id: str) -> str:
 
 
 async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: str) -> bool:
+    if not _is_server_mcp_client_enabled(conn):
+        if _looks_like_explicit_uvvis_turn(original_text, filtered_text) or _looks_like_uvvis_followup_reply(
+            conn,
+            filtered_text,
+        ):
+            conn.logger.bind(tag=TAG).info(
+                "server MCP client disabled; skipping local UV-Vis direct intent so Codex app-server handles it"
+            )
+        return False
+
     step_id = _get_current_experiment_step_id(conn)
     status_query = _looks_like_uvvis_status_query(
         conn,

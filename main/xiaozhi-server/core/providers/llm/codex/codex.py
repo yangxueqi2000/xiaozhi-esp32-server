@@ -456,7 +456,7 @@ def _load_codex_mcp_server_configs(settings_path: Optional[Path]) -> Dict[str, D
         return {}
 
     try:
-        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+        raw = json.loads(settings_path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         logger.bind(tag=TAG).warning(
             f"codex mcp settings load failed: path={settings_path} error={exc}"
@@ -484,12 +484,19 @@ def _load_codex_mcp_server_configs(settings_path: Optional[Path]) -> Dict[str, D
             for option_name in (
                 "transport",
                 "timeout",
+                "tool_timeout_sec",
+                "startup_timeout_sec",
+                "startup_timeout_ms",
                 "sse_read_timeout",
                 "initialize_timeout",
                 "terminate_on_close",
             ):
                 if option_name in server_cfg:
                     merged_entry[option_name] = server_cfg.get(option_name)
+            if "tool_timeout_sec" not in merged_entry and "timeout" in merged_entry:
+                merged_entry["tool_timeout_sec"] = merged_entry["timeout"]
+            if "startup_timeout_sec" not in merged_entry and "initialize_timeout" in merged_entry:
+                merged_entry["startup_timeout_sec"] = merged_entry["initialize_timeout"]
 
             headers = _coerce_string_map(server_cfg.get("headers"))
             if headers:
@@ -524,6 +531,77 @@ def _load_codex_mcp_server_configs(settings_path: Optional[Path]) -> Dict[str, D
         merged_servers[server_name] = merged_entry
 
     return merged_servers
+
+
+def _run_codex_mcp_startup_hooks(settings_path: Optional[Path]) -> None:
+    if settings_path is None or not settings_path.exists():
+        return
+
+    try:
+        raw = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(
+            f"codex mcp startup settings load failed: path={settings_path} error={exc}"
+        )
+        return
+
+    servers = raw.get("mcpServers")
+    if not isinstance(servers, dict):
+        return
+
+    for name, server_cfg in servers.items():
+        if not isinstance(server_cfg, dict):
+            continue
+        startup_cfg = server_cfg.get("startup")
+        if not isinstance(startup_cfg, dict):
+            continue
+        command = str(startup_cfg.get("command", "") or "").strip()
+        if not command:
+            continue
+        raw_args = startup_cfg.get("args")
+        args = [str(item) for item in raw_args] if isinstance(raw_args, list) else []
+        cwd = str(startup_cfg.get("cwd", "") or "").strip() or None
+        timeout_value = startup_cfg.get("timeout", 120)
+        try:
+            timeout_seconds = max(5.0, float(timeout_value or 120))
+        except (TypeError, ValueError):
+            timeout_seconds = 120.0
+
+        env = os.environ.copy()
+        for source in (server_cfg.get("env"), startup_cfg.get("env")):
+            env.update(_coerce_string_map(source))
+
+        try:
+            logger.bind(tag=TAG).info(
+                f"running Codex MCP startup hook for {name}: {command} {' '.join(args)}"
+            )
+            completed = subprocess.run(
+                [command, *args],
+                cwd=cwd,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.bind(tag=TAG).warning(
+                f"Codex MCP startup hook timed out: server={name} timeout={timeout_seconds:.1f}s"
+            )
+            continue
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(
+                f"Codex MCP startup hook failed to start: server={name} error={exc}"
+            )
+            continue
+
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            logger.bind(tag=TAG).warning(
+                f"Codex MCP startup hook exited nonzero: server={name} "
+                f"returncode={completed.returncode} detail={detail[:500]}"
+            )
 
 
 def _merge_codex_mcp_server_configs(
@@ -1962,6 +2040,7 @@ class _CodexSession:
             shutil.copytree(source_path, target_path)
 
     def _prepare_runtime_codex_home(self) -> Optional[Path]:
+        _run_codex_mcp_startup_hooks(self.mcp_settings_path)
         server_configs = _load_codex_mcp_server_configs(self.mcp_settings_path)
         if not server_configs:
             self._runtime_codex_home = None
