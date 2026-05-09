@@ -8,8 +8,14 @@ import time
 from aiohttp import web
 
 from core.api.base_handler import BaseHandler
+from core.handle.sendAudioHandle import sendAudio, send_tts_message
 from core.providers.tools.device_mcp import call_mcp_tool, send_mcp_initialize_message
-from core.utils.util import sanitize_tool_name, get_local_ip, is_valid_image_file
+from core.utils.util import (
+    audio_to_data,
+    sanitize_tool_name,
+    get_local_ip,
+    is_valid_image_file,
+)
 
 TAG = __name__
 
@@ -22,6 +28,73 @@ class DeviceMCPHandler(BaseHandler):
         self.preview_dir = os.path.join(data_dir, "preview_files")
         os.makedirs(self.preview_dir, exist_ok=True)
         self._mcp_refresh_lock = asyncio.Lock()
+
+    def _project_root(self) -> str:
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+    def _coerce_bool(self, value, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        normalized = str(value).strip().lower()
+        if normalized in ("1", "true", "yes", "on", "y"):
+            return True
+        if normalized in ("0", "false", "no", "off", "n"):
+            return False
+        return default
+
+    def _coerce_nonnegative_int(self, value, default: int = 0) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return max(0, int(default))
+
+    def _resolve_photo_capture_notify_config(self) -> dict:
+        raw = self.config.get("photo_capture_notify", {})
+        if not isinstance(raw, dict):
+            raw = {}
+        audio_file = str(raw.get("audio_file", "config/assets/tts_notify.mp3")).strip()
+        if audio_file and not os.path.isabs(audio_file):
+            audio_file = os.path.abspath(os.path.join(self._project_root(), audio_file))
+        return {
+            "enabled": self._coerce_bool(raw.get("enabled", False), False),
+            "audio_file": audio_file,
+            "lead_time_ms": self._coerce_nonnegative_int(raw.get("lead_time_ms", 700), 700),
+            "send_tts_state": self._coerce_bool(raw.get("send_tts_state", True), True),
+        }
+
+    async def _play_photo_capture_notify(self, conn) -> None:
+        notify_cfg = self._resolve_photo_capture_notify_config()
+        if not notify_cfg.get("enabled"):
+            return
+
+        audio_file = str(notify_cfg.get("audio_file", "") or "").strip()
+        if not audio_file:
+            return
+
+        try:
+            audios = await audio_to_data(audio_file, is_opus=True)
+            send_tts_state = bool(notify_cfg.get("send_tts_state", True))
+            if send_tts_state:
+                await send_tts_message(conn, "start", None)
+                conn.client_is_speaking = True
+            await sendAudio(conn, audios)
+            if send_tts_state:
+                old_stop_notify = conn.config.get("enable_stop_tts_notify", False)
+                conn.config["enable_stop_tts_notify"] = False
+                try:
+                    await send_tts_message(conn, "stop", None)
+                finally:
+                    conn.config["enable_stop_tts_notify"] = old_stop_notify
+                    conn.client_is_speaking = False
+            lead_time_ms = int(notify_cfg.get("lead_time_ms", 0) or 0)
+            if lead_time_ms > 0:
+                await asyncio.sleep(lead_time_ms / 1000.0)
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"photo capture notify failed, continue taking photo: {exc}"
+            )
 
     def _sanitize_device_for_path(self, device_id: str) -> str:
         value = str(device_id or "").strip()
@@ -543,6 +616,7 @@ class DeviceMCPHandler(BaseHandler):
             tool_args = {"question": question}
 
             try:
+                await self._play_photo_capture_notify(conn)
                 result = await call_mcp_tool(
                     conn,
                     mcp_client,
