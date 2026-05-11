@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
+
+from core.session import save_experiment_session_binding
 
 from .uvvis_spoken import build_uvvis_spoken_response, extract_blank_baseline_state
 
@@ -293,6 +296,115 @@ def _payload_contains_experiment_progress(payload) -> bool:
     )
 
 
+def _extract_experiment_completed_total(payload) -> tuple[int | None, int | None]:
+    body = _experiment_result_body(payload)
+
+    def from_mapping(mapping) -> tuple[int | None, int | None]:
+        if not isinstance(mapping, dict):
+            return None, None
+        progress = mapping.get("progress")
+        if isinstance(progress, dict):
+            completed, total = from_mapping(progress)
+            if completed is not None or total is not None:
+                return completed, total
+        completed = mapping.get("completed_steps")
+        if isinstance(completed, list):
+            completed_value = len(completed)
+        else:
+            completed_value = _coerce_nonnegative_int(completed)
+        total_value = _coerce_nonnegative_int(
+            mapping.get("total_steps") or mapping.get("steps_count")
+        )
+        return completed_value, total_value
+
+    for mapping in (body, body.get("summary"), body.get("state")):
+        completed, total = from_mapping(mapping)
+        if completed is not None or total is not None:
+            return completed, total
+    return None, None
+
+
+def _coerce_nonnegative_int(value) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _resolve_experiment_yaml_path_for_binding(conn, arguments: dict | None) -> str:
+    yaml_path = str((arguments or {}).get("yaml_path", "") or "").strip()
+    if yaml_path:
+        return yaml_path
+    yaml_path = str(getattr(conn, "experiment_yaml_path", "") or "").strip()
+    if yaml_path:
+        return yaml_path
+    resolver = getattr(conn, "_resolve_experiment_yaml_path", None)
+    if callable(resolver):
+        try:
+            return str(resolver() or "").strip()
+        except Exception:
+            return ""
+    return ""
+
+
+def _schedule_experiment_session_binding_save(
+    conn,
+    *,
+    tool_name: str,
+    session_id: str,
+    current_step_id: str = "",
+    payload=None,
+    arguments: dict | None = None,
+):
+    chat_session_id = str(getattr(conn, "chat_session_id", "") or "").strip()
+    yaml_path = _resolve_experiment_yaml_path_for_binding(conn, arguments)
+    if not chat_session_id or not yaml_path or not session_id:
+        return
+
+    completed_steps_count, total_steps = _extract_experiment_completed_total(payload)
+    status = "closed" if tool_name == "close_session" else "active"
+
+    async def _save():
+        try:
+            await save_experiment_session_binding(
+                getattr(conn, "config", {}) or {},
+                chat_session_id=chat_session_id,
+                model_session_key=str(getattr(conn, "model_session_key", "") or ""),
+                device_id=str(getattr(conn, "device_id", "") or ""),
+                user_id=str(getattr(conn, "user_id", "") or ""),
+                yaml_path=yaml_path,
+                experiment_session_id=session_id,
+                status=status,
+                source=f"mcp:{tool_name}" if tool_name else "mcp",
+                current_step_id=current_step_id
+                or str(getattr(conn, "experiment_current_step_id", "") or ""),
+                completed_steps_count=completed_steps_count,
+                total_steps=total_steps,
+            )
+        except Exception as exc:
+            logger = getattr(conn, "logger", None)
+            if logger is not None:
+                try:
+                    logger.bind(tag="MCP").warning(
+                        f"experiment session binding save failed: {exc}"
+                    )
+                except Exception:
+                    pass
+
+    loop = getattr(conn, "loop", None)
+    if loop is not None and getattr(loop, "is_running", lambda: False)():
+        loop.create_task(_save())
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_save())
+
+
 def annotate_artifact_validation(
     payload,
     *,
@@ -429,6 +541,16 @@ def sync_server_mcp_payload_state(conn, *, tool_name: str = "", payload=None, ar
             setattr(conn, "_last_experiment_graph_mutation_tool", actual_tool_name)
         elif current_step_id:
             setattr(conn, "_experiment_graph_refresh_required", False)
+
+        if session_id:
+            _schedule_experiment_session_binding_save(
+                conn,
+                tool_name=actual_tool_name,
+                session_id=session_id,
+                current_step_id=current_step_id,
+                payload=payload,
+                arguments=arguments,
+            )
 
     if actual_tool_name.startswith("uvvis_"):
         blank_baseline_state = extract_blank_baseline_state(payload)

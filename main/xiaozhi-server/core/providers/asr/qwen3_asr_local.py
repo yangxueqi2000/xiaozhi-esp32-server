@@ -70,6 +70,39 @@ def _parse_bool(value, default: bool) -> bool:
     return default
 
 
+def _compact_text_for_echo_check(text: str) -> str:
+    return "".join(str(text or "").split())
+
+
+def _looks_like_context_echo(text: str, context: str) -> bool:
+    """Drop ASR hallucinations that repeat the recognition context itself."""
+    compact_text = _compact_text_for_echo_check(text)
+    if len(compact_text) < 16:
+        return False
+
+    internal_markers = (
+        "当前实验是",
+        "常见化学词汇包括",
+        "常见缩写和读法包括",
+        "实验中会测试",
+        "当听到类似",
+        "优先识别为这些化学实验词汇",
+    )
+    if any(marker in compact_text for marker in internal_markers):
+        return True
+
+    compact_context = _compact_text_for_echo_check(context)
+    if len(compact_context) < 16:
+        return False
+    if compact_text in compact_context:
+        return True
+
+    # Long outputs made mostly of context vocabulary are usually context echo
+    # when Qwen3-ASR receives silence/noise or a clipped tail.
+    overlap_chars = sum(1 for char in compact_text if char in compact_context)
+    return len(compact_text) >= 40 and overlap_chars / max(1, len(compact_text)) > 0.92
+
+
 class ASRProvider(ASRProviderBase):
     def __init__(self, config: dict, delete_audio_file: bool):
         super().__init__()
@@ -201,6 +234,11 @@ class ASRProvider(ASRProviderBase):
             best = results[0]
             text = (best.text or "").strip()
             language = (best.language or "").strip()
+            if _looks_like_context_echo(text, self.context):
+                logger.bind(tag=TAG).warning(
+                    f"Qwen3ASR local context echo filtered: text={text[:120]}"
+                )
+                return "", file_path
             logger.bind(tag=TAG).debug(
                 f"Qwen3ASR local recognize cost={time.time() - start_time:.3f}s, "
                 f"language={language}, text={text}"

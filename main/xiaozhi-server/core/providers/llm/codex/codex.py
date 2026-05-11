@@ -941,9 +941,9 @@ def _exp2_recent_kinetics_scan_prompt_block(
             "- The latest student message explicitly declares that the current real-world step is the kinetics measurement.\n"
             "- Trust this explicit recovery cue over stale conversation history or missing graph state.\n"
             "- Do not route back to shared dark-current/air-baseline prep and do not ask for all 1-5 positions to be empty.\n"
-            "- Before asking placement or starting uvvis_measure_kinetics, make sure the current student group number is explicit. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
+            "- Before asking placement or starting uvvis_grouped_kinetics_start, make sure the current student group number is explicit. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
             "- If the student has not just confirmed placement, ask only for the kinetics placement confirmation: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
-            "- If the student says start/ready after that confirmation, call the UV-Vis kinetics tool according to the exp2 local prompt, then write the result to experiment_graph before speaking the next step."
+            "- If the student says start/ready after that confirmation, call uvvis_grouped_kinetics_start, tell the student the long kinetics measurement has started and data are being recorded, then use uvvis_grouped_kinetics_status/result on later turns instead of calling the blocking uvvis_measure_kinetics tool."
         )
 
     if not any(phrase in text for phrase in _EXP2_UVVIS_PREP_START_PHRASES):
@@ -979,9 +979,9 @@ def _exp2_recent_kinetics_scan_prompt_block(
         "- The recent conversation was about the kinetics measurement setup, not the shared dark-current/air-baseline prep.\n"
         "- Interpret the latest start/ready message as authorization to continue the current kinetics measurement flow.\n"
         "- Do not ask for 1-5 sample positions to be empty, do not call shared dark-current prep, and do not say shared dark current or air baseline is complete.\n"
-        "- Before starting uvvis_measure_kinetics, make sure the current student group number is explicit. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
+        "- Before starting uvvis_grouped_kinetics_start, make sure the current student group number is explicit. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
         "- Use the current kinetics placement: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
-        "- If all placements were just confirmed, call the UV-Vis kinetics tool according to the exp2 local prompt."
+        "- If all placements were just confirmed, call uvvis_grouped_kinetics_start and do not call the blocking uvvis_measure_kinetics tool."
     )
 
 
@@ -2115,7 +2115,7 @@ def _experiment_prompt_block(
         "- If the shared pure-water blank is missing, keep the positions empty and call uvvis_measure_spectra with ready_for_samples=false once to prepare the shared prerequisites in the background before you ask the student to place pure water.\n"
         "- After those shared prerequisites are ready, ask for six pure-water cuvettes only when the shared pure-water blank is still missing, then use uvvis_measure_spectra with ready_for_samples=true to record the pure-water blank.\n"
         "- For the actual batch spectra measurement after the cuvettes are loaded, use uvvis_measure_spectra with ready_for_samples=true.\n"
-        "- For kinetics runs, use uvvis_measure_kinetics. Use uvvis_session when you need to acquire or refresh the UV-Vis lease/session first.\n"
+        "- For exp2 grouped kinetics runs, use uvvis_grouped_kinetics_start so the long run returns immediately; use uvvis_grouped_kinetics_status/result to monitor or fetch completion. Use the older blocking uvvis_measure_kinetics only for backward compatibility when no async grouped tool is available. Use uvvis_session when you need to acquire or refresh the UV-Vis lease/session first.\n"
         "- Do not verbalize internal orchestration rules such as '先根据上一步返回结果判断是否可复用', '只有在主说话人明确回报…后才调用…', '若工具提示…则不要重复测量', or any session/tool-call wording; speak only the student's current physical action or concise readiness prompt.\n"
         "- Do not say you are starting a UV-Vis scan, baseline, or kinetics run unless one of those UV-Vis tools was actually called on the current turn."
     )
