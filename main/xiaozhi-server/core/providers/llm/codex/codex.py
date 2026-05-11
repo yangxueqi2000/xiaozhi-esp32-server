@@ -120,6 +120,7 @@ _EXPLICIT_PHOTO_HOT_PATH_PHRASES = (
 )
 _PHOTO_QUESTION_MARKERS = ("?", "？", "吗", "么")
 _EXP2_UVVIS_PREP_STEP_ID = "step_3_uv_vis_shared_dark_air_prep"
+_EXP2_UVVIS_SPECTRA_LOAD_STEP_ID = "step_3_uv_vis_sample1-4_load_cuvette"
 _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID = "step_3_uv_vis_sample1-4_record_data"
 _EXP2_UVVIS_PREP_START_PHRASES = (
     "\u5f00\u59cb\u626b\u63cf",
@@ -174,6 +175,14 @@ _EXP2_UVVIS_SPECTRA_READY_PHRASES = (
     "\u626b\u63cf",
     "\u5f00\u59cb\u6d4b",
     "\u53ef\u4ee5\u5f00\u59cb",
+    "\u5e2e\u6211\u626b",
+    "\u8c03mcp",
+    "\u8c03 MCP",
+    "\u53bb\u8c03mcp",
+    "\u53bb\u8c03 MCP",
+    "\u6700\u5927\u5438\u6536",
+    "\u5438\u6536\u6ce2\u957f",
+    "\u5cf0\u503c\u6ce2\u957f",
     "\u5df2\u7ecf\u653e\u597d",
     "\u5df2\u653e\u597d",
     "\u653e\u597d\u4e86",
@@ -186,6 +195,11 @@ _EXP2_UVVIS_SPECTRA_CLAIM_PHRASES = (
     "\u5f00\u59cb\u6279\u91cf",
     "\u6279\u91cf\u626b\u63cf",
     "UV-Vis \u626b\u63cf",
+    "\u628a\u7ed3\u679c\u53d1\u6211",
+    "\u7ed3\u679c\u53d1\u6211",
+    "\u6700\u5927\u5438\u6536",
+    "\u5438\u6536\u6ce2\u957f",
+    "\u5cf0\u503c\u6ce2\u957f",
     "\u626b\u5b8c",
     "\u5cf0\u503c",
     "\u5cf0\u5728",
@@ -194,6 +208,11 @@ _EXP2_UVVIS_SPECTRA_NO_TOOL_REPLY = (
     "\u521a\u624d\u6ca1\u6709\u771f\u6b63\u542f\u52a8\u4eea\u5668\u626b\u63cf\u3002"
     "\u8bf7\u518d\u8bf4\u4e00\u6b21\u201c\u5f00\u59cb\u626b\u63cf\u201d\uff0c"
     "\u6211\u4f1a\u5148\u542f\u52a8\u4eea\u5668\uff0c\u626b\u5b8c\u540e\u518d\u544a\u8bc9\u4f60\u7ed3\u679c\u3002"
+)
+_EXP2_UVVIS_SPECTRA_NO_CURRENT_RESULT_REPLY = (
+    "\u5f53\u524d\u7ec4\u8fd9\u8f6e\u8fd8\u6ca1\u6709\u771f\u6b63\u542f\u52a8\u4eea\u5668\u626b\u63cf\uff0c"
+    "\u6211\u4e0d\u80fd\u7528\u4e0a\u4e00\u7ec4\u6570\u636e\u4ee3\u66ff\u3002"
+    "\u4f60\u8bf4\u201c\u5f00\u59cb\u626b\u63cf\u201d\uff0c\u6211\u5c31\u8c03\u7528\u4eea\u5668\u626b\u8fd9\u4e00\u7ec4\u3002"
 )
 _EXP2_KINETICS_DECLARATION_PHRASES = (
     "\u52a8\u529b\u5b66",
@@ -887,7 +906,11 @@ def _exp2_spectra_scan_prompt_block(
         experiment_context.get("experiment_current_step_id", "")
     )
     shared_prep_done = _exp2_uvvis_shared_prep_exists(experiment_yaml_path)
-    if current_step_id not in {"", _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID}:
+    if current_step_id not in {
+        "",
+        _EXP2_UVVIS_SPECTRA_LOAD_STEP_ID,
+        _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID,
+    }:
         return ""
     if current_step_id == "" and not shared_prep_done:
         return ""
@@ -909,7 +932,11 @@ def _exp2_spectra_scan_prompt_block(
     return (
         "High priority exp2 UV-Vis spectra hot path:\n"
         "- The latest student message authorizes the batch UV-Vis spectra scan for real samples.\n"
-        "- Your next backend action must be uvvis_measure_spectra with ready_for_samples=true; do not use shell, filesystem search, or commandExecution to look for tools or substitute for the scan.\n"
+        "- This is a max-absorbance / UV-Vis spectra scan, not a kinetics measurement. Do not mention kinetics placement and do not call uvvis_grouped_kinetics_start or uvvis_measure_kinetics.\n"
+        "- If the trusted current_step_id is step_3_uv_vis_sample1-4_load_cuvette, first write the load confirmation to experiment-graph: start_trial if needed, add all_samples_loaded_into_cuvettes=true, all_cuvettes_ready_for_measurement=true, native_reference_water_loaded=true, finish_trial(validate=true), then proceed_to_next_step. Only after proceed_to_next_step returns the record-data step may you start the spectra scan.\n"
+        "- If the trusted current_step_id is already step_3_uv_vis_sample1-4_record_data, do not ask the student to report peaks manually; start the spectra scan now.\n"
+        "- Do not answer a sample's lambda_max or max absorbance from older group records while the current group has not just completed uvvis_measure_spectra. If the student asks for a peak before the current scan result exists, say the current group has not been scanned yet and ask them to say '开始扫描'.\n"
+        "- Your scan backend action must be uvvis_measure_spectra with ready_for_samples=true; do not use shell, filesystem search, or commandExecution to look for tools or substitute for the scan.\n"
         "- If the latest student message explicitly says a group number such as '第二组', use that number for output_dir even if graph current_group_number is stale.\n"
         f"{group_line}"
         f"{device_line}"
@@ -922,12 +949,31 @@ def _exp2_recent_kinetics_scan_prompt_block(
     history: List[Dict],
     user_text: str,
     experiment_yaml_path: str,
+    experiment_context: Optional[Dict[str, str]] = None,
 ) -> str:
     yaml_path = str(experiment_yaml_path or "").replace("\\", "/").lower()
     if "exp2_uv_vis_analysis" not in yaml_path:
         return ""
 
     text = str(user_text or "").strip()
+    current_step_id = _norm_str(
+        (experiment_context or {}).get("experiment_current_step_id", "")
+    )
+    in_spectra_step = current_step_id in {
+        _EXP2_UVVIS_SPECTRA_LOAD_STEP_ID,
+        _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID,
+    }
+    user_mentions_spectra = _text_contains_any(
+        text,
+        (
+            "\u6700\u5927\u5438\u6536",
+            "\u5438\u6536\u6ce2\u957f",
+            "\u5cf0\u503c\u6ce2\u957f",
+            "\u5149\u8c31",
+            "uv-vis",
+            "uvvis",
+        ),
+    )
     user_declares_kinetics = (
         any(phrase in text for phrase in _EXP2_KINETICS_DECLARATION_PHRASES)
         and (
@@ -935,6 +981,10 @@ def _exp2_recent_kinetics_scan_prompt_block(
             or any(phrase in text for phrase in _EXP2_KINETICS_ACTION_PHRASES)
         )
     )
+    if in_spectra_step and not user_declares_kinetics:
+        return ""
+    if user_mentions_spectra and not user_declares_kinetics:
+        return ""
     if user_declares_kinetics:
         return (
             "High priority exp2 local context:\n"
@@ -1091,7 +1141,10 @@ def _is_exp2_uvvis_spectra_guard_turn(
     current_step_id = _norm_str(
         experiment_context.get("experiment_current_step_id", "")
     )
-    if current_step_id == _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID:
+    if current_step_id in {
+        _EXP2_UVVIS_SPECTRA_LOAD_STEP_ID,
+        _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID,
+    }:
         return True
     if current_step_id == "" and _exp2_uvvis_shared_prep_exists(experiment_yaml_path):
         return True
@@ -1112,6 +1165,16 @@ def _finalize_exp2_uvvis_spectra_guard_text(
     if "uvvis_measure_spectra" in called_tools:
         return assistant_text
     if _exp2_uvvis_spectra_text_claims_start(assistant_text):
+        if _text_contains_any(
+            assistant_text,
+            (
+                "\u6700\u5927\u5438\u6536",
+                "\u5438\u6536\u6ce2\u957f",
+                "\u5cf0\u503c\u6ce2\u957f",
+                "\u5cf0\u503c\u5438\u5149\u5ea6",
+            ),
+        ):
+            return _EXP2_UVVIS_SPECTRA_NO_CURRENT_RESULT_REPLY
         return _EXP2_UVVIS_SPECTRA_NO_TOOL_REPLY
     return assistant_text
 
@@ -2134,6 +2197,18 @@ def _experiment_prompt_block(
             "- If proceed_to_next_step fails, do not guide the next group; ask only for the missing confirmation or choose cleanup/retry as appropriate.\n"
             "- If the student only says '进入下一步', '结束这一步', or '继续' after kinetics, ask whether they mean next group or cleanup; do not auto-advance."
         )
+    if current_step_id in {
+        "step_3_uv_vis_sample1-4_load_cuvette",
+        "step_3_uv_vis_sample1-4_record_data",
+    }:
+        parts.append(
+            "Exp2 max-absorbance spectra gate:\n"
+            "- The trusted graph currently says the experiment is in the 1-5 sample loading or batch spectra step. Treat '最大吸收波长', '吸收峰', '峰值波长', '光谱', 'UV-Vis', '放好了', '可以开始', '开始扫描', and '帮我扫/调 MCP 扫' as the batch spectra path for samples 1-5.\n"
+            "- While in these two steps, do not infer kinetics from older assistant text or older history. Only switch to kinetics if the latest student message explicitly says '动力学'.\n"
+            "- If current_step_id is step_3_uv_vis_sample1-4_load_cuvette and the student says the samples are loaded or asks to scan, first complete this graph step with all_samples_loaded_into_cuvettes=true, all_cuvettes_ready_for_measurement=true, native_reference_water_loaded=true, finish it, and proceed to step_3_uv_vis_sample1-4_record_data.\n"
+            "- After the graph is on step_3_uv_vis_sample1-4_record_data, call uvvis_measure_spectra for sample_positions=[1,2,3,4,5] using the current device/group output_dir. Do not ask the student to scan manually or report peak wavelengths manually.\n"
+            "- Never report lambda_max or max absorbance from a previous group's record as the current group's result. If the current group scan has not completed in this turn or in the current group record, say it has not been scanned yet."
+        )
     parts.append(
         "Tool-failure narration guard:\n"
         "- Only say an interface, MCP tool, or device is disconnected, unavailable, occupied, or used by another program when a tool call on the current turn actually returned that failure.\n"
@@ -2904,6 +2979,7 @@ class _CodexSession:
             history,
             strategy_user_text,
             self.experiment_yaml_path,
+            experiment_context,
         )
         if kinetics_scan_block:
             if last_user:
