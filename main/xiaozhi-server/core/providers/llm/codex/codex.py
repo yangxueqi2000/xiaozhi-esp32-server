@@ -237,6 +237,15 @@ _EXP2_NEXT_GROUP_PHRASES = (
     "\u6362\u4e0b\u4e00\u7ec4",
     "\u65b0\u4e00\u7ec4",
 )
+_EXP2_CLEANUP_PHRASES = (
+    "\u8fdb\u5165\u6e05\u7406",
+    "\u8fdb\u5165\u6e05\u7406\u6b65\u9aa4",
+    "\u5f00\u59cb\u6e05\u7406",
+    "\u6e05\u7406\u6b65\u9aa4",
+    "\u5b9e\u9a8c\u7ed3\u675f",
+    "\u7ed3\u675f\u5b9e\u9a8c",
+    "\u6240\u6709\u7ec4\u5b8c\u6210",
+)
 
 if os.name == "nt":
     try:
@@ -1208,6 +1217,10 @@ def _user_explicitly_requests_next_group(user_text: str) -> bool:
     return bool(re.search(r"第\s*[一二三四五六七八九十0-9]+\s*组", text))
 
 
+def _user_explicitly_requests_cleanup(user_text: str) -> bool:
+    return _text_contains_any(_normalize_whitespace(user_text), _EXP2_CLEANUP_PHRASES)
+
+
 def _exp2_kinetics_text_reverts_to_batch_loading(text: str) -> bool:
     if not text:
         return False
@@ -1267,6 +1280,14 @@ def _finalize_exp2_kinetics_guard_text(
 ) -> str:
     if "uvvis_grouped_kinetics_start" in called_tools:
         return assistant_text
+    if _user_explicitly_requests_cleanup(user_text):
+        if "redirect_to_step" in called_tools:
+            return assistant_text
+        if _text_contains_any(assistant_text, ("清理", "取下", "废液", "冲洗")):
+            return (
+                "我还没有把实验图谱切到清理步骤，不能只靠口播开始清理。"
+                "请再说一次“进入清理”，我会先更新实验图谱再给清理动作。"
+            )
     if not _exp2_kinetics_text_reverts_to_batch_loading(assistant_text):
         return assistant_text
 
@@ -2305,6 +2326,7 @@ def _experiment_prompt_block(
             "- While this step is not explicitly completed, do not guide the student back to 1-5 sample loading, 1-5 max-absorbance spectra, or shared dark/air calibration. Keep the flow on kinetics placement, kinetics progress, or kinetics result.\n"
             "- When uvvis_grouped_kinetics_status or uvvis_grouped_kinetics_result returns record_fields, write those returned fields into the current experiment-graph step before answering. This keeps the per-group experimental_graph_records.yaml/pdf live under the current uv_data_common/<device_id>/<group_number>/ directory.\n"
             "- Before telling the student to load 1-5 samples for the next group, call experiment-graph can_proceed/proceed_to_next_step using the trusted experiment_session_id and wait for ok=true. Only then speak the returned next step.\n"
+            "- If the student explicitly says '进入清理', '进入清理步骤', '开始清理', '实验结束', or '所有组完成', first call redirect_to_step(session_id=trusted id, step_id='step_7_cleanup', force=true, group_number=current group) and wait for ok=true. Only after that may you give cleanup instructions.\n"
             "- If proceed_to_next_step fails, do not guide the next group; ask only for the missing confirmation or choose cleanup/retry as appropriate.\n"
             "- If the student only says '进入下一步', '结束这一步', or '继续' after kinetics, ask whether they mean next group or cleanup; do not auto-advance."
         )
