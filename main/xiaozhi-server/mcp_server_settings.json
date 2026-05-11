@@ -61,7 +61,7 @@
                        "uvvis":  {
                                       "url":  "http://127.0.0.1:8766/mcp",
                                       "transport":  "streamable-http",
-                                      "timeout":  600,
+                                      "timeout":  3000,
                                       "sse_read_timeout":  null,
                                       "terminate_on_close":  false,
                                       "initialize_timeout":  120,

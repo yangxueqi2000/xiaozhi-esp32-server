@@ -862,6 +862,7 @@ def _exp2_recent_kinetics_scan_prompt_block(
             "- The latest student message explicitly declares that the current real-world step is the kinetics measurement.\n"
             "- Trust this explicit recovery cue over stale conversation history or missing graph state.\n"
             "- Do not route back to shared dark-current/air-baseline prep and do not ask for all 1-5 positions to be empty.\n"
+            "- Before asking placement or starting uvvis_measure_kinetics, make sure the current student group number is explicit. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
             "- If the student has not just confirmed placement, ask only for the kinetics placement confirmation: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
             "- If the student says start/ready after that confirmation, call the UV-Vis kinetics tool according to the exp2 local prompt, then write the result to experiment_graph before speaking the next step."
         )
@@ -899,6 +900,7 @@ def _exp2_recent_kinetics_scan_prompt_block(
         "- The recent conversation was about the kinetics measurement setup, not the shared dark-current/air-baseline prep.\n"
         "- Interpret the latest start/ready message as authorization to continue the current kinetics measurement flow.\n"
         "- Do not ask for 1-5 sample positions to be empty, do not call shared dark-current prep, and do not say shared dark current or air baseline is complete.\n"
+        "- Before starting uvvis_measure_kinetics, make sure the current student group number is explicit. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
         "- Use the current kinetics placement: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
         "- If all placements were just confirmed, call the UV-Vis kinetics tool according to the exp2 local prompt."
     )
