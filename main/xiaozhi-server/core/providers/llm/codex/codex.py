@@ -1869,7 +1869,7 @@ def _augment_experiment_context_from_registry(
     if current_step_id:
         augmented.setdefault("experiment_current_step_id", current_step_id)
     for key, value in _load_experiment_snapshot_state(session_id).items():
-        augmented.setdefault(key, value)
+        augmented[key] = value
     augmented.setdefault("experiment_prewarm_status", "registry_resume")
     return augmented
 
