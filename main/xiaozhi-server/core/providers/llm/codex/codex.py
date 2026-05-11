@@ -2303,6 +2303,7 @@ def _experiment_prompt_block(
             "Exp2 post-kinetics graph gate:\n"
             f"- The trusted graph currently says step_6_kinetics_combined_measurement, {group_phrase}. Treat this as the current kinetics step, not the 1-5 sample loading or max-absorbance spectra step.\n"
             "- While this step is not explicitly completed, do not guide the student back to 1-5 sample loading, 1-5 max-absorbance spectra, or shared dark/air calibration. Keep the flow on kinetics placement, kinetics progress, or kinetics result.\n"
+            "- When uvvis_grouped_kinetics_status or uvvis_grouped_kinetics_result returns record_fields, write those returned fields into the current experiment-graph step before answering. This keeps the per-group experimental_graph_records.yaml/pdf live under the current uv_data_common/<device_id>/<group_number>/ directory.\n"
             "- Before telling the student to load 1-5 samples for the next group, call experiment-graph can_proceed/proceed_to_next_step using the trusted experiment_session_id and wait for ok=true. Only then speak the returned next step.\n"
             "- If proceed_to_next_step fails, do not guide the next group; ask only for the missing confirmation or choose cleanup/retry as appropriate.\n"
             "- If the student only says '进入下一步', '结束这一步', or '继续' after kinetics, ask whether they mean next group or cleanup; do not auto-advance."
