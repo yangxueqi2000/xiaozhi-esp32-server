@@ -120,6 +120,7 @@ _EXPLICIT_PHOTO_HOT_PATH_PHRASES = (
 )
 _PHOTO_QUESTION_MARKERS = ("?", "？", "吗", "么")
 _EXP2_UVVIS_PREP_STEP_ID = "step_3_uv_vis_shared_dark_air_prep"
+_EXP2_UVVIS_SPECTRA_RECORD_STEP_ID = "step_3_uv_vis_sample1-4_record_data"
 _EXP2_UVVIS_PREP_START_PHRASES = (
     "\u5f00\u59cb\u626b\u63cf",
     "\u53ef\u4ee5\u5f00\u59cb",
@@ -130,6 +131,9 @@ _EXP2_UVVIS_PREP_START_PHRASES = (
 _EXP2_UVVIS_EMPTY_CONFIRM_PHRASES = (
     "\u90fd\u7a7a",
     "\u90fd\u662f\u7a7a",
+    "\u90fd\u6e05\u7a7a",
+    "\u90fd\u6e05\u7a7a\u4e86",
+    "\u6e05\u7a7a\u4e86",
     "\u5df2\u7a7a",
     "\u5df2\u7559\u7a7a",
     "\u7559\u7a7a\u4e86",
@@ -164,6 +168,32 @@ _EXP2_UVVIS_PREP_NO_TOOL_REPLY = (
     "\u7a7a\u6c14\u80fd\u91cf\u6821\u6b63\uff0c\u5148\u4e0d\u653e\u6837\u54c1\u3002"
     "\u8bf7\u786e\u8ba4\u4f4d\u7f6e\u90fd\u7a7a\u540e\u518d\u8bf4\u201c\u90fd\u7a7a\u4e86\uff0c"
     "\u5f00\u59cb\u626b\u63cf\u201d\u3002"
+)
+_EXP2_UVVIS_SPECTRA_READY_PHRASES = (
+    "\u5f00\u59cb\u626b\u63cf",
+    "\u626b\u63cf",
+    "\u5f00\u59cb\u6d4b",
+    "\u53ef\u4ee5\u5f00\u59cb",
+    "\u5df2\u7ecf\u653e\u597d",
+    "\u5df2\u653e\u597d",
+    "\u653e\u597d\u4e86",
+    "\u5df2\u7ecf\u653e\u8fdb\u53bb",
+    "\u653e\u8fdb\u53bb\u4e86",
+)
+_EXP2_UVVIS_SPECTRA_CLAIM_PHRASES = (
+    "\u5f00\u59cb\u505a",
+    "\u5f00\u59cb\u7b2c",
+    "\u5f00\u59cb\u6279\u91cf",
+    "\u6279\u91cf\u626b\u63cf",
+    "UV-Vis \u626b\u63cf",
+    "\u626b\u5b8c",
+    "\u5cf0\u503c",
+    "\u5cf0\u5728",
+)
+_EXP2_UVVIS_SPECTRA_NO_TOOL_REPLY = (
+    "\u521a\u624d\u6ca1\u6709\u771f\u6b63\u542f\u52a8\u4eea\u5668\u626b\u63cf\u3002"
+    "\u8bf7\u518d\u8bf4\u4e00\u6b21\u201c\u5f00\u59cb\u626b\u63cf\u201d\uff0c"
+    "\u6211\u4f1a\u5148\u542f\u52a8\u4eea\u5668\uff0c\u626b\u5b8c\u540e\u518d\u544a\u8bc9\u4f60\u7ed3\u679c\u3002"
 )
 _EXP2_KINETICS_DECLARATION_PHRASES = (
     "\u52a8\u529b\u5b66",
@@ -839,6 +869,55 @@ def _photo_authorization_hot_path_prompt_block(user_text: str) -> str:
     )
 
 
+def _exp2_spectra_scan_prompt_block(
+    user_text: str,
+    experiment_yaml_path: str,
+    experiment_context: Dict[str, str],
+    routing_context: Optional[Dict[str, str]] = None,
+) -> str:
+    yaml_path = str(experiment_yaml_path or "").replace("\\", "/").lower()
+    if "exp2_uv_vis_analysis" not in yaml_path:
+        return ""
+
+    text = str(user_text or "").strip()
+    if not _text_contains_any(text, _EXP2_UVVIS_SPECTRA_READY_PHRASES):
+        return ""
+
+    current_step_id = _norm_str(
+        experiment_context.get("experiment_current_step_id", "")
+    )
+    shared_prep_done = _exp2_uvvis_shared_prep_exists(experiment_yaml_path)
+    if current_step_id not in {"", _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID}:
+        return ""
+    if current_step_id == "" and not shared_prep_done:
+        return ""
+
+    device_id = _norm_str((routing_context or {}).get("device_id", ""))
+    context_group = _norm_str(
+        experiment_context.get("experiment_current_group_number", "")
+    )
+    group_line = (
+        f"- Trusted current_group_number from server context is {context_group}.\n"
+        if context_group
+        else ""
+    )
+    device_line = (
+        f"- Trusted device_id from routing context is {device_id}.\n"
+        if device_id
+        else ""
+    )
+    return (
+        "High priority exp2 UV-Vis spectra hot path:\n"
+        "- The latest student message authorizes the batch UV-Vis spectra scan for real samples.\n"
+        "- Your next backend action must be uvvis_measure_spectra with ready_for_samples=true; do not use shell, filesystem search, or commandExecution to look for tools or substitute for the scan.\n"
+        "- If the latest student message explicitly says a group number such as '第二组', use that number for output_dir even if graph current_group_number is stale.\n"
+        f"{group_line}"
+        f"{device_line}"
+        "- The output_dir must be C:/Users/11979/Documents/GitHub/codex_edu/lab_runs/exp2_UV_Vis_analysis/data/uv_data_common/<device_id>/<group_number> with real values, never placeholders.\n"
+        "- Do not say the scan has started or will run unless uvvis_measure_spectra has actually been called on this turn."
+    )
+
+
 def _exp2_recent_kinetics_scan_prompt_block(
     history: List[Dict],
     user_text: str,
@@ -977,17 +1056,64 @@ def _finalize_exp2_uvvis_prep_guard_text(
     user_text: str,
     assistant_text: str,
     called_tools: List[str],
+    experiment_yaml_path: str,
 ) -> str:
     if "uvvis_prepare_dark_current" in called_tools:
         return assistant_text
 
+    prep_artifacts_exist = _exp2_uvvis_shared_prep_exists(experiment_yaml_path)
     if not _exp2_uvvis_prep_user_confirmed_empty(user_text):
+        if prep_artifacts_exist and _exp2_uvvis_prep_text_claims_success(assistant_text):
+            return assistant_text
         return _EXP2_UVVIS_PREP_NEED_EMPTY_REPLY
 
     if _exp2_uvvis_prep_text_claims_success(assistant_text):
+        if prep_artifacts_exist:
+            return assistant_text
         return _EXP2_UVVIS_PREP_NO_TOOL_REPLY
 
     return assistant_text or _EXP2_UVVIS_PREP_NO_TOOL_REPLY
+
+
+def _is_exp2_uvvis_spectra_guard_turn(
+    user_text: str,
+    experiment_context: Dict[str, str],
+    experiment_yaml_path: str,
+) -> bool:
+    yaml_path = _norm_str(
+        experiment_context.get("experiment_yaml_path") or experiment_yaml_path
+    ).replace("\\", "/").lower()
+    if "exp2_uv_vis_analysis" not in yaml_path:
+        return False
+    if not _text_contains_any(user_text, _EXP2_UVVIS_SPECTRA_READY_PHRASES):
+        return False
+
+    current_step_id = _norm_str(
+        experiment_context.get("experiment_current_step_id", "")
+    )
+    if current_step_id == _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID:
+        return True
+    if current_step_id == "" and _exp2_uvvis_shared_prep_exists(experiment_yaml_path):
+        return True
+    return False
+
+
+def _exp2_uvvis_spectra_text_claims_start(text: str) -> bool:
+    if not text:
+        return False
+    return _text_contains_any(text, _EXP2_UVVIS_SPECTRA_CLAIM_PHRASES)
+
+
+def _finalize_exp2_uvvis_spectra_guard_text(
+    *,
+    assistant_text: str,
+    called_tools: List[str],
+) -> str:
+    if "uvvis_measure_spectra" in called_tools:
+        return assistant_text
+    if _exp2_uvvis_spectra_text_claims_start(assistant_text):
+        return _EXP2_UVVIS_SPECTRA_NO_TOOL_REPLY
+    return assistant_text
 
 
 def _accept_server_request(
@@ -1405,7 +1531,8 @@ def _sync_native_mcp_function_call_state(conn: Any, item: Dict[str, Any]) -> Non
         return
     if item.get("type") != "function_call":
         return
-    if str(item.get("status") or "").strip() != "completed":
+    status = str(item.get("status") or "").strip()
+    if status and status != "completed":
         return
 
     namespace = str(item.get("namespace") or "").strip()
@@ -1608,6 +1735,7 @@ def _experiment_context_from_kwargs(kwargs: Dict[str, Any]) -> Dict[str, str]:
         "experiment_prewarm_trigger",
         "experiment_session_id",
         "experiment_current_step_id",
+        "experiment_current_group_number",
         "experiment_yaml_path",
         "experiment_overview_summary",
         "experiment_current_step_summary",
@@ -1719,6 +1847,7 @@ def _experiment_prompt_block(
         "experiment_prewarm_trigger",
         "experiment_session_id",
         "experiment_current_step_id",
+        "experiment_current_group_number",
         "experiment_yaml_path",
         "experiment_overview_summary",
         "experiment_current_step_summary",
@@ -2629,6 +2758,18 @@ class _CodexSession:
             else:
                 last_user = kinetics_scan_block
 
+        spectra_scan_block = _exp2_spectra_scan_prompt_block(
+            strategy_user_text,
+            self.experiment_yaml_path,
+            experiment_context,
+            routing_context,
+        )
+        if spectra_scan_block:
+            if last_user:
+                last_user = f"{last_user}\n\n{spectra_scan_block}"
+            else:
+                last_user = spectra_scan_block
+
         photo_hot_path_block = _photo_authorization_hot_path_prompt_block(
             strategy_user_text
         )
@@ -2836,6 +2977,17 @@ class _CodexSession:
             kwargs.get("experiment_context", {}) or {},
             self.experiment_yaml_path,
         )
+        exp2_uvvis_spectra_guard_active = (
+            not exp2_uvvis_prep_guard_active
+            and _is_exp2_uvvis_spectra_guard_turn(
+                user_text,
+                kwargs.get("experiment_context", {}) or {},
+                self.experiment_yaml_path,
+            )
+        )
+        exp2_uvvis_guard_active = (
+            exp2_uvvis_prep_guard_active or exp2_uvvis_spectra_guard_active
+        )
         agent_pending_text = ""
         agent_internal_leak_suppressed = False
 
@@ -2852,7 +3004,7 @@ class _CodexSession:
             nonlocal out_buffer, guarded_text_buffer
             if not text:
                 return []
-            if exp2_uvvis_prep_guard_active:
+            if exp2_uvvis_guard_active:
                 guarded_text_buffer += text
                 return []
             out_buffer += text
@@ -3019,10 +3171,23 @@ class _CodexSession:
                     user_text=user_text or "",
                     assistant_text=guarded_text_buffer,
                     called_tools=mcp_tools_called,
+                    experiment_yaml_path=self.experiment_yaml_path,
                 )
                 if guarded_reply != guarded_text_buffer and self.log_stream:
                     file_append(
                         f"\n[{_ts()}] [FILTERED_UNVERIFIED_UVVIS_PREP_REPLY] "
+                        f"tools={','.join(mcp_tools_called) or '-'}\n"
+                    )
+                for visible_delta in emit_final_agent_text(guarded_reply):
+                    yield visible_delta
+            elif exp2_uvvis_spectra_guard_active:
+                guarded_reply = _finalize_exp2_uvvis_spectra_guard_text(
+                    assistant_text=guarded_text_buffer,
+                    called_tools=mcp_tools_called,
+                )
+                if guarded_reply != guarded_text_buffer and self.log_stream:
+                    file_append(
+                        f"\n[{_ts()}] [FILTERED_UNVERIFIED_UVVIS_SPECTRA_REPLY] "
                         f"tools={','.join(mcp_tools_called) or '-'}\n"
                     )
                 for visible_delta in emit_final_agent_text(guarded_reply):

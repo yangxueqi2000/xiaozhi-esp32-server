@@ -1277,6 +1277,11 @@ class ConnectionHandler:
             context["experiment_current_step_id"] = str(
                 self.experiment_current_step_id
             ).strip()
+        current_group_number = str(
+            getattr(self, "experiment_current_group_number", "") or ""
+        ).strip()
+        if include_session_context and current_group_number:
+            context["experiment_current_group_number"] = current_group_number
 
         overview_summary = ""
         if include_session_context:
