@@ -54,6 +54,17 @@ def _tail_merge_window_ms(conn) -> int:
     )
 
 
+def _min_asr_audio_packets(conn) -> int:
+    config = getattr(conn, "config", {}) or {}
+    return max(
+        1,
+        _parse_nonnegative_int(
+            config.get("asr_min_audio_packets"),
+            15,
+        ),
+    )
+
+
 class ASRProviderBase(ABC):
     def __init__(self):
         pass
@@ -136,7 +147,7 @@ class ASRProviderBase(ABC):
                 conn._asr_voice_stop_deadline_ms = 0.0
                 conn.reset_vad_states()
 
-                if len(asr_audio_task) > 15:
+                if len(asr_audio_task) >= _min_asr_audio_packets(conn):
                     await self.handle_voice_stop(conn, asr_audio_task, pcm_audio_task)
 
     # 处理语音停止

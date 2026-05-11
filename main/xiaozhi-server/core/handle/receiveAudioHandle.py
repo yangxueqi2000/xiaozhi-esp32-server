@@ -79,9 +79,19 @@ async def handleAudioMessage(conn, audio):
     await conn.asr.receive_audio(conn, audio, have_voice)
 
 
+def _wakeup_vad_resume_delay_seconds(conn) -> float:
+    raw_value = conn.config.get("wakeup_vad_resume_delay_ms", 2000)
+    try:
+        delay_ms = int(raw_value)
+    except (TypeError, ValueError):
+        delay_ms = 2000
+    delay_ms = max(0, min(delay_ms, 5000))
+    return delay_ms / 1000.0
+
+
 async def resume_vad_detection(conn):
-    # 等待2秒后恢复VAD检测
-    await asyncio.sleep(2)
+    # 唤醒后只保留一个很短的保护窗口，避免吞掉紧跟着的首句实验指令。
+    await asyncio.sleep(_wakeup_vad_resume_delay_seconds(conn))
     conn.just_woken_up = False
 
 
