@@ -1947,6 +1947,9 @@ class _CodexSession:
         self.summary = config.get("summary")
         self.service_tier = config.get("service_tier") or config.get("serviceTier")
         self.system_prompt_mode = (config.get("system_prompt_mode") or "first_turn").lower()
+        self.restart_on_system_prompt_change = bool(
+            config.get("restart_on_system_prompt_change", False)
+        )
         self.bootstrap_mode = (config.get("bootstrap_mode") or "none").lower()
         configured_yaml_path = config.get("yaml_path")
         resolved_yaml_path = _resolve_optional_path(configured_yaml_path, _SERVER_ROOT)
@@ -2550,7 +2553,17 @@ class _CodexSession:
             self._last_system_prompt is not None
             and current_prompt_fp != self._last_system_prompt
         ):
-            self._restart()
+            if self.restart_on_system_prompt_change:
+                logger.bind(tag=TAG).info(
+                    "restarting codex session after system prompt change: "
+                    f"session={self.session_key}"
+                )
+                self._restart()
+            else:
+                logger.bind(tag=TAG).warning(
+                    "codex system prompt changed; keeping existing thread to preserve "
+                    f"experiment context: session={self.session_key}"
+                )
         self._last_system_prompt = current_prompt_fp
         include_system = (
             system_prompt
