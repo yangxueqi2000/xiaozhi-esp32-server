@@ -1769,6 +1769,111 @@ def _experiment_context_from_kwargs(kwargs: Dict[str, Any]) -> Dict[str, str]:
     return context
 
 
+def _normalize_experiment_yaml_path(yaml_path: str) -> str:
+    text = _norm_str(yaml_path)
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(os.path.normpath(text)))
+    except Exception:
+        return text.lower()
+
+
+def _load_experiment_session_registry() -> Dict[str, Any]:
+    path = _SERVER_ROOT / "data" / "codex_app" / "experiment_session_registry.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    bindings = payload.get("bindings")
+    return bindings if isinstance(bindings, dict) else {}
+
+
+def _load_experiment_snapshot_state(session_id: str) -> Dict[str, str]:
+    safe_session_id = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", _norm_str(session_id)).strip(" .")
+    if not safe_session_id:
+        return {}
+    path = (
+        _SERVER_ROOT.parent.parent.parent
+        / "ExperimentalAssistantServer"
+        / "data"
+        / "session_state"
+        / f"{safe_session_id}.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        state = ((payload.get("graph_state") or {}).get("state") or {})
+    except Exception:
+        return {}
+    result: Dict[str, str] = {}
+    current_step_id = _norm_str(state.get("current_step_id", ""))
+    current_group_number = _norm_str(state.get("current_group_number", ""))
+    if current_step_id:
+        result["experiment_current_step_id"] = current_step_id
+    if current_group_number:
+        result["experiment_current_group_number"] = current_group_number
+    return result
+
+
+def _augment_experiment_context_from_registry(
+    experiment_context: Dict[str, str],
+    routing_context: Optional[Dict[str, str]],
+    experiment_yaml_path: str,
+) -> Dict[str, str]:
+    if experiment_context.get("experiment_session_id"):
+        return experiment_context
+
+    yaml_path = _normalize_experiment_yaml_path(
+        experiment_context.get("experiment_yaml_path") or experiment_yaml_path
+    )
+    chat_session_id = _norm_str((routing_context or {}).get("chat_session_id", ""))
+    device_id = _norm_str((routing_context or {}).get("device_id", ""))
+    user_id = _norm_str((routing_context or {}).get("user_id", ""))
+    if not yaml_path:
+        return experiment_context
+
+    bindings = _load_experiment_session_registry()
+    candidates: List[Dict[str, Any]] = []
+    if chat_session_id:
+        exact = bindings.get(f"{chat_session_id}::{yaml_path}")
+        if isinstance(exact, dict):
+            candidates.append(exact)
+    if not candidates and device_id:
+        for raw in bindings.values():
+            if not isinstance(raw, dict):
+                continue
+            if _normalize_experiment_yaml_path(raw.get("yaml_path", "")) != yaml_path:
+                continue
+            if _norm_str(raw.get("device_id", "")) != device_id:
+                continue
+            if user_id and _norm_str(raw.get("user_id", "")) not in {"", user_id}:
+                continue
+            if _norm_str(raw.get("status", "")) not in {"", "active"}:
+                continue
+            candidates.append(raw)
+
+    if not candidates:
+        return experiment_context
+    candidates.sort(key=lambda item: _norm_str(item.get("updated_at", "")), reverse=True)
+    binding = candidates[0]
+    session_id = _norm_str(binding.get("experiment_session_id", ""))
+    if not session_id:
+        return experiment_context
+
+    augmented = dict(experiment_context)
+    augmented["experiment_session_id"] = session_id
+    augmented.setdefault("experiment_yaml_path", yaml_path)
+    current_step_id = _norm_str(binding.get("current_step_id", ""))
+    if current_step_id:
+        augmented.setdefault("experiment_current_step_id", current_step_id)
+    for key, value in _load_experiment_snapshot_state(session_id).items():
+        augmented.setdefault(key, value)
+    augmented.setdefault("experiment_prewarm_status", "registry_resume")
+    return augmented
+
+
 def _routing_prompt_block(routing_context: Dict[str, str]) -> str:
     if not routing_context:
         return ""
@@ -2021,6 +2126,14 @@ def _experiment_prompt_block(
             "- A lost previous session is not the same thing as 'the experiment graph interface did not connect'.\n"
             "- Keep any recovery explanation student-facing and minimal; focus on the current experiment action instead of backend causes."
         )
+    if current_step_id == "step_6_kinetics_combined_measurement":
+        parts.append(
+            "Exp2 post-kinetics graph gate:\n"
+            "- The trusted graph currently says step_6_kinetics_combined_measurement, group 2. If the student explicitly asks for the third group, next group, or the next max-absorbance/UV-Vis spectra measurement, this is a graph transition request.\n"
+            "- Before telling the student to load 1-5 samples for the next group, call experiment-graph can_proceed/proceed_to_next_step using the trusted experiment_session_id and wait for ok=true. Only then speak the returned next step.\n"
+            "- If proceed_to_next_step fails, do not guide the next group; ask only for the missing confirmation or choose cleanup/retry as appropriate.\n"
+            "- If the student only says '进入下一步', '结束这一步', or '继续' after kinetics, ask whether they mean next group or cleanup; do not auto-advance."
+        )
     parts.append(
         "Tool-failure narration guard:\n"
         "- Only say an interface, MCP tool, or device is disconnected, unavailable, occupied, or used by another program when a tool call on the current turn actually returned that failure.\n"
@@ -2124,17 +2237,56 @@ def _experiment_prompt_block(
 
 
 def _experiment_bootstrap_prompt_block(
-    experiment_context: Dict[str, str], experiment_yaml_path: str, user_text: str = ""
+    experiment_context: Dict[str, str],
+    experiment_yaml_path: str,
+    user_text: str = "",
+    routing_context: Optional[Dict[str, str]] = None,
 ) -> str:
     yaml_path = _norm_str(experiment_yaml_path)
     if not yaml_path or experiment_context.get("experiment_session_id"):
         return ""
 
+    device_id = _norm_str((routing_context or {}).get("device_id", ""))
+    safe_device_id = _safe_filename(device_id) if device_id else ""
+    create_session_call = f'create_session(yaml_path="{yaml_path}")'
+    auto_export_line = ""
+    try:
+        resolved_yaml = Path(yaml_path)
+        run_dir = resolved_yaml.parent.parent if resolved_yaml.parent.name.lower() == "configs" else resolved_yaml.parent
+        if safe_device_id:
+            if "exp2_uv_vis_analysis" in yaml_path.replace("\\", "/").lower():
+                output_root = (run_dir / "data" / "uv_data_common").as_posix()
+                create_session_call = (
+                    f'create_session(yaml_path="{yaml_path}", '
+                    f'device_id="{safe_device_id}", '
+                    f'output_root="{output_root}", split_groups=true)'
+                )
+                auto_export_line = (
+                    "- For exp2, that create_session call must enable per-group auto export: "
+                    f'device_id="{safe_device_id}", output_root="{output_root}", split_groups=true, '
+                    "so each group writes experimental_graph_records.yaml/pdf inside "
+                    f"{output_root}/{safe_device_id}/<group_number>.\n"
+                )
+            else:
+                output_root = (run_dir / "data").as_posix()
+                create_session_call = (
+                    f'create_session(yaml_path="{yaml_path}", '
+                    f'device_id="{safe_device_id}", output_root="{output_root}")'
+                )
+                auto_export_line = (
+                    "- That create_session call must include the trusted device_id and output_root "
+                    "so experimental_graph_records.yaml/pdf are refreshed during the experiment.\n"
+                )
+    except Exception:
+        pass
+
     return (
         "No experiment_graph session has been confirmed for this Codex thread yet.\n"
         f"- The configured experiment YAML is: {yaml_path}\n"
         "- If you have already called experiment-graph create_session earlier in this same Codex thread and received a full session_id, reuse that exact session_id even if the xiaozhi server-side context below still shows experiment_session_id as missing. Do not create another graph session just because the xiaozhi-side prewarm context is empty.\n"
-        "- If this Codex thread has not yet received any experiment_graph session_id and the latest user message is starting or continuing the lab, confirming readiness, reporting a completed action, authorizing a scan/photo, asking for next step/group, or giving measurement/observation data, your next backend action must be experiment-graph create_session with that exact yaml_path.\n"
+        "- If this Codex thread has not yet received any experiment_graph session_id and the latest user message is starting or continuing the lab, confirming readiness, reporting a completed action, authorizing a scan/photo, asking for next step/group, or giving measurement/observation data, your next backend action must be experiment-graph "
+        f"{create_session_call}.\n"
+        f"{auto_export_line}"
         "- After create_session succeeds, immediately call get_current_progress or get_state for the returned full session_id and remember that session_id for later turns in this thread.\n"
         "- Before create_session/get_current_progress succeeds, do not claim dark current, UV-Vis scan, photo, record writing, step transition, group transition, or experiment completion has happened.\n"
         "- If a UV-Vis or photo tool is required on this same turn, create or recover the graph session first, then call the device/instrument MCP tool, then write the result back to experiment-graph before speaking the next physical step.\n"
@@ -2740,6 +2892,7 @@ class _CodexSession:
             experiment_context,
             self.experiment_yaml_path,
             user_text=strategy_user_text,
+            routing_context=routing_context,
         )
         if bootstrap_block:
             if last_user:
@@ -3215,6 +3368,11 @@ class _CodexSession:
         with self._lock:
             routing_context = _routing_context_from_kwargs(kwargs)
             experiment_context = _experiment_context_from_kwargs(kwargs)
+            experiment_context = _augment_experiment_context_from_registry(
+                experiment_context,
+                routing_context,
+                self.experiment_yaml_path,
+            )
             self.stream_log_path = self._resolve_log_path(
                 self.stream_log_path_template, routing_context
             )
