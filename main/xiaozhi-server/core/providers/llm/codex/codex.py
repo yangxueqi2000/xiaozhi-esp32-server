@@ -122,6 +122,52 @@ _EXPLICIT_PHOTO_HOT_PATH_PHRASES = (
     "好，拍",
 )
 _PHOTO_QUESTION_MARKERS = ("?", "？", "吗", "么")
+_EXP2_UVVIS_PREP_STEP_ID = "step_3_uv_vis_shared_dark_air_prep"
+_EXP2_UVVIS_PREP_START_PHRASES = (
+    "\u5f00\u59cb\u626b\u63cf",
+    "\u53ef\u4ee5\u5f00\u59cb",
+    "\u5f00\u59cb\u6d4b",
+    "\u5f00\u59cb\u6821\u6b63",
+    "\u626b\u63cf",
+)
+_EXP2_UVVIS_EMPTY_CONFIRM_PHRASES = (
+    "\u90fd\u7a7a",
+    "\u90fd\u662f\u7a7a",
+    "\u5df2\u7a7a",
+    "\u5df2\u7559\u7a7a",
+    "\u7559\u7a7a\u4e86",
+    "\u6ca1\u6709\u653e",
+    "\u6ca1\u653e\u6db2\u4f53",
+    "\u4e0d\u653e\u4efb\u4f55\u6db2\u4f53",
+    "\u6837\u54c1\u4f4d\u7a7a",
+    "\u53c2\u6bd4\u4f4d\u7a7a",
+)
+_EXP2_UVVIS_PREP_COMPLETION_CLAIM_PHRASES = (
+    "\u6697\u7535\u6d41",
+    "\u7a7a\u6c14\u80fd\u91cf",
+    "\u7a7a\u6c14\u57fa\u7ebf",
+    "\u6821\u6b63\u5df2\u7ecf\u5b8c\u6210",
+    "\u6821\u6b63\u5b8c\u6210",
+)
+_EXP2_UVVIS_SAMPLE_LOADING_PHRASES = (
+    "\u88c5\u5165\u4e94\u8054\u67b6",
+    "\u653e\u5165\u4e94\u8054\u67b6",
+    "\u53c2\u6bd4\u4f4d\u653e\u7eaf\u6c34",
+    "\u771f\u5b9e\u6837\u54c1",
+    "\u73b0\u5728\u628a",
+)
+_EXP2_UVVIS_PREP_NEED_EMPTY_REPLY = (
+    "\u8bf7\u5148\u786e\u8ba4 1 \u5230 5 \u53f7\u6837\u54c1\u4f4d\u548c\u4eea\u5668"
+    "\u539f\u751f\u53c2\u6bd4\u4f4d\u90fd\u662f\u7a7a\u7684\uff0c\u4e0d\u8981\u653e"
+    "\u4efb\u4f55\u6db2\u4f53\u3002\u786e\u8ba4\u540e\u518d\u8bf4\u201c\u90fd\u7a7a\u4e86\uff0c"
+    "\u5f00\u59cb\u626b\u63cf\u201d\u3002"
+)
+_EXP2_UVVIS_PREP_NO_TOOL_REPLY = (
+    "\u6211\u8fd8\u6ca1\u6709\u771f\u6b63\u5b8c\u6210\u6697\u7535\u6d41\u548c"
+    "\u7a7a\u6c14\u80fd\u91cf\u6821\u6b63\uff0c\u5148\u4e0d\u653e\u6837\u54c1\u3002"
+    "\u8bf7\u786e\u8ba4\u4f4d\u7f6e\u90fd\u7a7a\u540e\u518d\u8bf4\u201c\u90fd\u7a7a\u4e86\uff0c"
+    "\u5f00\u59cb\u626b\u63cf\u201d\u3002"
+)
 
 if os.name == "nt":
     try:
@@ -778,6 +824,68 @@ def _photo_authorization_hot_path_prompt_block(user_text: str) -> str:
         "if the current experiment step requires a graph record; only then give a "
         "brief confirmation or the next graph-approved action."
     )
+
+
+def _text_contains_any(text: str, phrases: Tuple[str, ...]) -> bool:
+    normalized = str(text or "").lower()
+    return any(phrase.lower() in normalized for phrase in phrases)
+
+
+def _is_exp2_uvvis_prep_guard_turn(
+    user_text: str,
+    experiment_context: Dict[str, str],
+    experiment_yaml_path: str,
+) -> bool:
+    yaml_path = _norm_str(
+        experiment_context.get("experiment_yaml_path") or experiment_yaml_path
+    ).replace("\\", "/").lower()
+    if "exp2_uv_vis_analysis" not in yaml_path:
+        return False
+    if not _text_contains_any(user_text, _EXP2_UVVIS_PREP_START_PHRASES):
+        return False
+
+    current_step_id = _norm_str(
+        experiment_context.get("experiment_current_step_id", "")
+    )
+    # When graph prewarm has not attached yet, this step id is empty. Treat the
+    # first UV-Vis scan authorization as guarded instead of trusting memory.
+    return current_step_id in {"", _EXP2_UVVIS_PREP_STEP_ID}
+
+
+def _exp2_uvvis_prep_user_confirmed_empty(user_text: str) -> bool:
+    return _text_contains_any(user_text, _EXP2_UVVIS_EMPTY_CONFIRM_PHRASES)
+
+
+def _exp2_uvvis_prep_text_claims_success(text: str) -> bool:
+    if not text:
+        return False
+    if _text_contains_any(text, _EXP2_UVVIS_SAMPLE_LOADING_PHRASES):
+        return True
+    return (
+        _text_contains_any(text, _EXP2_UVVIS_PREP_COMPLETION_CLAIM_PHRASES)
+        and _text_contains_any(
+            text,
+            ("\u5b8c\u6210", "\u5df2\u7ecf\u5b8c\u6210", "\u5df2\u5b8c\u6210"),
+        )
+    )
+
+
+def _finalize_exp2_uvvis_prep_guard_text(
+    *,
+    user_text: str,
+    assistant_text: str,
+    called_tools: List[str],
+) -> str:
+    if "uvvis_prepare_dark_current" in called_tools:
+        return assistant_text
+
+    if not _exp2_uvvis_prep_user_confirmed_empty(user_text):
+        return _EXP2_UVVIS_PREP_NEED_EMPTY_REPLY
+
+    if _exp2_uvvis_prep_text_claims_success(assistant_text):
+        return _EXP2_UVVIS_PREP_NO_TOOL_REPLY
+
+    return assistant_text or _EXP2_UVVIS_PREP_NO_TOOL_REPLY
 
 
 def _accept_server_request(
@@ -2595,6 +2703,13 @@ class _CodexSession:
         final_text = None
         thinking_buffer = ""
         out_buffer = ""
+        guarded_text_buffer = ""
+        mcp_tools_called: List[str] = []
+        exp2_uvvis_prep_guard_active = _is_exp2_uvvis_prep_guard_turn(
+            user_text,
+            kwargs.get("experiment_context", {}) or {},
+            self.experiment_yaml_path,
+        )
         agent_pending_text = ""
         agent_internal_leak_suppressed = False
 
@@ -2608,6 +2723,18 @@ class _CodexSession:
             return min(positions) if positions else -1
 
         def emit_agent_text(text: str) -> List[str]:
+            nonlocal out_buffer, guarded_text_buffer
+            if not text:
+                return []
+            if exp2_uvvis_prep_guard_active:
+                guarded_text_buffer += text
+                return []
+            out_buffer += text
+            if self.log_stream:
+                file_append(text)
+            return [text]
+
+        def emit_final_agent_text(text: str) -> List[str]:
             nonlocal out_buffer
             if not text:
                 return []
@@ -2739,6 +2866,9 @@ class _CodexSession:
                 # --- final text fallback ---
                 if method == "item/completed":
                     item = params.get("item", {}) or {}
+                    tool_name = str(item.get("name") or item.get("tool_name") or "").strip()
+                    if tool_name and tool_name not in mcp_tools_called:
+                        mcp_tools_called.append(tool_name)
                     _sync_native_mcp_function_call_state(
                         kwargs.get("state_conn"),
                         item,
@@ -2756,6 +2886,20 @@ class _CodexSession:
                 for visible_delta in append_agent_text(final_text):
                     yield visible_delta
                 for visible_delta in flush_agent_text(force=True):
+                    yield visible_delta
+
+            if exp2_uvvis_prep_guard_active:
+                guarded_reply = _finalize_exp2_uvvis_prep_guard_text(
+                    user_text=user_text or "",
+                    assistant_text=guarded_text_buffer,
+                    called_tools=mcp_tools_called,
+                )
+                if guarded_reply != guarded_text_buffer and self.log_stream:
+                    file_append(
+                        f"\n[{_ts()}] [FILTERED_UNVERIFIED_UVVIS_PREP_REPLY] "
+                        f"tools={','.join(mcp_tools_called) or '-'}\n"
+                    )
+                for visible_delta in emit_final_agent_text(guarded_reply):
                     yield visible_delta
 
         finally:
@@ -2816,6 +2960,7 @@ class _CodexSession:
                 prompt_text,
                 emit_events=emit_events,
                 user_text=last_user,
+                experiment_context=experiment_context,
                 **kwargs,
             ):
                 if isinstance(token, dict) and not emit_events:
