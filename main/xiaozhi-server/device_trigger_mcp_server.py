@@ -1045,6 +1045,25 @@ class PhotoPathTracker:
         return latest
 
 
+class PerDevicePhotoLockManager:
+    def __init__(self):
+        self._guard = Lock()
+        self._locks: Dict[str, Lock] = {}
+
+    def acquire(self, device_id: str) -> Tuple[Lock, float]:
+        key = _norm(device_id) or "unknown"
+        with self._guard:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = Lock()
+                self._locks[key] = lock
+
+        wait_started_at = time.perf_counter()
+        lock.acquire()
+        wait_ms = (time.perf_counter() - wait_started_at) * 1000.0
+        return lock, wait_ms
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MCP server for xiaozhi device triggers")
     parser.add_argument("--server", default=os.getenv("XIAOZHI_SERVER", "http://127.0.0.1:8003"))
@@ -1125,6 +1144,7 @@ def build_server(args: argparse.Namespace) -> FastMCP:
         detect_interval_ms=args.photo_detect_interval_ms,
         enable_mirror=not bool(args.disable_photo_mirror),
     )
+    photo_locks = PerDevicePhotoLockManager()
 
     mcp = FastMCP(
         name=args.name,
@@ -1186,6 +1206,8 @@ def build_server(args: argparse.Namespace) -> FastMCP:
         request_timeout: int = DEFAULT_TAKE_PHOTO_REQUEST_TIMEOUT,
         ctx: Optional[Context] = None,
     ) -> Dict[str, Any]:
+        tool_started_at = time.perf_counter()
+        timings: Dict[str, Any] = {}
         try:
             resolved = resolver.resolve_target(
                 device_id=device_id,
@@ -1196,10 +1218,6 @@ def build_server(args: argparse.Namespace) -> FastMCP:
             resolved_group_number = (
                 _normalize_group_number(group_number)
                 or _resolve_context_group_number(ctx)
-            )
-            baseline_photo = photo_tracker.find_latest(
-                route["device_id"],
-                group_number=resolved_group_number,
             )
 
             final_photo_name = _normalize_capture_photo_name(photo_name)
@@ -1215,26 +1233,74 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 final_photo_name,
                 resolved_group_number,
             )
-            result = do_take_photo(
-                args.server,
-                session_id=route["session_id"],
-                device_id=route["device_id"],
-                question=final_question,
-                photo_name=final_photo_name,
-                group_number=resolved_group_number,
-                tool_name=_norm(tool_name) or args.default_take_photo_tool_name,
-                tool_timeout=int(timeout),
-                request_timeout=int(request_timeout),
-            )
-            photo_meta = photo_tracker.resolve_photo_after_take_photo(
-                device_id=route["device_id"],
-                requested_photo_name=final_photo_name,
-                baseline=baseline_photo,
-                detect_timeout=float(args.photo_detect_timeout),
-                group_number=resolved_group_number,
-            )
+            device_lock, lock_wait_ms = photo_locks.acquire(route["device_id"])
+            timings["device_lock_wait_ms"] = round(lock_wait_ms, 1)
+            try:
+                LOGGER.info(
+                    "xiaozhi_take_photo start: device_id=%s session_id=%s group_number=%s "
+                    "photo_name=%s lock_wait_ms=%.1f",
+                    route["device_id"],
+                    route["session_id"],
+                    resolved_group_number,
+                    final_photo_name,
+                    lock_wait_ms,
+                )
+                baseline_started_at = time.perf_counter()
+                baseline_photo = photo_tracker.find_latest(
+                    route["device_id"],
+                    group_number=resolved_group_number,
+                )
+                timings["baseline_lookup_ms"] = round(
+                    (time.perf_counter() - baseline_started_at) * 1000.0,
+                    1,
+                )
+
+                trigger_started_at = time.perf_counter()
+                result = do_take_photo(
+                    args.server,
+                    session_id=route["session_id"],
+                    device_id=route["device_id"],
+                    question=final_question,
+                    photo_name=final_photo_name,
+                    group_number=resolved_group_number,
+                    tool_name=_norm(tool_name) or args.default_take_photo_tool_name,
+                    tool_timeout=int(timeout),
+                    request_timeout=int(request_timeout),
+                )
+                timings["http_trigger_ms"] = round(
+                    (time.perf_counter() - trigger_started_at) * 1000.0,
+                    1,
+                )
+
+                detect_started_at = time.perf_counter()
+                photo_meta = photo_tracker.resolve_photo_after_take_photo(
+                    device_id=route["device_id"],
+                    requested_photo_name=final_photo_name,
+                    baseline=baseline_photo,
+                    detect_timeout=float(args.photo_detect_timeout),
+                    group_number=resolved_group_number,
+                )
+                timings["photo_detect_ms"] = round(
+                    (time.perf_counter() - detect_started_at) * 1000.0,
+                    1,
+                )
+            finally:
+                device_lock.release()
+
+            timings["total_ms"] = round((time.perf_counter() - tool_started_at) * 1000.0, 1)
             raw_success = bool(result.get("success", False))
             recovered_success = bool(photo_meta.get("is_new_photo", False))
+            LOGGER.info(
+                "xiaozhi_take_photo end: device_id=%s session_id=%s group_number=%s "
+                "photo_name=%s success=%s recovered=%s timings=%s",
+                route["device_id"],
+                route["session_id"],
+                resolved_group_number,
+                final_photo_name,
+                raw_success,
+                recovered_success,
+                json.dumps(timings, ensure_ascii=False, sort_keys=True),
+            )
             return {
                 "success": raw_success or recovered_success,
                 "recovered_after_error": (not raw_success) and recovered_success,
@@ -1244,9 +1310,16 @@ def build_server(args: argparse.Namespace) -> FastMCP:
                 "group_number": resolved_group_number,
                 "photo_meta": photo_meta,
                 "result": result,
+                "timings": timings,
             }
         except Exception as exc:
-            return {"success": False, "message": str(exc)}
+            timings["total_ms"] = round((time.perf_counter() - tool_started_at) * 1000.0, 1)
+            LOGGER.warning(
+                "xiaozhi_take_photo failed: message=%s timings=%s",
+                exc,
+                json.dumps(timings, ensure_ascii=False, sort_keys=True),
+            )
+            return {"success": False, "message": str(exc), "timings": timings}
 
     @mcp.tool(
         name="xiaozhi_get_latest_photo",

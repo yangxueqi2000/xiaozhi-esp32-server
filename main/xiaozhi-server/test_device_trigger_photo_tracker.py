@@ -1,4 +1,5 @@
 import sys
+import threading
 import time
 import types
 import unittest
@@ -28,10 +29,65 @@ sys.modules.setdefault("mcp.server", types.ModuleType("mcp.server"))
 sys.modules.setdefault("mcp.server.fastmcp", fake_fastmcp_module)
 
 
-from device_trigger_mcp_server import PhotoPathTracker
+from device_trigger_mcp_server import PerDevicePhotoLockManager, PhotoPathTracker
 
 
 class PhotoPathTrackerTest(unittest.TestCase):
+    def test_photo_lock_serializes_same_device_only(self):
+        manager = PerDevicePhotoLockManager()
+        first_lock, first_wait_ms = manager.acquire("94:a9:90:28:e8:d8")
+        self.assertLess(first_wait_ms, 50)
+
+        acquired = threading.Event()
+        released = threading.Event()
+        wait_values = []
+
+        def acquire_same_device():
+            second_lock, second_wait_ms = manager.acquire("94:a9:90:28:e8:d8")
+            try:
+                wait_values.append(second_wait_ms)
+                acquired.set()
+            finally:
+                second_lock.release()
+                released.set()
+
+        worker = threading.Thread(target=acquire_same_device)
+        worker.start()
+        try:
+            time.sleep(0.03)
+            self.assertFalse(acquired.is_set())
+        finally:
+            first_lock.release()
+
+        self.assertTrue(released.wait(1.0))
+        worker.join(timeout=1.0)
+        self.assertTrue(wait_values)
+        self.assertGreaterEqual(wait_values[0], 20)
+
+    def test_photo_lock_allows_different_devices_to_enter(self):
+        manager = PerDevicePhotoLockManager()
+        first_lock, _ = manager.acquire("94:a9:90:28:e8:d8")
+
+        acquired = threading.Event()
+        released = threading.Event()
+
+        def acquire_other_device():
+            other_lock, _ = manager.acquire("94:a9:90:28:ea:b4")
+            try:
+                acquired.set()
+            finally:
+                other_lock.release()
+                released.set()
+
+        worker = threading.Thread(target=acquire_other_device)
+        worker.start()
+        try:
+            self.assertTrue(acquired.wait(0.2))
+            self.assertTrue(released.wait(0.2))
+        finally:
+            first_lock.release()
+        worker.join(timeout=1.0)
+
     def test_find_latest_ignores_non_image_files(self):
         with TemporaryDirectory() as vision_dir, TemporaryDirectory() as by_device_dir:
             tracker = PhotoPathTracker(
