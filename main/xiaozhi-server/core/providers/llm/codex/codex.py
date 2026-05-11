@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -1177,8 +1178,19 @@ def _finalize_exp2_uvvis_spectra_guard_text(
     *,
     assistant_text: str,
     called_tools: List[str],
+    experiment_yaml_path: str,
+    experiment_context: Dict[str, str],
+    routing_context: Dict[str, str],
+    guard_started_at: float,
 ) -> str:
     if "uvvis_measure_spectra" in called_tools:
+        return assistant_text
+    if _exp2_uvvis_recent_spectra_artifacts_exist(
+        experiment_yaml_path=experiment_yaml_path,
+        experiment_context=experiment_context,
+        routing_context=routing_context,
+        guard_started_at=guard_started_at,
+    ):
         return assistant_text
     if _exp2_uvvis_spectra_text_claims_start(assistant_text):
         if _text_contains_any(
@@ -1193,6 +1205,74 @@ def _finalize_exp2_uvvis_spectra_guard_text(
             return _EXP2_UVVIS_SPECTRA_NO_CURRENT_RESULT_REPLY
         return _EXP2_UVVIS_SPECTRA_NO_TOOL_REPLY
     return assistant_text
+
+
+def _exp2_uvvis_recent_spectra_artifacts_exist(
+    *,
+    experiment_yaml_path: str,
+    experiment_context: Dict[str, str],
+    routing_context: Dict[str, str],
+    guard_started_at: float,
+) -> bool:
+    yaml_path = _norm_str(
+        (experiment_context or {}).get("experiment_yaml_path") or experiment_yaml_path
+    )
+    if "exp2_uv_vis_analysis" not in yaml_path.replace("\\", "/").lower():
+        return False
+
+    device_id = _norm_str((routing_context or {}).get("device_id", ""))
+    safe_device_id = _safe_filename(device_id) if device_id else ""
+    if not safe_device_id:
+        return False
+
+    try:
+        resolved_yaml = Path(yaml_path)
+        run_dir = (
+            resolved_yaml.parent.parent
+            if resolved_yaml.parent.name.lower() == "configs"
+            else resolved_yaml.parent
+        )
+        device_root = run_dir / "data" / "uv_data_common" / safe_device_id
+    except Exception:
+        return False
+
+    if not device_root.exists():
+        return False
+
+    group_number = _norm_str(
+        (experiment_context or {}).get("experiment_current_group_number", "")
+    )
+    group_dirs: List[Path] = []
+    if group_number:
+        group_dirs.append(device_root / group_number)
+    try:
+        group_dirs.extend(
+            sorted(
+                [p for p in device_root.iterdir() if p.is_dir() and p not in group_dirs],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        )
+    except Exception:
+        pass
+
+    cutoff = max(0.0, float(guard_started_at or 0.0) - 5.0)
+    artifact_names = (
+        "sample_batch_latest_manifest.json",
+        "sample_batch_latest_summary.csv",
+        "sample5_latest_absorbance.csv",
+        "sample5_latest_raw.csv",
+    )
+    for group_dir in group_dirs:
+        spectra_dir = group_dir / "uvvis_measure_spectra"
+        for name in artifact_names:
+            artifact = spectra_dir / name
+            try:
+                if artifact.exists() and artifact.stat().st_mtime >= cutoff:
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def _is_exp2_kinetics_guard_turn(
@@ -3359,6 +3439,7 @@ class _CodexSession:
             exp2_uvvis_prep_guard_active or exp2_uvvis_spectra_guard_active
         )
         exp2_guard_active = exp2_uvvis_guard_active or exp2_kinetics_guard_active
+        exp2_guard_started_at = time.time()
         agent_pending_text = ""
         agent_internal_leak_suppressed = False
 
@@ -3555,6 +3636,10 @@ class _CodexSession:
                 guarded_reply = _finalize_exp2_uvvis_spectra_guard_text(
                     assistant_text=guarded_text_buffer,
                     called_tools=mcp_tools_called,
+                    experiment_yaml_path=self.experiment_yaml_path,
+                    experiment_context=kwargs.get("experiment_context", {}) or {},
+                    routing_context=kwargs.get("routing_context", {}) or {},
+                    guard_started_at=exp2_guard_started_at,
                 )
                 if guarded_reply != guarded_text_buffer and self.log_stream:
                     file_append(
@@ -3642,6 +3727,7 @@ class _CodexSession:
                 emit_events=emit_events,
                 user_text=last_user,
                 experiment_context=experiment_context,
+                routing_context=routing_context,
                 **kwargs,
             ):
                 if isinstance(token, dict) and not emit_events:
