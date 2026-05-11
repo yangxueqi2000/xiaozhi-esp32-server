@@ -122,6 +122,7 @@ _PHOTO_QUESTION_MARKERS = ("?", "？", "吗", "么")
 _EXP2_UVVIS_PREP_STEP_ID = "step_3_uv_vis_shared_dark_air_prep"
 _EXP2_UVVIS_SPECTRA_LOAD_STEP_ID = "step_3_uv_vis_sample1-4_load_cuvette"
 _EXP2_UVVIS_SPECTRA_RECORD_STEP_ID = "step_3_uv_vis_sample1-4_record_data"
+_EXP2_KINETICS_STEP_ID = "step_6_kinetics_combined_measurement"
 _EXP2_UVVIS_PREP_START_PHRASES = (
     "\u5f00\u59cb\u626b\u63cf",
     "\u53ef\u4ee5\u5f00\u59cb",
@@ -229,6 +230,12 @@ _EXP2_KINETICS_ACTION_PHRASES = (
     "\u51c6\u5907\u597d",
     "\u653e\u597d\u4e86",
     "\u505a\u597d\u4e86",
+)
+_EXP2_NEXT_GROUP_PHRASES = (
+    "\u4e0b\u4e00\u7ec4",
+    "\u7ee7\u7eed\u4e0b\u4e00\u7ec4",
+    "\u6362\u4e0b\u4e00\u7ec4",
+    "\u65b0\u4e00\u7ec4",
 )
 
 if os.name == "nt":
@@ -1177,6 +1184,104 @@ def _finalize_exp2_uvvis_spectra_guard_text(
             return _EXP2_UVVIS_SPECTRA_NO_CURRENT_RESULT_REPLY
         return _EXP2_UVVIS_SPECTRA_NO_TOOL_REPLY
     return assistant_text
+
+
+def _is_exp2_kinetics_guard_turn(
+    experiment_context: Dict[str, str],
+    experiment_yaml_path: str,
+) -> bool:
+    yaml_path = _norm_str(
+        experiment_context.get("experiment_yaml_path") or experiment_yaml_path
+    ).replace("\\", "/").lower()
+    if "exp2_uv_vis_analysis" not in yaml_path:
+        return False
+    return (
+        _norm_str(experiment_context.get("experiment_current_step_id", ""))
+        == _EXP2_KINETICS_STEP_ID
+    )
+
+
+def _user_explicitly_requests_next_group(user_text: str) -> bool:
+    text = _normalize_whitespace(user_text)
+    if _text_contains_any(text, _EXP2_NEXT_GROUP_PHRASES):
+        return True
+    return bool(re.search(r"第\s*[一二三四五六七八九十0-9]+\s*组", text))
+
+
+def _exp2_kinetics_text_reverts_to_batch_loading(text: str) -> bool:
+    if not text:
+        return False
+    normalized = _normalize_whitespace(text)
+    has_batch_samples = _text_contains_any(
+        normalized,
+        (
+            "1-5",
+            "1 到 5",
+            "1至5",
+            "一到五",
+            "一至五",
+            "1 到 五",
+        ),
+    )
+    has_loading_language = _text_contains_any(
+        normalized,
+        (
+            "样品位",
+            "真实样品",
+            "装样",
+            "装入",
+            "放入自动五联架",
+            "五联架",
+            "原生参比位放纯水",
+            "最大吸收",
+            "吸收波长",
+            "批量测量",
+            "批量扫描",
+        ),
+    )
+    has_kinetics_placement = _text_contains_any(
+        normalized,
+        (
+            "2 号位",
+            "2号位",
+            "3 号位",
+            "3号位",
+            "4 号位",
+            "4号位",
+            "5 号位",
+            "5号位",
+            "反应液",
+            "参比液",
+            "动力学",
+        ),
+    )
+    return bool(has_batch_samples and has_loading_language and not has_kinetics_placement)
+
+
+def _finalize_exp2_kinetics_guard_text(
+    *,
+    user_text: str,
+    assistant_text: str,
+    called_tools: List[str],
+    experiment_context: Dict[str, str],
+) -> str:
+    if "uvvis_grouped_kinetics_start" in called_tools:
+        return assistant_text
+    if not _exp2_kinetics_text_reverts_to_batch_loading(assistant_text):
+        return assistant_text
+
+    group = _norm_str(experiment_context.get("experiment_current_group_number", ""))
+    group_label = f"第{group}组" if group else "当前组"
+    if _user_explicitly_requests_next_group(user_text):
+        return (
+            f"当前图谱还停在{group_label}动力学测量步骤。"
+            "只有确认本组动力学已经完成后，才能进入下一组 1 到 5 号样品装样；"
+            "如果你要继续下一组，请先明确说“本组动力学完成，进入下一组”。"
+        )
+    return (
+        f"当前图谱在{group_label}动力学测量步骤，不能回退到 1 到 5 号样品装样。"
+        "请保持 2、3、4、5 号位比色皿不动；如果要查进度，我会按当前动力学步骤继续。"
+    )
 
 
 def _accept_server_request(
@@ -2189,10 +2294,15 @@ def _experiment_prompt_block(
             "- A lost previous session is not the same thing as 'the experiment graph interface did not connect'.\n"
             "- Keep any recovery explanation student-facing and minimal; focus on the current experiment action instead of backend causes."
         )
-    if current_step_id == "step_6_kinetics_combined_measurement":
+    if current_step_id == _EXP2_KINETICS_STEP_ID:
+        current_group = _norm_str(
+            experiment_context.get("experiment_current_group_number", "")
+        )
+        group_phrase = f"group {current_group}" if current_group else "the current group"
         parts.append(
             "Exp2 post-kinetics graph gate:\n"
-            "- The trusted graph currently says step_6_kinetics_combined_measurement, group 2. If the student explicitly asks for the third group, next group, or the next max-absorbance/UV-Vis spectra measurement, this is a graph transition request.\n"
+            f"- The trusted graph currently says step_6_kinetics_combined_measurement, {group_phrase}. Treat this as the current kinetics step, not the 1-5 sample loading or max-absorbance spectra step.\n"
+            "- While this step is not explicitly completed, do not guide the student back to 1-5 sample loading, 1-5 max-absorbance spectra, or shared dark/air calibration. Keep the flow on kinetics placement, kinetics progress, or kinetics result.\n"
             "- Before telling the student to load 1-5 samples for the next group, call experiment-graph can_proceed/proceed_to_next_step using the trusted experiment_session_id and wait for ok=true. Only then speak the returned next step.\n"
             "- If proceed_to_next_step fails, do not guide the next group; ask only for the missing confirmation or choose cleanup/retry as appropriate.\n"
             "- If the student only says '进入下一步', '结束这一步', or '继续' after kinetics, ask whether they mean next group or cleanup; do not auto-advance."
@@ -3214,9 +3324,18 @@ class _CodexSession:
                 self.experiment_yaml_path,
             )
         )
+        exp2_kinetics_guard_active = (
+            not exp2_uvvis_prep_guard_active
+            and not exp2_uvvis_spectra_guard_active
+            and _is_exp2_kinetics_guard_turn(
+                kwargs.get("experiment_context", {}) or {},
+                self.experiment_yaml_path,
+            )
+        )
         exp2_uvvis_guard_active = (
             exp2_uvvis_prep_guard_active or exp2_uvvis_spectra_guard_active
         )
+        exp2_guard_active = exp2_uvvis_guard_active or exp2_kinetics_guard_active
         agent_pending_text = ""
         agent_internal_leak_suppressed = False
 
@@ -3233,7 +3352,7 @@ class _CodexSession:
             nonlocal out_buffer, guarded_text_buffer
             if not text:
                 return []
-            if exp2_uvvis_guard_active:
+            if exp2_guard_active:
                 guarded_text_buffer += text
                 return []
             out_buffer += text
@@ -3417,6 +3536,20 @@ class _CodexSession:
                 if guarded_reply != guarded_text_buffer and self.log_stream:
                     file_append(
                         f"\n[{_ts()}] [FILTERED_UNVERIFIED_UVVIS_SPECTRA_REPLY] "
+                        f"tools={','.join(mcp_tools_called) or '-'}\n"
+                    )
+                for visible_delta in emit_final_agent_text(guarded_reply):
+                    yield visible_delta
+            elif exp2_kinetics_guard_active:
+                guarded_reply = _finalize_exp2_kinetics_guard_text(
+                    user_text=user_text or "",
+                    assistant_text=guarded_text_buffer,
+                    called_tools=mcp_tools_called,
+                    experiment_context=kwargs.get("experiment_context", {}) or {},
+                )
+                if guarded_reply != guarded_text_buffer and self.log_stream:
+                    file_append(
+                        f"\n[{_ts()}] [FILTERED_EXP2_KINETICS_STEP_REGRESSION] "
                         f"tools={','.join(mcp_tools_called) or '-'}\n"
                     )
                 for visible_delta in emit_final_agent_text(guarded_reply):
