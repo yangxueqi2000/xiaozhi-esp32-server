@@ -828,6 +828,26 @@ def _text_contains_any(text: str, phrases: Tuple[str, ...]) -> bool:
     return any(phrase.lower() in normalized for phrase in phrases)
 
 
+def _exp2_uvvis_shared_prep_exists(experiment_yaml_path: str) -> bool:
+    yaml_text = _norm_str(experiment_yaml_path)
+    if not yaml_text:
+        return False
+    try:
+        yaml_path = Path(yaml_text).resolve()
+        uv_common_dir = yaml_path.parent.parent / "data" / "uv_data_common"
+        if not uv_common_dir.exists():
+            return False
+        dark_current_exists = any(uv_common_dir.glob("dark_current_*.json"))
+        air_baseline_exists = (
+            (uv_common_dir / "latest_air_blank_manifest.json").exists()
+            or (uv_common_dir / "air_blank_latest.csv").exists()
+            or any(uv_common_dir.glob("air_baseline_*_manifest.json"))
+        )
+        return bool(dark_current_exists and air_baseline_exists)
+    except Exception:
+        return False
+
+
 def _is_exp2_uvvis_prep_guard_turn(
     user_text: str,
     experiment_context: Dict[str, str],
@@ -844,6 +864,8 @@ def _is_exp2_uvvis_prep_guard_turn(
     current_step_id = _norm_str(
         experiment_context.get("experiment_current_step_id", "")
     )
+    if current_step_id == "" and _exp2_uvvis_shared_prep_exists(experiment_yaml_path):
+        return False
     # When graph prewarm has not attached yet, this step id is empty. Treat the
     # first UV-Vis scan authorization as guarded instead of trusting memory.
     return current_step_id in {"", _EXP2_UVVIS_PREP_STEP_ID}
