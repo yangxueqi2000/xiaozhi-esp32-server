@@ -1241,6 +1241,8 @@ class ConnectionHandler:
         include_session_context = bool(wait_result) or bool(
             self.experiment_prewarm_session_adopted
         )
+        if not include_session_context and self.experiment_resume_recovery_required:
+            include_session_context = True
         if not include_session_context and self._experiment_prewarm_is_minimal_ready():
             # After a timeout first turn, prewarm may finish in the background a
             # moment later. Subsequent turns should keep reusing that trusted
