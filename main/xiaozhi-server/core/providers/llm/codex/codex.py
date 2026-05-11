@@ -1,4 +1,4 @@
-import json
+﻿import json
 import locale
 import os
 import queue
@@ -164,6 +164,22 @@ _EXP2_UVVIS_PREP_NO_TOOL_REPLY = (
     "\u7a7a\u6c14\u80fd\u91cf\u6821\u6b63\uff0c\u5148\u4e0d\u653e\u6837\u54c1\u3002"
     "\u8bf7\u786e\u8ba4\u4f4d\u7f6e\u90fd\u7a7a\u540e\u518d\u8bf4\u201c\u90fd\u7a7a\u4e86\uff0c"
     "\u5f00\u59cb\u626b\u63cf\u201d\u3002"
+)
+_EXP2_KINETICS_DECLARATION_PHRASES = (
+    "\u52a8\u529b\u5b66",
+    "\u52a8\u529b\u5b66\u6d4b\u91cf",
+)
+_EXP2_KINETICS_ACTION_PHRASES = (
+    "\u7ee7\u7eed",
+    "\u5f00\u59cb",
+    "\u626b\u63cf",
+    "\u6d4b\u91cf",
+    "\u73b0\u5728",
+    "\u8fdb\u884c",
+    "\u53ef\u4ee5",
+    "\u51c6\u5907\u597d",
+    "\u653e\u597d\u4e86",
+    "\u505a\u597d\u4e86",
 )
 
 if os.name == "nt":
@@ -820,6 +836,71 @@ def _photo_authorization_hot_path_prompt_block(user_text: str) -> str:
         "- After the photo tool succeeds, write the photo result to experiment_graph "
         "if the current experiment step requires a graph record; only then give a "
         "brief confirmation or the next graph-approved action."
+    )
+
+
+def _exp2_recent_kinetics_scan_prompt_block(
+    history: List[Dict],
+    user_text: str,
+    experiment_yaml_path: str,
+) -> str:
+    yaml_path = str(experiment_yaml_path or "").replace("\\", "/").lower()
+    if "exp2_uv_vis_analysis" not in yaml_path:
+        return ""
+
+    text = str(user_text or "").strip()
+    user_declares_kinetics = (
+        any(phrase in text for phrase in _EXP2_KINETICS_DECLARATION_PHRASES)
+        and (
+            not _EXP2_KINETICS_ACTION_PHRASES
+            or any(phrase in text for phrase in _EXP2_KINETICS_ACTION_PHRASES)
+        )
+    )
+    if user_declares_kinetics:
+        return (
+            "High priority exp2 local context:\n"
+            "- The latest student message explicitly declares that the current real-world step is the kinetics measurement.\n"
+            "- Trust this explicit recovery cue over stale conversation history or missing graph state.\n"
+            "- Do not route back to shared dark-current/air-baseline prep and do not ask for all 1-5 positions to be empty.\n"
+            "- If the student has not just confirmed placement, ask only for the kinetics placement confirmation: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
+            "- If the student says start/ready after that confirmation, call the UV-Vis kinetics tool according to the exp2 local prompt, then write the result to experiment_graph before speaking the next step."
+        )
+
+    if not any(phrase in text for phrase in _EXP2_UVVIS_PREP_START_PHRASES):
+        return ""
+
+    recent_parts: List[str] = []
+    for message in history[-8:]:
+        content = str(message.get("content") or "").strip()
+        if content:
+            recent_parts.append(content)
+    recent = "\n".join(recent_parts)
+    if not recent:
+        return ""
+
+    kinetics_markers = (
+        "\u52a8\u529b\u5b66",
+        "2\u53f7\u4f4d",
+        "2 \u53f7\u4f4d",
+        "3\u53f7\u4f4d",
+        "3 \u53f7\u4f4d",
+        "4\u53f7\u4f4d",
+        "4 \u53f7\u4f4d",
+        "5\u53f7\u4f4d",
+        "5 \u53f7\u4f4d",
+        "\u53cd\u5e94\u6db2",
+        "\u53c2\u6bd4\u6db2",
+    )
+    if not any(marker in recent for marker in kinetics_markers):
+        return ""
+
+    return (
+        "High priority exp2 local context:\n"
+        "- The recent conversation was about the kinetics measurement setup, not the shared dark-current/air-baseline prep.\n"
+        "- Interpret the latest start/ready message as authorization to continue the current kinetics measurement flow.\n"
+        "- Do not ask for 1-5 sample positions to be empty, do not call shared dark-current prep, and do not say shared dark current or air baseline is complete.\n"
+        "- Use the current kinetics placement: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
+        "- If all placements were just confirmed, call the UV-Vis kinetics tool according to the exp2 local prompt."
     )
 
 
@@ -2534,6 +2615,17 @@ class _CodexSession:
                 last_user = f"{last_user}\n\n{bootstrap_block}"
             else:
                 last_user = bootstrap_block
+
+        kinetics_scan_block = _exp2_recent_kinetics_scan_prompt_block(
+            history,
+            strategy_user_text,
+            self.experiment_yaml_path,
+        )
+        if kinetics_scan_block:
+            if last_user:
+                last_user = f"{last_user}\n\n{kinetics_scan_block}"
+            else:
+                last_user = kinetics_scan_block
 
         photo_hot_path_block = _photo_authorization_hot_path_prompt_block(
             strategy_user_text
