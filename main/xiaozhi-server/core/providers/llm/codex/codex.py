@@ -216,6 +216,14 @@ _EXP2_UVVIS_SPECTRA_NO_CURRENT_RESULT_REPLY = (
     "\u6211\u4e0d\u80fd\u7528\u4e0a\u4e00\u7ec4\u6570\u636e\u4ee3\u66ff\u3002"
     "\u4f60\u8bf4\u201c\u5f00\u59cb\u626b\u63cf\u201d\uff0c\u6211\u5c31\u8c03\u7528\u4eea\u5668\u626b\u8fd9\u4e00\u7ec4\u3002"
 )
+_EXP2_KINETICS_NO_TOOL_REPLY = (
+    "\u521a\u624d\u6ca1\u6709\u771f\u6b63\u542f\u52a8\u4eea\u5668\u7aef\u52a8\u529b\u5b66\u6d4b\u91cf\uff0c"
+    "\u90a3\u53e5\u201c\u5df2\u7ecf\u5f00\u59cb\u201d\u4e0d\u4f5c\u6570\u3002"
+    "\u8bf7\u786e\u8ba4 2 \u53f7\u4f4d\u662f 2 \u53f7\u53cd\u5e94\u6db2\uff0c3 \u53f7\u4f4d\u662f 2 \u53f7\u53c2\u6bd4\u6db2\uff0c"
+    "4 \u53f7\u4f4d\u662f 4 \u53f7\u53cd\u5e94\u6db2\uff0c5 \u53f7\u4f4d\u662f 4 \u53f7\u53c2\u6bd4\u6db2\uff0c"
+    "\u539f\u751f\u53c2\u6bd4\u4f4d\u662f\u7eaf\u6c34\u3002\u90fd\u786e\u8ba4\u540e\u518d\u8bf4\u201c\u5f00\u59cb\u626b\u63cf\u201d\uff0c"
+    "\u6211\u4f1a\u5148\u542f\u52a8 UV-Vis \u5de5\u5177\uff0c\u542f\u52a8\u6210\u529f\u540e\u518d\u786e\u8ba4\u3002"
+)
 _EXP2_KINETICS_DECLARATION_PHRASES = (
     "\u52a8\u529b\u5b66",
     "\u52a8\u529b\u5b66\u6d4b\u91cf",
@@ -1276,6 +1284,8 @@ def _exp2_uvvis_recent_spectra_artifacts_exist(
 
 
 def _is_exp2_kinetics_guard_turn(
+    user_text: str,
+    history: List[Dict],
     experiment_context: Dict[str, str],
     experiment_yaml_path: str,
 ) -> bool:
@@ -1284,9 +1294,28 @@ def _is_exp2_kinetics_guard_turn(
     ).replace("\\", "/").lower()
     if "exp2_uv_vis_analysis" not in yaml_path:
         return False
-    return (
+    if (
         _norm_str(experiment_context.get("experiment_current_step_id", ""))
         == _EXP2_KINETICS_STEP_ID
+    ):
+        return True
+
+    if (
+        _text_contains_any(user_text, _EXP2_UVVIS_PREP_START_PHRASES)
+        or _text_contains_any(user_text, _EXP2_KINETICS_ACTION_PHRASES)
+    ) and _recent_history_mentions_exp2_kinetics_placement(history):
+        return True
+
+    # A restart or failed graph recovery can leave the graph parked on the
+    # spectra load step while the real-world conversation is explicitly about
+    # kinetics. In that case, protect against "spoken-only" fake starts too.
+    return bool(
+        _exp2_recent_kinetics_scan_prompt_block(
+            history,
+            user_text,
+            experiment_yaml_path,
+            experiment_context,
+        )
     )
 
 
@@ -1351,15 +1380,158 @@ def _exp2_kinetics_text_reverts_to_batch_loading(text: str) -> bool:
     return bool(has_batch_samples and has_loading_language and not has_kinetics_placement)
 
 
+def _recent_history_mentions_exp2_kinetics_placement(history: List[Dict]) -> bool:
+    recent_parts: List[str] = []
+    for message in (history or [])[-8:]:
+        content = str(message.get("content") or "").strip()
+        if content:
+            recent_parts.append(content)
+    recent = _normalize_whitespace("\n".join(recent_parts))
+    if not recent:
+        return False
+    has_kinetics = _text_contains_any(recent, ("动力学", "反应液", "参比液"))
+    has_positions = _text_contains_any(
+        recent,
+        (
+            "2 号位",
+            "2号位",
+            "3 号位",
+            "3号位",
+            "4 号位",
+            "4号位",
+            "5 号位",
+            "5号位",
+        ),
+    )
+    return bool(has_kinetics and has_positions)
+
+
+def _exp2_kinetics_text_claims_start(text: str) -> bool:
+    if not text:
+        return False
+    normalized = _normalize_whitespace(text)
+    return _text_contains_any(
+        normalized,
+        (
+            "动力学测量已经启动",
+            "动力学测量已启动",
+            "动力学测量已经开始",
+            "动力学测量已开始",
+            "后台正在连续记录",
+            "后台正在记录",
+            "连续记录 34",
+            "连续记录34",
+            "34 分钟开始",
+            "34分钟开始",
+            "已经在后台连续记录",
+            "已开始后台",
+        ),
+    )
+
+
+def _find_running_exp2_grouped_kinetics_progress(
+    *,
+    experiment_yaml_path: str,
+    routing_context: Dict[str, str],
+    experiment_context: Dict[str, str],
+) -> Optional[Dict[str, Any]]:
+    yaml_text = _norm_str(experiment_yaml_path)
+    if not yaml_text:
+        return None
+    try:
+        yaml_path = Path(yaml_text).resolve()
+        uv_common_dir = yaml_path.parent.parent / "data" / "uv_data_common"
+        if not uv_common_dir.exists():
+            return None
+        device_id = _norm_str((routing_context or {}).get("device_id", ""))
+        group = _norm_str((experiment_context or {}).get("experiment_current_group_number", ""))
+        candidate_roots: List[Path] = []
+        if device_id:
+            device_root = uv_common_dir / device_id
+            if group:
+                candidate_roots.append(device_root / group / "uvvis_measure_kinetic")
+            candidate_roots.extend(device_root.glob("*/uvvis_measure_kinetic"))
+        candidate_roots.extend(uv_common_dir.glob("*/*/uvvis_measure_kinetic"))
+
+        candidates: List[Tuple[float, Path]] = []
+        seen: set[Path] = set()
+        for root in candidate_roots:
+            progress_path = (root / "kinetics_progress.json").resolve()
+            if progress_path in seen or not progress_path.is_file():
+                continue
+            seen.add(progress_path)
+            try:
+                candidates.append((progress_path.stat().st_mtime, progress_path))
+            except OSError:
+                continue
+
+        for _mtime, progress_path in sorted(candidates, key=lambda item: item[0], reverse=True):
+            try:
+                payload = json.loads(progress_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            phase = _norm_str(payload.get("phase", ""))
+            if "running" not in phase:
+                continue
+            point_count = payload.get("point_count")
+            completed_points = 0
+            for group_payload in payload.get("sample_groups", []) or []:
+                if isinstance(group_payload, dict):
+                    try:
+                        completed_points = max(
+                            completed_points,
+                            int(group_payload.get("completed_points") or 0),
+                        )
+                    except Exception:
+                        pass
+            result = dict(payload)
+            result["_progress_json"] = str(progress_path)
+            result["_group_number"] = progress_path.parent.parent.name
+            result["_completed_points"] = completed_points
+            result["_point_count"] = point_count
+            return result
+    except Exception:
+        return None
+    return None
+
+
+def _format_running_exp2_kinetics_reply(progress: Dict[str, Any]) -> str:
+    group_number = _norm_str(progress.get("_group_number", ""))
+    completed = progress.get("_completed_points")
+    total = progress.get("_point_count")
+    group_label = f"第{group_number}组" if group_number else "当前组"
+    if completed is not None and total:
+        progress_text = f"现在已记录 {completed}/{total} 个时间点。"
+    else:
+        progress_text = "现在正在连续记录。"
+    return (
+        f"{group_label}动力学测量已经在仪器端运行，{progress_text}"
+        "请先不要移动 2、3、4、5 号位的比色皿；后续我会按当前动力学任务继续查进度。"
+    )
+
+
 def _finalize_exp2_kinetics_guard_text(
     *,
     user_text: str,
     assistant_text: str,
     called_tools: List[str],
     experiment_context: Dict[str, str],
+    experiment_yaml_path: str,
+    routing_context: Dict[str, str],
 ) -> str:
     if "uvvis_grouped_kinetics_start" in called_tools:
         return assistant_text
+    running_progress = _find_running_exp2_grouped_kinetics_progress(
+        experiment_yaml_path=experiment_yaml_path,
+        routing_context=routing_context,
+        experiment_context=experiment_context,
+    )
+    if running_progress is not None:
+        return _format_running_exp2_kinetics_reply(running_progress)
+    if _exp2_kinetics_text_claims_start(assistant_text):
+        return _EXP2_KINETICS_NO_TOOL_REPLY
     if _user_explicitly_requests_cleanup(user_text):
         if "redirect_to_step" in called_tools:
             return assistant_text
@@ -3419,18 +3591,20 @@ class _CodexSession:
             kwargs.get("experiment_context", {}) or {},
             self.experiment_yaml_path,
         )
-        exp2_uvvis_spectra_guard_active = (
+        exp2_kinetics_guard_active = (
             not exp2_uvvis_prep_guard_active
-            and _is_exp2_uvvis_spectra_guard_turn(
+            and _is_exp2_kinetics_guard_turn(
                 user_text,
+                kwargs.get("dialogue_history", []) or [],
                 kwargs.get("experiment_context", {}) or {},
                 self.experiment_yaml_path,
             )
         )
-        exp2_kinetics_guard_active = (
+        exp2_uvvis_spectra_guard_active = (
             not exp2_uvvis_prep_guard_active
-            and not exp2_uvvis_spectra_guard_active
-            and _is_exp2_kinetics_guard_turn(
+            and not exp2_kinetics_guard_active
+            and _is_exp2_uvvis_spectra_guard_turn(
+                user_text,
                 kwargs.get("experiment_context", {}) or {},
                 self.experiment_yaml_path,
             )
@@ -3654,6 +3828,8 @@ class _CodexSession:
                     assistant_text=guarded_text_buffer,
                     called_tools=mcp_tools_called,
                     experiment_context=kwargs.get("experiment_context", {}) or {},
+                    experiment_yaml_path=self.experiment_yaml_path,
+                    routing_context=kwargs.get("routing_context", {}) or {},
                 )
                 if guarded_reply != guarded_text_buffer and self.log_stream:
                     file_append(
@@ -3720,12 +3896,13 @@ class _CodexSession:
             )
             if not prompt_text:
                 return
-            _, last_user, _ = _split_dialogue(dialogue)
+            history, last_user, _ = _split_dialogue(dialogue)
             emit_events = kwargs.pop("emit_events", self.emit_events)
             for token in self._stream_turn(
                 prompt_text,
                 emit_events=emit_events,
                 user_text=last_user,
+                dialogue_history=history,
                 experiment_context=experiment_context,
                 routing_context=routing_context,
                 **kwargs,
