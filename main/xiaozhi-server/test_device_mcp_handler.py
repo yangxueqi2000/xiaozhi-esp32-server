@@ -156,6 +156,48 @@ class DeviceMCPHandlerTest(unittest.IsolatedAsyncioTestCase):
             captured["tool_args"],
         )
 
+    async def test_take_photo_dedupes_same_photo_for_same_utterance(self):
+        config = {
+            "server": {"auth_key": "demo", "http_port": 8003},
+        }
+        conn = _FakeConn("session-1", "94:a9:90:27:3c:84")
+        conn._latest_clean_user_utterance_text = "我想重新拍一张二号样品的照片。"
+        conn._latest_clean_user_utterance_logged_at = 12345.0
+        ws_server = _FakeWSServer(conn)
+        handler = DeviceMCPHandler(config, ws_server)
+        call_count = 0
+
+        async def fake_call_mcp_tool(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return {"ok": True}
+
+        request_body = {
+            "session_id": "session-1",
+            "device_id": "94:a9:90:27:3c:84",
+            "question": "Please photograph sample 2.",
+            "photo_name": "2号样品照片_20260513_163621",
+            "timeout": 5,
+        }
+
+        with patch(
+            "core.api.device_mcp_handler.call_mcp_tool",
+            fake_call_mcp_tool,
+        ):
+            first_response = await handler.handle_post(_FakeRequest(request_body))
+            second_body = dict(request_body)
+            second_body["photo_name"] = "2号样品照片_20260513_163657"
+            second_response = await handler.handle_post(_FakeRequest(second_body))
+
+        first_payload = json.loads(first_response.text)
+        second_payload = json.loads(second_response.text)
+        self.assertEqual(200, first_response.status)
+        self.assertEqual(200, second_response.status)
+        self.assertTrue(first_payload["success"])
+        self.assertTrue(second_payload["success"])
+        self.assertTrue(second_payload["duplicate_suppressed"])
+        self.assertEqual(1, call_count)
+
     async def test_take_photo_rejects_disconnected_websocket_before_timeout(self):
         config = {
             "server": {"auth_key": "demo", "http_port": 8003},

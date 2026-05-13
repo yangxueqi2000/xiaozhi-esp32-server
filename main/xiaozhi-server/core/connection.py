@@ -1053,6 +1053,9 @@ class ConnectionHandler:
         if not self.device_id or not normalized_text:
             return ""
 
+        self._latest_clean_user_utterance_text = normalized_text
+        self._latest_clean_user_utterance_logged_at = time.time()
+
         snapshot = self._experiment_user_utterance_snapshot()
         log_path = append_user_utterance_log(
             self.config,

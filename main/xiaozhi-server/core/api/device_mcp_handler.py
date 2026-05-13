@@ -1,6 +1,7 @@
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import uuid
 import asyncio
@@ -28,6 +29,7 @@ class DeviceMCPHandler(BaseHandler):
         self.preview_dir = os.path.join(data_dir, "preview_files")
         os.makedirs(self.preview_dir, exist_ok=True)
         self._mcp_refresh_lock = asyncio.Lock()
+        self._recent_take_photo_by_utterance = {}
 
     def _project_root(self) -> str:
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -198,6 +200,128 @@ class DeviceMCPHandler(BaseHandler):
             20,
         )
         return _coerce_positive_int(provided_timeout, configured_default)
+
+    def _resolve_same_utterance_photo_dedupe_window_seconds(self) -> float:
+        shortcut_cfg = self.config.get("device_mcp_shortcuts", {}) or {}
+        raw_value = shortcut_cfg.get(
+            "server_photo_same_utterance_dedupe_window_seconds",
+            180.0,
+        )
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return 180.0
+        return max(0.0, value)
+
+    def _extract_photo_name_from_question_meta(self, question: str) -> str:
+        marker = "[XIAOZHI_META]"
+        text = str(question or "")
+        if marker not in text:
+            return ""
+        meta_text = text.split(marker, 1)[1].strip()
+        if not meta_text:
+            return ""
+        try:
+            meta = json.loads(meta_text)
+        except Exception:
+            return ""
+        if not isinstance(meta, dict):
+            return ""
+        return str(meta.get("photo_name", "") or "").strip()
+
+    def _photo_dedupe_stem(self, photo_name: str, question: str = "") -> str:
+        name = str(photo_name or "").strip()
+        if not name:
+            name = self._extract_photo_name_from_question_meta(question)
+        if not name:
+            return ""
+        stem = os.path.splitext(os.path.basename(name))[0]
+        return re.sub(r"_[0-9]{8}_[0-9]{6}$", "", stem).strip()
+
+    def _latest_utterance_token(self, conn) -> tuple[str, float]:
+        text = str(getattr(conn, "_latest_clean_user_utterance_text", "") or "").strip()
+        try:
+            logged_at = float(
+                getattr(conn, "_latest_clean_user_utterance_logged_at", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            logged_at = 0.0
+        return text, logged_at
+
+    def _photo_dedupe_key(
+        self,
+        conn,
+        *,
+        device_id: str,
+        photo_name: str,
+        question: str,
+    ) -> tuple[str, str, str, str] | None:
+        photo_stem = self._photo_dedupe_stem(photo_name, question)
+        if not photo_stem:
+            return None
+        utterance_text, utterance_logged_at = self._latest_utterance_token(conn)
+        if not utterance_text or utterance_logged_at <= 0:
+            return None
+        return (
+            str(device_id or "").strip(),
+            photo_stem,
+            utterance_text,
+            f"{utterance_logged_at:.6f}",
+        )
+
+    def _recent_take_photo_duplicate(
+        self,
+        conn,
+        *,
+        device_id: str,
+        photo_name: str,
+        question: str,
+    ) -> dict | None:
+        window_seconds = self._resolve_same_utterance_photo_dedupe_window_seconds()
+        if window_seconds <= 0:
+            return None
+
+        key = self._photo_dedupe_key(
+            conn,
+            device_id=device_id,
+            photo_name=photo_name,
+            question=question,
+        )
+        if key is None:
+            return None
+        entry = self._recent_take_photo_by_utterance.get(key)
+        if not isinstance(entry, dict):
+            return None
+        try:
+            captured_at = float(entry.get("captured_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            captured_at = 0.0
+        if captured_at <= 0 or time.time() - captured_at > window_seconds:
+            self._recent_take_photo_by_utterance.pop(key, None)
+            return None
+        return entry
+
+    def _remember_take_photo_result(
+        self,
+        conn,
+        *,
+        device_id: str,
+        photo_name: str,
+        question: str,
+        payload: dict,
+    ) -> None:
+        key = self._photo_dedupe_key(
+            conn,
+            device_id=device_id,
+            photo_name=photo_name,
+            question=question,
+        )
+        if key is None:
+            return
+        self._recent_take_photo_by_utterance[key] = {
+            "captured_at": time.time(),
+            "payload": dict(payload),
+        }
 
     def _list_saved_device_photo_items(self, device_id: str, group_number=None) -> list[dict]:
         data_root = self._derive_experiment_data_root()
@@ -593,6 +717,23 @@ class DeviceMCPHandler(BaseHandler):
                 return response
 
             capture_device_id = str(conn.device_id or device_id or "").strip()
+            duplicate_entry = self._recent_take_photo_duplicate(
+                conn,
+                device_id=capture_device_id,
+                photo_name=photo_name,
+                question=question,
+            )
+            if duplicate_entry:
+                payload = dict(duplicate_entry.get("payload", {}) or {})
+                payload["duplicate_suppressed"] = True
+                payload["message"] = "duplicate photo request suppressed for same utterance"
+                self.logger.bind(tag=TAG).warning(
+                    "duplicate take_photo suppressed for same utterance: "
+                    f"device_id={capture_device_id}, photo_name={photo_name or self._extract_photo_name_from_question_meta(question)}"
+                )
+                response = self._json_response(payload)
+                return response
+
             baseline_photo = self._find_latest_saved_photo(
                 capture_device_id,
                 group_number=group_number,
@@ -647,22 +788,28 @@ class DeviceMCPHandler(BaseHandler):
                 capture_device_id,
                 group_number=group_number,
             )
-            response = self._json_response(
-                {
-                    "success": True,
-                    "tool": tool_name_raw,
-                    "tool_sanitized": tool_name,
-                    "session_id": conn.session_id,
-                    "device_id": conn.device_id,
-                    "group_number": group_number,
-                    "requested_photo_name": photo_name,
-                    "result": result,
-                    "saved_photo_path": str(
-                        saved_photo.get("local_path", "") or ""
-                    ).strip(),
-                    "photo_meta": saved_photo,
-                }
+            payload = {
+                "success": True,
+                "tool": tool_name_raw,
+                "tool_sanitized": tool_name,
+                "session_id": conn.session_id,
+                "device_id": conn.device_id,
+                "group_number": group_number,
+                "requested_photo_name": photo_name,
+                "result": result,
+                "saved_photo_path": str(
+                    saved_photo.get("local_path", "") or ""
+                ).strip(),
+                "photo_meta": saved_photo,
+            }
+            self._remember_take_photo_result(
+                conn,
+                device_id=capture_device_id,
+                photo_name=photo_name,
+                question=question,
+                payload=payload,
             )
+            response = self._json_response(payload)
         except ValueError as e:
             response = self._json_response(
                 {"success": False, "message": str(e)},
