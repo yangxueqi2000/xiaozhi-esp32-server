@@ -397,6 +397,247 @@ def _enrich_experiment_step_meta_from_yaml(conn, step_meta: dict) -> dict:
     return meta
 
 
+def _build_experiment_step_meta_from_yaml_step(
+    step: dict,
+    *,
+    prefer_first_substep: bool = False,
+) -> dict:
+    if not isinstance(step, dict):
+        return {}
+
+    meta = {
+        "step_id": str(step.get("id", "") or "").strip(),
+        "title": str(step.get("title", "") or "").strip(),
+        "instruction": _extract_yaml_step_prompt_value(step, "instruction"),
+        "description": str(step.get("description", "") or "").strip(),
+        "safety": _extract_yaml_step_prompt_value(step, "safety"),
+        "tip": _extract_yaml_step_prompt_value(step, "tips"),
+    }
+
+    if prefer_first_substep and _yaml_step_uses_local_substeps(step):
+        for substep in _extract_yaml_substeps(step):
+            substep_instruction = _first_nonempty_text(
+                substep.get("instruction", ""),
+                substep.get("description", ""),
+            )
+            if substep_instruction:
+                meta["instruction"] = substep_instruction
+                break
+
+    if not meta["instruction"]:
+        meta["instruction"] = _first_nonempty_text(
+            meta["description"],
+            meta["title"],
+        )
+    return meta
+
+
+def _extract_yaml_substeps(step: dict) -> list[dict]:
+    if not isinstance(step, dict):
+        return []
+
+    raw_substeps = step.get("substeps")
+    if not isinstance(raw_substeps, list):
+        return []
+
+    substeps = []
+    for substep in raw_substeps:
+        if not isinstance(substep, dict):
+            continue
+        instruction = _first_nonempty_text(
+            substep.get("instruction", ""),
+            substep.get("description", ""),
+            substep.get("title", ""),
+        )
+        if instruction:
+            substeps.append(substep)
+    return substeps
+
+
+def _yaml_step_declares_fast_path_mode(step: dict) -> bool:
+    if not isinstance(step, dict):
+        return False
+
+    interaction = step.get("interaction") if isinstance(step.get("interaction"), dict) else {}
+    return bool(str(interaction.get("fast_path_mode", "") or "").strip())
+
+
+def _yaml_step_uses_local_substeps(step: dict) -> bool:
+    return bool(_extract_yaml_substeps(step)) and not _yaml_step_declares_fast_path_mode(step)
+
+
+def _clear_local_experiment_substep_state(conn) -> None:
+    conn._experiment_local_substep_step_id = ""
+    conn._experiment_local_substep_index = 0
+
+
+def _get_local_experiment_substep_index(
+    conn,
+    step_id: str,
+    *,
+    substep_count: int,
+) -> int:
+    target_step_id = str(step_id or "").strip()
+    if not target_step_id or substep_count <= 0:
+        return 0
+
+    stored_step_id = str(
+        getattr(conn, "_experiment_local_substep_step_id", "") or ""
+    ).strip()
+    stored_index = getattr(conn, "_experiment_local_substep_index", 0)
+    if stored_step_id != target_step_id or not isinstance(stored_index, int):
+        return 0
+    return max(0, min(stored_index, substep_count - 1))
+
+
+def _set_local_experiment_substep_index(
+    conn,
+    step_id: str,
+    index: int,
+    *,
+    substep_count: int,
+) -> int:
+    target_step_id = str(step_id or "").strip()
+    if not target_step_id or substep_count <= 0:
+        _clear_local_experiment_substep_state(conn)
+        return 0
+
+    clamped_index = max(0, min(int(index), substep_count - 1))
+    conn._experiment_local_substep_step_id = target_step_id
+    conn._experiment_local_substep_index = clamped_index
+    return clamped_index
+
+
+def _build_experiment_step_meta_from_yaml_substep(
+    step_meta: dict,
+    substep: dict,
+    *,
+    index: int,
+    count: int,
+) -> dict:
+    meta = dict(step_meta or {})
+    if not isinstance(substep, dict):
+        return meta
+
+    substep_title = str(substep.get("title", "") or "").strip()
+    substep_instruction = _first_nonempty_text(
+        substep.get("instruction", ""),
+        substep.get("description", ""),
+    )
+    substep_description = str(substep.get("description", "") or "").strip()
+
+    if substep_title:
+        meta["title"] = substep_title
+    if substep_instruction:
+        meta["instruction"] = substep_instruction
+    if substep_description:
+        meta["description"] = substep_description
+
+    meta["substep_index"] = index + 1
+    meta["substep_count"] = count
+    return meta
+
+
+def _resolve_local_experiment_substep_view(conn, step_meta: dict) -> dict:
+    base_meta = dict(step_meta or {})
+    step_id = str(
+        base_meta.get("step_id", "") or getattr(conn, "experiment_current_step_id", "") or ""
+    ).strip()
+    result = {
+        "enabled": False,
+        "step_id": step_id,
+        "index": 0,
+        "count": 0,
+        "has_next": False,
+        "step_meta": base_meta,
+    }
+    if not step_id:
+        return result
+
+    yaml_step = _resolve_experiment_step_by_id(conn).get(step_id)
+    if not _yaml_step_uses_local_substeps(yaml_step):
+        if str(getattr(conn, "_experiment_local_substep_step_id", "") or "").strip() == step_id:
+            _clear_local_experiment_substep_state(conn)
+        return result
+
+    substeps = _extract_yaml_substeps(yaml_step)
+    if not substeps:
+        return result
+
+    current_index = _get_local_experiment_substep_index(
+        conn,
+        step_id,
+        substep_count=len(substeps),
+    )
+    current_index = _set_local_experiment_substep_index(
+        conn,
+        step_id,
+        current_index,
+        substep_count=len(substeps),
+    )
+    result.update(
+        {
+            "enabled": True,
+            "index": current_index,
+            "count": len(substeps),
+            "has_next": current_index < len(substeps) - 1,
+            "step_meta": _build_experiment_step_meta_from_yaml_substep(
+                base_meta,
+                substeps[current_index],
+                index=current_index,
+                count=len(substeps),
+            ),
+        }
+    )
+    return result
+
+
+def _advance_local_experiment_substep_view(conn, step_meta: dict) -> tuple[dict, bool]:
+    current_view = _resolve_local_experiment_substep_view(conn, step_meta)
+    if not current_view.get("enabled") or not current_view.get("has_next"):
+        return current_view, False
+
+    _set_local_experiment_substep_index(
+        conn,
+        current_view.get("step_id", ""),
+        int(current_view.get("index", 0)) + 1,
+        substep_count=int(current_view.get("count", 0)),
+    )
+    return _resolve_local_experiment_substep_view(conn, step_meta), True
+
+
+def _load_fallback_experiment_step_meta_from_yaml(
+    conn,
+    *,
+    step_id: str = "",
+    prefer_first_substep: bool = False,
+) -> dict:
+    steps = _resolve_experiment_yaml_steps(conn)
+    if not steps:
+        return {}
+
+    target_step_id = str(step_id or "").strip()
+    selected_step = None
+    if target_step_id:
+        for step in steps:
+            if str(step.get("id", "") or "").strip() == target_step_id:
+                selected_step = step
+                break
+
+    if selected_step is None:
+        selected_step = steps[0]
+
+    meta = _build_experiment_step_meta_from_yaml_step(
+        selected_step,
+        prefer_first_substep=prefer_first_substep,
+    )
+    if meta.get("step_id") and not str(
+        getattr(conn, "experiment_current_step_id", "") or ""
+    ).strip():
+        conn.experiment_current_step_id = meta["step_id"]
+    return meta
+
+
 def _merge_experiment_step_meta(primary: dict, fallback: dict) -> dict:
     merged = dict(fallback or {})
     for key, value in (primary or {}).items():
@@ -1152,6 +1393,8 @@ async def _reset_experiment_fresh_start_context(conn) -> None:
         if prompt and hasattr(dialogue, "update_system_message"):
             dialogue.update_system_message(prompt)
 
+    _clear_local_experiment_substep_state(conn)
+
     for attr_name, reset_value in (
         ("experiment_session_id", ""),
         ("experiment_current_step_id", ""),
@@ -1581,6 +1824,13 @@ def _is_experiment_fast_path_available(conn) -> bool:
     return bool(step_meta.get("instruction") or step_meta.get("title"))
 
 
+def _is_experiment_opening_fast_path_enabled(conn) -> bool:
+    raw_enabled = conn.config.get("experiment_opening_fast_path_enabled", True)
+    if isinstance(raw_enabled, str):
+        return raw_enabled.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw_enabled)
+
+
 def _resolve_experiment_fast_path_allowed_actions(conn) -> set[str] | None:
     raw_value = conn.config.get("experiment_fast_path_allowed_actions")
     if raw_value in (None, "", []):
@@ -1674,9 +1924,16 @@ async def _load_experiment_step_meta(conn) -> dict:
     if step_meta.get("instruction") or step_meta.get("title"):
         return step_meta
 
+    current_step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     if not session_id:
-        return step_meta
+        fallback_meta = _load_fallback_experiment_step_meta_from_yaml(
+            conn,
+            step_id=current_step_id,
+            prefer_first_substep=True,
+        )
+        return _merge_experiment_step_meta(step_meta, fallback_meta)
 
     try:
         step_payload, progress_payload = await asyncio.gather(
@@ -1694,7 +1951,12 @@ async def _load_experiment_step_meta(conn) -> dict:
             ),
         )
     except Exception:
-        return step_meta
+        fallback_meta = _load_fallback_experiment_step_meta_from_yaml(
+            conn,
+            step_id=current_step_id,
+            prefer_first_substep=False,
+        )
+        return _merge_experiment_step_meta(step_meta, fallback_meta)
 
     conn.experiment_current_step = step_payload
     conn.experiment_progress_summary = progress_payload
@@ -1716,6 +1978,13 @@ async def _load_experiment_step_meta(conn) -> dict:
 
 
 async def _load_experiment_overview_title(conn) -> str:
+    configured_title = str(
+        (getattr(conn, "config", {}) or {}).get("experiment_display_title", "")
+        or ""
+    ).strip()
+    if configured_title:
+        return configured_title
+
     title = _extract_experiment_overview_title(getattr(conn, "experiment_overview", None))
     if title:
         return title
@@ -7937,6 +8206,49 @@ async def _advance_experiment_step_fast(conn, session_id: str) -> str:
 async def handle_experiment_control_fast_intent(
     conn, original_text: str, filtered_text: str
 ) -> bool:
+    if (
+        _is_experiment_opening_fast_path_enabled(conn)
+        and _is_explicit_experiment_start_request(filtered_text)
+        and _is_experiment_fast_path_action_enabled(conn, "start")
+    ):
+        try:
+            await _reset_experiment_fresh_start_context(conn)
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"experiment fresh start reset failed: {exc}"
+            )
+        experiment_title = await _load_experiment_overview_title(conn)
+        reply = _prepare_fastpath_spoken_reply(
+            _compose_experiment_start_reply(experiment_title, "")
+        )
+        if not reply:
+            return False
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply)
+        return True
+
+    if (
+        _is_experiment_opening_fast_path_enabled(conn)
+        and _assistant_waiting_for_step_start(conn)
+        and _is_explicit_ready_to_start_reply(filtered_text)
+    ):
+        step_meta = await _load_experiment_step_meta(conn)
+        step_meta = _resolve_local_experiment_substep_view(conn, step_meta).get(
+            "step_meta",
+            step_meta,
+        )
+        reply = _prepare_fastpath_spoken_reply(
+            _compose_experiment_step_reply(step_meta, mode="guide"),
+            fallback_step_meta=step_meta,
+            fallback_mode="guide",
+        )
+        if not reply:
+            return False
+        await _start_direct_intent_turn(conn, original_text)
+        _grant_experiment_ready_guard_bypass(conn)
+        speak_txt(conn, reply)
+        return True
+
     if not _is_experiment_fast_path_available(conn):
         return False
 
@@ -8003,6 +8315,10 @@ async def handle_experiment_control_fast_intent(
 
     if action in {"guide", "repeat"}:
         step_meta = await _load_experiment_step_meta(conn)
+        step_meta = _resolve_local_experiment_substep_view(conn, step_meta).get(
+            "step_meta",
+            step_meta,
+        )
         reply = _compose_experiment_step_reply(
             step_meta,
             mode="repeat" if action == "repeat" else "guide",
@@ -8026,10 +8342,35 @@ async def handle_experiment_control_fast_intent(
         return True
 
     if action == "advance":
+        step_meta = await _load_experiment_step_meta(conn)
+        local_substep_view, advanced_local_substep = _advance_local_experiment_substep_view(
+            conn,
+            step_meta,
+        )
+        if advanced_local_substep:
+            next_step_meta = local_substep_view.get("step_meta", step_meta)
+            reply = _prepare_fastpath_spoken_reply(
+                _compose_experiment_step_reply(next_step_meta, mode="next"),
+                fallback_step_meta=next_step_meta,
+                fallback_mode="next",
+            )
+            if not reply:
+                return False
+            await _start_direct_intent_turn(conn, original_text)
+            if ready_reply_unlocks_step:
+                _grant_experiment_ready_guard_bypass(conn)
+            if hasattr(conn, "enrich_latest_clean_user_utterance_snapshot"):
+                try:
+                    conn.enrich_latest_clean_user_utterance_snapshot()
+                except Exception:
+                    pass
+            speak_txt(conn, reply)
+            return True
+
+        active_step_meta = local_substep_view.get("step_meta", step_meta)
         session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
         if not session_id:
-            step_meta = await _load_experiment_step_meta(conn)
-            reply = _compose_experiment_step_reply(step_meta, mode="guide")
+            reply = _compose_experiment_step_reply(active_step_meta, mode="guide")
             if not reply:
                 return False
             await _start_direct_intent_turn(conn, original_text)
@@ -8049,6 +8390,10 @@ async def handle_experiment_control_fast_intent(
             return False
 
         next_step_meta = _get_cached_experiment_step_meta(conn)
+        next_step_meta = _resolve_local_experiment_substep_view(conn, next_step_meta).get(
+            "step_meta",
+            next_step_meta,
+        )
         reply = _prepare_fastpath_spoken_reply(
             reply,
             fallback_step_meta=next_step_meta,
