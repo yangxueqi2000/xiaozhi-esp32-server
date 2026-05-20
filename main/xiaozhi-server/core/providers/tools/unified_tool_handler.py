@@ -41,7 +41,7 @@ class UnifiedToolHandler:
         # 创建工具管理器
         self.tool_manager = ToolManager(conn)
         self.server_mcp_enabled = _is_enabled(
-            self.config.get("enable_server_mcp_client"), True
+            self.config.get("enable_server_mcp_client"), False
         )
 
         # 创建各类执行器

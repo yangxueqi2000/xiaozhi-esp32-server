@@ -454,7 +454,17 @@ class ConnectionHandler:
         return context
 
     def _experiment_prewarm_enabled(self) -> bool:
-        if self.config.get("enable_server_mcp_client") is False:
+        raw_enabled = self.config.get("enable_server_mcp_client", False)
+        if isinstance(raw_enabled, str):
+            server_mcp_enabled = raw_enabled.strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        else:
+            server_mcp_enabled = bool(raw_enabled)
+        if not server_mcp_enabled:
             return False
         return bool(self.config.get("codex_app", {}).get("prewarm_on_hello", False))
 

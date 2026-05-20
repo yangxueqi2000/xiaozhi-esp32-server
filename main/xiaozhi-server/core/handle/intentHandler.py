@@ -1567,7 +1567,7 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
 
 
 def _is_experiment_fast_path_available(conn) -> bool:
-    raw_enabled = conn.config.get("experiment_fast_path_enabled", True)
+    raw_enabled = conn.config.get("experiment_fast_path_enabled", False)
     if isinstance(raw_enabled, str):
         enabled = raw_enabled.strip().lower() in ("1", "true", "yes", "on")
     else:
@@ -1628,14 +1628,14 @@ def _is_experiment_fast_path_action_enabled(conn, action: str) -> bool:
 
 
 def _is_experiment_strict_graph_path_enabled(conn) -> bool:
-    raw_enabled = conn.config.get("experiment_strict_graph_path_enabled", True)
+    raw_enabled = conn.config.get("experiment_strict_graph_path_enabled", False)
     if isinstance(raw_enabled, str):
         return raw_enabled.strip().lower() in ("1", "true", "yes", "on")
     return bool(raw_enabled)
 
 
 def _is_server_mcp_client_enabled(conn) -> bool:
-    raw_enabled = conn.config.get("enable_server_mcp_client", True)
+    raw_enabled = conn.config.get("enable_server_mcp_client", False)
     if isinstance(raw_enabled, str):
         return raw_enabled.strip().lower() in ("1", "true", "yes", "on")
     return bool(raw_enabled)
@@ -9366,7 +9366,7 @@ async def handle_pending_server_photo_confirmation(
         return False
 
     shortcut_cfg = conn.config.get("device_mcp_shortcuts", {}) or {}
-    if shortcut_cfg.get("enable_server_photo_confirmation_direct", True) is False:
+    if shortcut_cfg.get("enable_server_photo_confirmation_direct", False) is False:
         return False
 
     if not _assistant_is_waiting_for_photo_permission_fixed(conn):
@@ -9407,7 +9407,7 @@ async def handle_direct_photo_navigation_intent(
         return False
 
     shortcut_cfg = conn.config.get("device_mcp_shortcuts", {}) or {}
-    if shortcut_cfg.get("enable_photo_navigation_direct", True) is False:
+    if shortcut_cfg.get("enable_photo_navigation_direct", False) is False:
         return False
 
     await send_stt_message(conn, original_text)
@@ -9493,7 +9493,7 @@ async def handle_direct_photo_intent(conn, original_text: str, filtered_text: st
         return False
 
     shortcut_cfg = conn.config.get("device_mcp_shortcuts", {}) or {}
-    if shortcut_cfg.get("enable_photo_direct", True) is False:
+    if shortcut_cfg.get("enable_photo_direct", False) is False:
         return False
 
     await send_stt_message(conn, original_text)
