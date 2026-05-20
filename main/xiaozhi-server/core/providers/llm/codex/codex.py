@@ -2780,7 +2780,11 @@ class _CodexSession:
         self.experiment_yaml_path = str(
             resolved_yaml_path or configured_yaml_path or ""
         ).strip()
-        self.api_key = config.get("api_key")
+        configured_api_key = config.get("api_key")
+        api_key_env = str(config.get("api_key_env", "OPENAI_API_KEY") or "").strip()
+        self.api_key = configured_api_key or (
+            os.environ.get(api_key_env) if api_key_env else None
+        )
         self.export_api_key = bool(config.get("export_api_key", False))
         self.env_overrides = config.get("env", {}) or {}
         self.runtime_config = config.get("runtime_config", {}) or {}
@@ -2970,9 +2974,20 @@ class _CodexSession:
     ) -> None:
         for file_name in _RUNTIME_CODEX_HOME_COPY_FILES:
             source_path = source_home / file_name
+            target_path = target_home / file_name
+            if file_name == "auth.json" and self.api_key:
+                try:
+                    target_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.bind(tag=TAG).warning(
+                        f"failed to remove stale runtime Codex auth file: {target_path}"
+                    )
+                continue
             if not source_path.is_file():
                 continue
-            shutil.copy2(source_path, target_home / file_name)
+            shutil.copy2(source_path, target_path)
 
         for dir_name in _RUNTIME_CODEX_HOME_DISABLED_DIRS:
             target_path = target_home / dir_name
