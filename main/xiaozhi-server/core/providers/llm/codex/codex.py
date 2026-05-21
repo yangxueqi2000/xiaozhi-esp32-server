@@ -666,7 +666,23 @@ def _load_codex_mcp_server_configs(settings_path: Optional[Path]) -> Dict[str, D
     return merged_servers
 
 
-def _run_codex_mcp_startup_hooks(settings_path: Optional[Path]) -> None:
+def _should_run_mcp_startup_hook(
+    server_name: str,
+    *,
+    experiment_yaml_path: str = "",
+) -> bool:
+    name = str(server_name or "").strip().lower()
+    yaml_path = str(experiment_yaml_path or "").replace("\\", "/").lower()
+    if name != "uvvis":
+        return True
+    return "exp2_uv_vis_analysis" in yaml_path
+
+
+def _run_codex_mcp_startup_hooks(
+    settings_path: Optional[Path],
+    *,
+    experiment_yaml_path: str = "",
+) -> None:
     if settings_path is None or not settings_path.exists():
         return
 
@@ -684,6 +700,15 @@ def _run_codex_mcp_startup_hooks(settings_path: Optional[Path]) -> None:
 
     for name, server_cfg in servers.items():
         if not isinstance(server_cfg, dict):
+            continue
+        if not _should_run_mcp_startup_hook(
+            name,
+            experiment_yaml_path=experiment_yaml_path,
+        ):
+            logger.bind(tag=TAG).info(
+                f"skipping Codex MCP startup hook for {name}: "
+                f"experiment_yaml_path={experiment_yaml_path or 'unknown'}"
+            )
             continue
         startup_cfg = server_cfg.get("startup")
         if not isinstance(startup_cfg, dict):
@@ -2177,6 +2202,8 @@ def _experiment_context_from_kwargs(kwargs: Dict[str, Any]) -> Dict[str, str]:
         "experiment_session_id",
         "experiment_current_step_id",
         "experiment_current_group_number",
+        "experiment_local_substep_step_id",
+        "experiment_local_substep_index",
         "experiment_yaml_path",
         "experiment_overview_summary",
         "experiment_current_step_summary",
@@ -2188,6 +2215,8 @@ def _experiment_context_from_kwargs(kwargs: Dict[str, Any]) -> Dict[str, str]:
         "experiment_resume_turn_count",
         "experiment_resume_latest_session_id",
         "experiment_resume_latest_current_step_id",
+        "experiment_resume_latest_local_substep_step_id",
+        "experiment_resume_latest_local_substep_index",
         "experiment_resume_context_excerpt",
         "experiment_deep_prefetch_wait_result",
         "experiment_deep_prefetch_status",
@@ -2394,6 +2423,8 @@ def _experiment_prompt_block(
         "experiment_session_id",
         "experiment_current_step_id",
         "experiment_current_group_number",
+        "experiment_local_substep_step_id",
+        "experiment_local_substep_index",
         "experiment_yaml_path",
         "experiment_overview_summary",
         "experiment_current_step_summary",
@@ -2425,6 +2456,18 @@ def _experiment_prompt_block(
         experiment_context.get("experiment_prewarm_ready_level", "")
     )
     current_step_id = _norm_str(experiment_context.get("experiment_current_step_id", ""))
+    local_substep_step_id = _norm_str(
+        experiment_context.get("experiment_local_substep_step_id", "")
+    )
+    local_substep_index = _norm_str(
+        experiment_context.get("experiment_local_substep_index", "")
+    )
+    resume_local_substep_step_id = _norm_str(
+        experiment_context.get("experiment_resume_latest_local_substep_step_id", "")
+    )
+    resume_local_substep_index = _norm_str(
+        experiment_context.get("experiment_resume_latest_local_substep_index", "")
+    )
     deep_wait_result = _norm_str(
         experiment_context.get("experiment_deep_prefetch_wait_result", "")
     )
@@ -2443,6 +2486,8 @@ def _experiment_prompt_block(
             "experiment_resume_turn_count",
             "experiment_resume_latest_session_id",
             "experiment_resume_latest_current_step_id",
+            "experiment_resume_latest_local_substep_step_id",
+            "experiment_resume_latest_local_substep_index",
         ):
             value = _norm_str(experiment_context.get(key, ""))
             if value:
@@ -2561,6 +2606,19 @@ def _experiment_prompt_block(
             "supported by the device-log excerpt or by fixed YAML defaults; if a required field cannot "
             "be recovered confidently, ask only for that missing field."
         )
+        if resume_local_substep_step_id and resume_local_substep_index:
+            parts.append(
+                "Trusted recovery substep snapshot: continue inside "
+                f"local_substep_step_id={resume_local_substep_step_id} at "
+                f"local_substep_index={resume_local_substep_index} unless current-turn tool results "
+                "clearly prove the student is already further ahead."
+            )
+            parts.append(
+                "Recovery substep guard:\n"
+                "- Treat the trusted local_substep_index as finer-grained progress inside the current step.\n"
+                "- Do not re-ask measurements, masses, burette readings, or other earlier local-substep fields just because the fresh experiment_graph session does not have them yet.\n"
+                "- If the current turn needs one missing field, ask only for the earliest still-unconfirmed field at or after that trusted local_substep_index."
+            )
         parts.append(
             "Narration guard for recovery:\n"
             "- Do not describe this recovery as an experiment-graph outage, disconnect, or interface failure.\n"
@@ -2600,6 +2658,14 @@ def _experiment_prompt_block(
         "- Do not infer interface failure from recovery context, session recreation, old-session loss, or the absence of a fresh tool call.\n"
         "- If no current-turn tool failure exists, do not speculate about backend causes; continue with the current experiment action or ask one narrow action-level question."
     )
+    parts.append(
+        "Student-facing speech compression guard:\n"
+        "- Do not narrate backend or bookkeeping actions to the student.\n"
+        "- Never say phrases such as '我先记下', '先把你刚...记上', '我先把这一步写回', '我先把记录补上', '我先确认后再带你做下一步', or '再带你做下一步'.\n"
+        "- If the current turn is only confirming that a just-reported fact was recorded or validated, use one short result sentence such as '很好，已记录你刚才那组数据并通过校验。'\n"
+        "- If you are about to continue the experiment, skip transitional narration and directly say the current step or next step instruction.\n"
+        "- Prefer student-facing speech in this shape: either '确认结果' or '直接给步骤'; do not mix either one with backend-process narration."
+    )
     if deep_prefetch_lines:
         parts.append(
             "Deep-prefetched experiment detail context from server (trusted):\n"
@@ -2635,6 +2701,14 @@ def _experiment_prompt_block(
             "- Do not narrate backend bookkeeping such as '我先记下…', '我接着确认记录项…', or '我把这一步写回图谱…'; either give the next student-facing instruction or ask only for the still-missing field.\n"
             "- If you have not called get_step, get_state, get_progress_summary, get_current_progress, start_trial, add_field, add_fields, finish_trial, can_proceed, proceed_to_next_step, redirect_to_step, redo_trial, or modify_record on this turn, stay anchored to the trusted current step instead of improvising later steps from old dialogue, prefetched summaries, or memory."
         )
+        if local_substep_step_id and local_substep_index:
+            parts.append(
+                "Trusted local substep anchor:\n"
+                f"- The server's current local substep snapshot is local_substep_step_id={local_substep_step_id}, local_substep_index={local_substep_index}.\n"
+                "- Treat this as finer-grained progress inside the trusted current step.\n"
+                "- Do not ask the student to repeat data from earlier local substeps once the trusted local_substep_index is already past those asks, unless current-turn graph/tool results explicitly prove that exact field is still missing and cannot be recovered.\n"
+                "- When resuming guidance inside a substep-driven big step, continue from this local substep anchor instead of jumping back to the first record question of the parent step."
+            )
         parts.append(
             "Student sidetrack question rule:\n"
             "- If the latest user message asks a conceptual, safety, reagent, instrument, data-meaning, troubleshooting, or other explanatory question, and it does not itself report completion, observations, measurements, photos, scan results, corrections, or a request to advance, answer the question first.\n"
@@ -3009,7 +3083,10 @@ class _CodexSession:
             shutil.copytree(source_path, target_path)
 
     def _prepare_runtime_codex_home(self) -> Optional[Path]:
-        _run_codex_mcp_startup_hooks(self.mcp_settings_path)
+        _run_codex_mcp_startup_hooks(
+            self.mcp_settings_path,
+            experiment_yaml_path=self.experiment_yaml_path,
+        )
         server_configs = _load_codex_mcp_server_configs(self.mcp_settings_path)
         if not server_configs:
             self._runtime_codex_home = None

@@ -87,6 +87,10 @@ def _normalize_entry(entry: Dict) -> Dict:
         "status": str(entry.get("status", "")).strip(),
         "source": str(entry.get("source", "")).strip(),
         "current_step_id": str(entry.get("current_step_id", "")).strip(),
+        "local_substep_step_id": str(
+            entry.get("local_substep_step_id", "")
+        ).strip(),
+        "local_substep_index": str(entry.get("local_substep_index", "")).strip(),
         "completed_steps_count": entry.get("completed_steps_count"),
         "total_steps": entry.get("total_steps"),
         "created_at": str(entry.get("created_at", "")).strip(),
@@ -168,6 +172,8 @@ async def save_experiment_session_binding(
     status: str = "",
     source: str = "",
     current_step_id: str = "",
+    local_substep_step_id: str = "",
+    local_substep_index=None,
     completed_steps_count=None,
     total_steps=None,
 ) -> Dict:
@@ -207,6 +213,12 @@ async def save_experiment_session_binding(
         entry["status"] = str(status or "").strip()
         entry["source"] = str(source or "").strip()
         entry["current_step_id"] = str(current_step_id or "").strip()
+        entry["local_substep_step_id"] = str(local_substep_step_id or "").strip()
+        entry["local_substep_index"] = (
+            ""
+            if local_substep_index in {None, ""}
+            else str(local_substep_index).strip()
+        )
         entry["completed_steps_count"] = completed_steps_count
         entry["total_steps"] = total_steps
         entry["updated_at"] = now

@@ -381,6 +381,12 @@ def _schedule_experiment_session_binding_save(
                 source=f"mcp:{tool_name}" if tool_name else "mcp",
                 current_step_id=current_step_id
                 or str(getattr(conn, "experiment_current_step_id", "") or ""),
+                local_substep_step_id=str(
+                    getattr(conn, "_experiment_local_substep_step_id", "") or ""
+                ),
+                local_substep_index=str(
+                    getattr(conn, "_experiment_local_substep_index", "") or ""
+                ),
                 completed_steps_count=completed_steps_count,
                 total_steps=total_steps,
             )

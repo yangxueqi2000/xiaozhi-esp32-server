@@ -2039,6 +2039,110 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(spoken))
         self.assertIn("AgNO3", spoken[0])
 
+    async def test_explicit_resume_request_uses_log_guidance_when_replay_unavailable(self):
+        conn = _FakeConn()
+        spoken = []
+        sent = []
+
+        async def fake_send_stt_message(_conn, text):
+            sent.append(text)
+
+        def fake_speak_txt(_conn, text):
+            spoken.append(text)
+
+        async def fake_reset(_conn):
+            _conn.experiment_session_id = ""
+            _conn.experiment_current_step_id = ""
+            _conn.experiment_current_step = None
+            _conn.experiment_progress_summary = None
+
+        def fake_prepare_resume_context(*, previous_session_id="", reason=""):
+            conn.experiment_resume_log_path = str(log_path)
+            conn.experiment_resume_latest_current_step_id = "step_01_alkaline_analysis"
+            conn.experiment_resume_latest_local_substep_step_id = (
+                "step_01_alkaline_analysis"
+            )
+            conn.experiment_resume_latest_local_substep_index = "1"
+
+        def fake_restore_local_substep_state(
+            *,
+            step_id="",
+            index="",
+            source="",
+            require_step_match=True,
+        ):
+            normalized_step_id = str(step_id or "").strip()
+            normalized_index = int(str(index or "0").strip() or "0")
+            if (
+                require_step_match
+                and normalized_step_id
+                and str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+                and normalized_step_id
+                != str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+            ):
+                return False
+            conn._experiment_local_substep_step_id = normalized_step_id
+            conn._experiment_local_substep_index = normalized_index
+            return True
+
+        conn._prepare_experiment_resume_recovery_context = fake_prepare_resume_context
+        conn._restore_experiment_local_substep_state = fake_restore_local_substep_state
+        conn._experiment_local_substep_step_id = ""
+        conn._experiment_local_substep_index = 0
+        conn._experiment_yaml_steps_cache = [
+            {
+                "id": "step_01_alkaline_analysis",
+                "title": "工业碱总碱度的分析",
+                "prompts": {
+                    "instruction": "工业碱总碱度的分析，请按当前步骤继续。",
+                    "safety": [],
+                },
+                "substeps": [
+                    {
+                        "title": "第一份称量",
+                        "instruction": "先告诉我第一份无水碳酸钠的实际质量。",
+                    },
+                    {
+                        "title": "第二份称量",
+                        "instruction": "现在继续报第二份无水碳酸钠的实际质量。",
+                    },
+                ],
+            }
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "device.log"
+            log_path.write_text("resume log placeholder\n", encoding="utf-8")
+
+            with patch.object(
+                intentHandler,
+                "_reset_experiment_fresh_start_context",
+                fake_reset,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "_replay_experiment_progress_from_resume_log",
+                    AsyncMock(return_value=(False, "")),
+                ):
+                    with patch.object(
+                        intentHandler, "send_stt_message", fake_send_stt_message
+                    ):
+                        with patch.object(intentHandler, "speak_txt", fake_speak_txt):
+                            handled = await intentHandler.handle_experiment_control_fast_intent(
+                                conn,
+                                "继续刚才实验",
+                                "继续刚才实验",
+                            )
+
+        self.assertTrue(handled)
+        self.assertEqual(["继续刚才实验"], sent)
+        self.assertEqual(1, len(spoken))
+        self.assertIn("第二份无水碳酸钠的实际质量", spoken[0])
+        self.assertNotIn("跳到哪一步", spoken[0])
+        self.assertEqual("step_01_alkaline_analysis", conn.experiment_current_step_id)
+        self.assertEqual("step_01_alkaline_analysis", conn._experiment_local_substep_step_id)
+        self.assertEqual(1, conn._experiment_local_substep_index)
+
     async def test_ready_reply_after_start_prompt_returns_current_step(self):
         conn = _FakeConn()
         conn.dialogue.put(

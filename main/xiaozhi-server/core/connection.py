@@ -259,6 +259,10 @@ class ConnectionHandler:
         self.experiment_resume_context_excerpt = ""
         self.experiment_resume_latest_session_id = ""
         self.experiment_resume_latest_current_step_id = ""
+        self.experiment_resume_latest_local_substep_step_id = ""
+        self.experiment_resume_latest_local_substep_index = ""
+        self._experiment_local_substep_step_id = ""
+        self._experiment_local_substep_index = 0
         self.experiment_prewarm_session_adopted = False
         self.experiment_first_real_user_turn_pending = True
         self.experiment_first_real_user_turn_lock = threading.Lock()
@@ -964,6 +968,8 @@ class ConnectionHandler:
         self.experiment_resume_context_excerpt = ""
         self.experiment_resume_latest_session_id = ""
         self.experiment_resume_latest_current_step_id = ""
+        self.experiment_resume_latest_local_substep_step_id = ""
+        self.experiment_resume_latest_local_substep_index = ""
 
     async def _before_experiment_graph_tool_call(
         self,
@@ -1034,6 +1040,135 @@ class ConnectionHandler:
     def _normalize_user_utterance_text(value: Any) -> str:
         return " ".join(str(value or "").split()).strip()
 
+    def _experiment_local_substep_snapshot(self) -> Dict[str, str]:
+        local_step_id = str(
+            getattr(self, "_experiment_local_substep_step_id", "") or ""
+        ).strip()
+        local_index = getattr(self, "_experiment_local_substep_index", "")
+        current_step_id = str(self.experiment_current_step_id or "").strip()
+        if local_step_id and current_step_id and local_step_id != current_step_id:
+            local_step_id = ""
+            local_index = ""
+        if not local_step_id:
+            return {
+                "local_substep_step_id": "",
+                "local_substep_index": "",
+            }
+        try:
+            parsed_index = int(local_index)
+        except Exception:
+            return {
+                "local_substep_step_id": "",
+                "local_substep_index": "",
+            }
+        if parsed_index < 0:
+            return {
+                "local_substep_step_id": "",
+                "local_substep_index": "",
+            }
+        return {
+            "local_substep_step_id": local_step_id,
+            "local_substep_index": str(parsed_index),
+        }
+
+    def _restore_experiment_local_substep_state(
+        self,
+        *,
+        step_id: str = "",
+        index=None,
+        source: str = "",
+        require_step_match: bool = False,
+    ) -> bool:
+        normalized_step_id = str(step_id or "").strip()
+        if not normalized_step_id:
+            return False
+        try:
+            parsed_index = int(index)
+        except Exception:
+            return False
+        if parsed_index < 0:
+            return False
+
+        current_step_id = str(self.experiment_current_step_id or "").strip()
+        if require_step_match and current_step_id and current_step_id != normalized_step_id:
+            return False
+
+        self._experiment_local_substep_step_id = normalized_step_id
+        self._experiment_local_substep_index = parsed_index
+        self.logger.bind(tag=TAG).info(
+            "experiment local substep state restored: "
+            f"device_id={self.device_id}, "
+            f"step_id={normalized_step_id}, "
+            f"index={parsed_index}, "
+            f"source={source or 'unknown'}"
+        )
+        return True
+
+    def _persist_experiment_local_substep_state(self) -> None:
+        snapshot = self._experiment_local_substep_snapshot()
+        local_substep_step_id = snapshot.get("local_substep_step_id", "")
+        local_substep_index = snapshot.get("local_substep_index", "")
+
+        if self.device_id:
+            try:
+                enrich_latest_user_utterance_log(
+                    self.config,
+                    self.device_id,
+                    connection_session_id=self.session_id or "",
+                    experiment_session_id=str(self.experiment_session_id or "").strip(),
+                    current_step_id=str(self.experiment_current_step_id or "").strip(),
+                    experiment_yaml_path=str(
+                        self.experiment_yaml_path
+                        or self._resolve_experiment_yaml_path()
+                        or ""
+                    ).strip(),
+                    local_substep_step_id=local_substep_step_id,
+                    local_substep_index=local_substep_index,
+                )
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    f"experiment local substep log persist failed: {exc}"
+                )
+
+        chat_session_id = str(self.chat_session_id or "").strip()
+        session_id = str(self.experiment_session_id or "").strip()
+        yaml_path = str(
+            self.experiment_yaml_path or self._resolve_experiment_yaml_path() or ""
+        ).strip()
+        if not chat_session_id or not session_id or not yaml_path:
+            return
+
+        async def _save():
+            try:
+                await save_experiment_session_binding(
+                    self.config,
+                    chat_session_id=chat_session_id,
+                    model_session_key=self.model_session_key or "",
+                    device_id=self.device_id or "",
+                    user_id=self.user_id or "",
+                    yaml_path=yaml_path,
+                    experiment_session_id=session_id,
+                    status="active",
+                    source="local_substep_state",
+                    current_step_id=str(self.experiment_current_step_id or "").strip(),
+                    local_substep_step_id=local_substep_step_id,
+                    local_substep_index=local_substep_index,
+                )
+            except Exception as exc:
+                self.logger.bind(tag=TAG).warning(
+                    f"experiment local substep binding persist failed: {exc}"
+                )
+
+        loop = self.loop
+        if loop is not None and getattr(loop, "is_running", lambda: False)():
+            loop.create_task(_save())
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(_save())
+
     def _experiment_user_utterance_snapshot(self) -> Dict[str, str]:
         experiment_yaml_path = str(
             self.experiment_yaml_path or self._resolve_experiment_yaml_path() or ""
@@ -1045,11 +1180,13 @@ class ConnectionHandler:
                 self.experiment_current_step,
                 self.experiment_progress_summary,
             )
-        return {
+        snapshot = {
             "experiment_yaml_path": experiment_yaml_path,
             "experiment_session_id": experiment_session_id,
             "current_step_id": current_step_id,
         }
+        snapshot.update(self._experiment_local_substep_snapshot())
+        return snapshot
 
     def log_clean_user_utterance(
         self,
@@ -1080,6 +1217,8 @@ class ConnectionHandler:
             experiment_session_id=snapshot.get("experiment_session_id", ""),
             current_step_id=snapshot.get("current_step_id", ""),
             experiment_yaml_path=snapshot.get("experiment_yaml_path", ""),
+            local_substep_step_id=snapshot.get("local_substep_step_id", ""),
+            local_substep_index=snapshot.get("local_substep_index", ""),
         )
         if not log_path:
             return ""
@@ -1120,6 +1259,8 @@ class ConnectionHandler:
             experiment_session_id=snapshot.get("experiment_session_id", ""),
             current_step_id=snapshot.get("current_step_id", ""),
             experiment_yaml_path=snapshot.get("experiment_yaml_path", ""),
+            local_substep_step_id=snapshot.get("local_substep_step_id", ""),
+            local_substep_index=snapshot.get("local_substep_index", ""),
         )
         return str(log_path or "")
 
@@ -1135,6 +1276,8 @@ class ConnectionHandler:
             experiment_session_id=snapshot.get("experiment_session_id", ""),
             current_step_id=snapshot.get("current_step_id", ""),
             experiment_yaml_path=snapshot.get("experiment_yaml_path", ""),
+            local_substep_step_id=snapshot.get("local_substep_step_id", ""),
+            local_substep_index=snapshot.get("local_substep_index", ""),
         )
         if not log_path:
             return ""
@@ -1196,6 +1339,12 @@ class ConnectionHandler:
             self.experiment_resume_latest_current_step_id = str(
                 resume_context.get("latest_current_step_id", "")
             ).strip()
+            self.experiment_resume_latest_local_substep_step_id = str(
+                resume_context.get("latest_local_substep_step_id", "")
+            ).strip()
+            self.experiment_resume_latest_local_substep_index = str(
+                resume_context.get("latest_local_substep_index", "")
+            ).strip()
 
         self.logger.bind(tag=TAG).info(
             "experiment session recovery context prepared: "
@@ -1206,6 +1355,8 @@ class ConnectionHandler:
             f"log_turns={self.experiment_resume_turn_count or '0'}, "
             f"latest_session_id={self.experiment_resume_latest_session_id or ''}, "
             f"latest_current_step_id={self.experiment_resume_latest_current_step_id or ''}, "
+            f"latest_local_substep_step_id={self.experiment_resume_latest_local_substep_step_id or ''}, "
+            f"latest_local_substep_index={self.experiment_resume_latest_local_substep_index or ''}, "
             f"reason={self.experiment_resume_reason or 'unknown'}"
         )
 
@@ -1290,6 +1441,17 @@ class ConnectionHandler:
             context["experiment_current_step_id"] = str(
                 self.experiment_current_step_id
             ).strip()
+        local_substep_snapshot = self._experiment_local_substep_snapshot()
+        if include_session_context and local_substep_snapshot.get("local_substep_step_id"):
+            context["experiment_local_substep_step_id"] = local_substep_snapshot.get(
+                "local_substep_step_id",
+                "",
+            )
+        if include_session_context and local_substep_snapshot.get("local_substep_index"):
+            context["experiment_local_substep_index"] = local_substep_snapshot.get(
+                "local_substep_index",
+                "",
+            )
         current_group_number = str(
             getattr(self, "experiment_current_group_number", "") or ""
         ).strip()
@@ -1344,6 +1506,14 @@ class ConnectionHandler:
             if self.experiment_resume_latest_current_step_id:
                 context["experiment_resume_latest_current_step_id"] = str(
                     self.experiment_resume_latest_current_step_id
+                ).strip()
+            if self.experiment_resume_latest_local_substep_step_id:
+                context["experiment_resume_latest_local_substep_step_id"] = str(
+                    self.experiment_resume_latest_local_substep_step_id
+                ).strip()
+            if self.experiment_resume_latest_local_substep_index:
+                context["experiment_resume_latest_local_substep_index"] = str(
+                    self.experiment_resume_latest_local_substep_index
                 ).strip()
             if self.experiment_resume_context_excerpt:
                 context["experiment_resume_context_excerpt"] = str(
@@ -2109,6 +2279,8 @@ class ConnectionHandler:
                 resume_recovery_reason = ""
 
                 resume_binding = None
+                resume_binding_local_substep_step_id = ""
+                resume_binding_local_substep_index = ""
                 if self.chat_session_id:
                     resume_binding = await load_experiment_session_binding(
                         self.config,
@@ -2117,6 +2289,12 @@ class ConnectionHandler:
                     )
 
                 if resume_binding and resume_binding.get("experiment_session_id"):
+                    resume_binding_local_substep_step_id = str(
+                        resume_binding.get("local_substep_step_id", "")
+                    ).strip()
+                    resume_binding_local_substep_index = str(
+                        resume_binding.get("local_substep_index", "")
+                    ).strip()
                     candidate_session_id = str(
                         resume_binding.get("experiment_session_id", "")
                     ).strip()
@@ -2323,6 +2501,7 @@ class ConnectionHandler:
                                 "current_step_id": candidate_step_id,
                                 "completed_steps_count": candidate_completed,
                                 "total_steps": candidate_total_steps,
+                                "binding": candidate_binding,
                             }
 
                     if best_device_resume is not None:
@@ -2400,6 +2579,32 @@ class ConnectionHandler:
                 self.experiment_session_id = session_id
                 self.experiment_current_step_id = current_step_id
                 self.experiment_progress_summary = progress_summary_payload
+                if session_source == "resume":
+                    self._restore_experiment_local_substep_state(
+                        step_id=resume_binding_local_substep_step_id,
+                        index=resume_binding_local_substep_index,
+                        source="registry_binding",
+                        require_step_match=True,
+                    )
+                elif session_source == "resume_device":
+                    binding = (
+                        best_device_resume.get("binding", {})
+                        if isinstance(best_device_resume, dict)
+                        else {}
+                    )
+                    self._restore_experiment_local_substep_state(
+                        step_id=str(binding.get("local_substep_step_id", "") or ""),
+                        index=str(binding.get("local_substep_index", "") or ""),
+                        source="registry_device_binding",
+                        require_step_match=True,
+                    )
+                elif resume_recovery_needed:
+                    self._restore_experiment_local_substep_state(
+                        step_id=self.experiment_resume_latest_local_substep_step_id,
+                        index=self.experiment_resume_latest_local_substep_index,
+                        source="device_log_recovery",
+                        require_step_match=True,
+                    )
                 if self.experiment_session_id and self.device_id:
                     try:
                         await self._call_experiment_graph_tool(
@@ -2428,6 +2633,14 @@ class ConnectionHandler:
                         status="active",
                         source=session_source or "create",
                         current_step_id=current_step_id,
+                        local_substep_step_id=self._experiment_local_substep_snapshot().get(
+                            "local_substep_step_id",
+                            "",
+                        ),
+                        local_substep_index=self._experiment_local_substep_snapshot().get(
+                            "local_substep_index",
+                            "",
+                        ),
                         completed_steps_count=completed_steps_count,
                         total_steps=total_steps,
                     )

@@ -2817,7 +2817,18 @@ def _apply_experiment_graph_alignment_guard(conn, text: str) -> str:
 
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     current_step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+    local_substep_step_id = str(
+        getattr(conn, "_experiment_local_substep_step_id", "") or ""
+    ).strip()
     if not session_id and not current_step_id:
+        return normalized
+
+    # Local YAML-driven substep progression is a trusted server-side flow even
+    # without an experiment-graph session. Do not overwrite its spoken reply
+    # with the generic current-step guidance.
+    if local_substep_step_id and (
+        not current_step_id or local_substep_step_id == current_step_id
+    ):
         return normalized
 
     current_sentence_id = str(getattr(conn, "sentence_id", "") or "").strip()

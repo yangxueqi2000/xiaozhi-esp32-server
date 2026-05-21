@@ -32,6 +32,12 @@ TRANSCRIPT_SESSION_RE = re.compile(
     r"\[experiment_session_id=(?P<session_id>[^\]]+)\]"
 )
 TRANSCRIPT_YAML_RE = re.compile(r"\[yaml=(?P<yaml_path>[^\]]+)\]")
+TRANSCRIPT_LOCAL_SUBSTEP_STEP_RE = re.compile(
+    r"\[local_substep_step_id=(?P<step_id>[^\]]+)\]"
+)
+TRANSCRIPT_LOCAL_SUBSTEP_INDEX_RE = re.compile(
+    r"\[local_substep_index=(?P<index>[^\]]+)\]"
+)
 TRANSCRIPT_ROLE_RE = re.compile(r"\[TRANSCRIPT\] \[(?P<role>USER|ASSISTANT)\]")
 TRANSCRIPT_SOURCE_RE = re.compile(r"\[source=(?P<source>[^\]]+)\]")
 
@@ -188,6 +194,8 @@ def append_user_utterance_log(
     experiment_session_id: str = "",
     current_step_id: str = "",
     experiment_yaml_path: str = "",
+    local_substep_step_id: str = "",
+    local_substep_index: str = "",
 ) -> Optional[str]:
     normalized_text = _normalize_utterance_text(text)
     normalized_device_id = str(device_id or "").strip()
@@ -211,6 +219,8 @@ def append_user_utterance_log(
         "experiment_session_id": str(experiment_session_id or "").strip(),
         "current_step_id": str(current_step_id or "").strip(),
         "experiment_yaml_path": str(experiment_yaml_path or "").strip(),
+        "local_substep_step_id": str(local_substep_step_id or "").strip(),
+        "local_substep_index": str(local_substep_index or "").strip(),
     }
 
     try:
@@ -234,6 +244,8 @@ def enrich_latest_user_utterance_log(
     experiment_session_id: str = "",
     current_step_id: str = "",
     experiment_yaml_path: str = "",
+    local_substep_step_id: str = "",
+    local_substep_index: str = "",
 ) -> Optional[str]:
     normalized_device_id = str(device_id or "").strip()
     if not normalized_device_id:
@@ -243,11 +255,15 @@ def enrich_latest_user_utterance_log(
     normalized_experiment_session_id = str(experiment_session_id or "").strip()
     normalized_current_step_id = str(current_step_id or "").strip()
     normalized_experiment_yaml_path = str(experiment_yaml_path or "").strip()
+    normalized_local_substep_step_id = str(local_substep_step_id or "").strip()
+    normalized_local_substep_index = str(local_substep_index or "").strip()
 
     if not (
         normalized_experiment_session_id
         or normalized_current_step_id
         or normalized_experiment_yaml_path
+        or normalized_local_substep_step_id
+        or normalized_local_substep_index
     ):
         return None
 
@@ -304,6 +320,20 @@ def enrich_latest_user_utterance_log(
             != normalized_experiment_yaml_path
         ):
             item["experiment_yaml_path"] = normalized_experiment_yaml_path
+            changed = True
+        if (
+            normalized_local_substep_step_id
+            and str(item.get("local_substep_step_id", "")).strip()
+            != normalized_local_substep_step_id
+        ):
+            item["local_substep_step_id"] = normalized_local_substep_step_id
+            changed = True
+        if (
+            normalized_local_substep_index
+            and str(item.get("local_substep_index", "")).strip()
+            != normalized_local_substep_index
+        ):
+            item["local_substep_index"] = normalized_local_substep_index
             changed = True
 
         if changed:
@@ -369,6 +399,8 @@ def append_experiment_interaction_log(
     experiment_session_id: str = "",
     current_step_id: str = "",
     experiment_yaml_path: str = "",
+    local_substep_step_id: str = "",
+    local_substep_index: str = "",
 ) -> Optional[str]:
     normalized_device_id = str(device_id or "").strip()
     normalized_text = _normalize_utterance_text(text)
@@ -391,6 +423,12 @@ def append_experiment_interaction_log(
         parts.append(f"[current_step_id={str(current_step_id).strip()}]")
     if experiment_yaml_path:
         parts.append(f"[yaml={str(experiment_yaml_path).strip()}]")
+    if local_substep_step_id:
+        parts.append(
+            f"[local_substep_step_id={str(local_substep_step_id).strip()}]"
+        )
+    if str(local_substep_index or "").strip():
+        parts.append(f"[local_substep_index={str(local_substep_index).strip()}]")
     line = " ".join(parts) + f" {normalized_text}\n"
 
     try:
@@ -461,6 +499,10 @@ def _read_user_utterance_entries(
                 "experiment_yaml_path": str(
                     item.get("experiment_yaml_path", "")
                 ).strip(),
+                "local_substep_step_id": str(
+                    item.get("local_substep_step_id", "")
+                ).strip(),
+                "local_substep_index": str(item.get("local_substep_index", "")).strip(),
             }
         )
         if len(entries) >= max(1, int(max_entries)):
@@ -470,28 +512,99 @@ def _read_user_utterance_entries(
     return entries
 
 
+def _parse_nonnegative_int(value: Any) -> Optional[int]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = int(float(text))
+    except Exception:
+        return None
+    if parsed < 0:
+        return None
+    return parsed
+
+
+def _looks_like_explicit_restart_request(text: str) -> bool:
+    normalized = _normalize_utterance_text(text)
+    if not normalized:
+        return False
+    markers = (
+        "重新开始",
+        "从头开始",
+        "重头开始",
+        "重来一遍",
+        "再来一遍",
+        "重新做",
+        "重做",
+    )
+    return any(marker in normalized for marker in markers)
+
+
 def _extract_latest_user_utterance_snapshot(
     entries: List[Dict[str, str]],
 ) -> Dict[str, str]:
     latest_experiment_session_id = ""
     latest_current_step_id = ""
     latest_experiment_yaml_path = ""
+    latest_local_substep_step_id = ""
+    latest_local_substep_index = ""
+    latest_entry_text = ""
+    best_local_substep_step_id = ""
+    best_local_substep_index = ""
+    best_local_substep_numeric = -1
 
     for entry in entries:
         experiment_session_id = str(entry.get("experiment_session_id", "")).strip()
         current_step_id = str(entry.get("current_step_id", "")).strip()
         experiment_yaml_path = str(entry.get("experiment_yaml_path", "")).strip()
+        local_substep_step_id = str(entry.get("local_substep_step_id", "")).strip()
+        local_substep_index = str(entry.get("local_substep_index", "")).strip()
+        local_substep_numeric = _parse_nonnegative_int(local_substep_index)
+        latest_entry_text = _normalize_utterance_text(entry.get("text", ""))
         if experiment_session_id:
             latest_experiment_session_id = experiment_session_id
         if current_step_id:
             latest_current_step_id = current_step_id
         if experiment_yaml_path:
             latest_experiment_yaml_path = experiment_yaml_path
+        if local_substep_step_id:
+            latest_local_substep_step_id = local_substep_step_id
+        if local_substep_index:
+            latest_local_substep_index = local_substep_index
+        if (
+            local_substep_step_id
+            and local_substep_numeric is not None
+            and (
+                local_substep_numeric > best_local_substep_numeric
+                or (
+                    local_substep_numeric == best_local_substep_numeric
+                    and local_substep_step_id == latest_current_step_id
+                )
+            )
+        ):
+            best_local_substep_step_id = local_substep_step_id
+            best_local_substep_index = local_substep_index
+            best_local_substep_numeric = local_substep_numeric
+
+    latest_local_substep_numeric = _parse_nonnegative_int(latest_local_substep_index)
+    should_restore_higher_local_progress = (
+        not _looks_like_explicit_restart_request(latest_entry_text)
+        and best_local_substep_numeric > 0
+        and (latest_local_substep_numeric is None or latest_local_substep_numeric <= 0)
+    )
+    if should_restore_higher_local_progress:
+        step_anchor = latest_local_substep_step_id or latest_current_step_id
+        if step_anchor and best_local_substep_step_id == step_anchor:
+            latest_local_substep_step_id = best_local_substep_step_id
+            latest_local_substep_index = best_local_substep_index
 
     return {
         "latest_experiment_session_id": latest_experiment_session_id,
         "latest_current_step_id": latest_current_step_id,
         "latest_experiment_yaml_path": latest_experiment_yaml_path,
+        "latest_local_substep_step_id": latest_local_substep_step_id,
+        "latest_local_substep_index": latest_local_substep_index,
     }
 
 
@@ -499,6 +612,8 @@ def _extract_latest_transcript_snapshot(log_text: str) -> Dict[str, str]:
     latest_experiment_session_id = ""
     latest_current_step_id = ""
     latest_experiment_yaml_path = ""
+    latest_local_substep_step_id = ""
+    latest_local_substep_index = ""
 
     for raw_line in reversed((log_text or "").splitlines()):
         line = str(raw_line or "").strip()
@@ -520,10 +635,24 @@ def _extract_latest_transcript_snapshot(log_text: str) -> Dict[str, str]:
                 latest_experiment_yaml_path = str(
                     yaml_match.group("yaml_path") or ""
                 ).strip()
+        if not latest_local_substep_step_id:
+            substep_step_match = TRANSCRIPT_LOCAL_SUBSTEP_STEP_RE.search(line)
+            if substep_step_match:
+                latest_local_substep_step_id = str(
+                    substep_step_match.group("step_id") or ""
+                ).strip()
+        if not latest_local_substep_index:
+            substep_index_match = TRANSCRIPT_LOCAL_SUBSTEP_INDEX_RE.search(line)
+            if substep_index_match:
+                latest_local_substep_index = str(
+                    substep_index_match.group("index") or ""
+                ).strip()
         if (
             latest_current_step_id
             and latest_experiment_session_id
             and latest_experiment_yaml_path
+            and latest_local_substep_step_id
+            and latest_local_substep_index
         ):
             break
 
@@ -531,6 +660,8 @@ def _extract_latest_transcript_snapshot(log_text: str) -> Dict[str, str]:
         "latest_experiment_session_id": latest_experiment_session_id,
         "latest_current_step_id": latest_current_step_id,
         "latest_experiment_yaml_path": latest_experiment_yaml_path,
+        "latest_local_substep_step_id": latest_local_substep_step_id,
+        "latest_local_substep_index": latest_local_substep_index,
     }
 
 
@@ -562,6 +693,8 @@ def read_transcript_entries(
         session_match = TRANSCRIPT_SESSION_RE.search(line)
         step_match = TRANSCRIPT_STEP_RE.search(line)
         yaml_match = TRANSCRIPT_YAML_RE.search(line)
+        substep_step_match = TRANSCRIPT_LOCAL_SUBSTEP_STEP_RE.search(line)
+        substep_index_match = TRANSCRIPT_LOCAL_SUBSTEP_INDEX_RE.search(line)
         text = line.rsplit("] ", 1)[-1].strip()
         if not text or text == line:
             continue
@@ -580,6 +713,16 @@ def read_transcript_entries(
                 ).strip(),
                 "experiment_yaml_path": str(
                     yaml_match.group("yaml_path") if yaml_match else ""
+                ).strip(),
+                "local_substep_step_id": str(
+                    substep_step_match.group("step_id")
+                    if substep_step_match
+                    else ""
+                ).strip(),
+                "local_substep_index": str(
+                    substep_index_match.group("index")
+                    if substep_index_match
+                    else ""
                 ).strip(),
                 "text": text,
             }
@@ -725,7 +868,10 @@ def _format_turn_block(turns: List[Dict[str, str]]) -> str:
     return "\n".join(lines).strip()
 
 
-def _format_user_utterance_block(entries: List[Dict[str, str]]) -> str:
+def _format_user_utterance_block(
+    entries: List[Dict[str, str]],
+    latest_snapshot: Optional[Dict[str, str]] = None,
+) -> str:
     lines = [
         "恢复上下文（来自当前设备原始用户话语日志，可信）：",
         "这是同一设备在服务重启后的继续未完成实验请求。",
@@ -733,9 +879,12 @@ def _format_user_utterance_block(entries: List[Dict[str, str]]) -> str:
         "最近用户原始话语摘录：",
     ]
 
-    latest_snapshot = _extract_latest_user_utterance_snapshot(entries)
+    if latest_snapshot is None:
+        latest_snapshot = _extract_latest_user_utterance_snapshot(entries)
     latest_experiment_session_id = latest_snapshot["latest_experiment_session_id"]
     latest_current_step_id = latest_snapshot["latest_current_step_id"]
+    latest_local_substep_step_id = latest_snapshot["latest_local_substep_step_id"]
+    latest_local_substep_index = latest_snapshot["latest_local_substep_index"]
 
     if latest_experiment_session_id or latest_current_step_id:
         snapshot_parts: List[str] = []
@@ -745,6 +894,14 @@ def _format_user_utterance_block(entries: List[Dict[str, str]]) -> str:
             )
         if latest_current_step_id:
             snapshot_parts.append(f"current_step_id={latest_current_step_id}")
+        if latest_local_substep_step_id:
+            snapshot_parts.append(
+                f"local_substep_step_id={latest_local_substep_step_id}"
+            )
+        if latest_local_substep_index:
+            snapshot_parts.append(
+                f"local_substep_index={latest_local_substep_index}"
+            )
         lines.append("最近一次已知实验快照：" + "，".join(snapshot_parts))
 
     for entry in entries:
@@ -779,21 +936,59 @@ def build_resume_context(
     max_turns: int = 4,
     max_chars: int = 2800,
 ) -> Optional[Dict[str, str]]:
+    transcript_snapshot = {
+        "latest_experiment_session_id": "",
+        "latest_current_step_id": "",
+        "latest_experiment_yaml_path": "",
+        "latest_local_substep_step_id": "",
+        "latest_local_substep_index": "",
+    }
+    log_text = ""
+    candidates = resolve_experiment_log_paths(config, device_id)
+    log_path = _select_existing_log_path(candidates)
+    if log_path is not None:
+        try:
+            log_text = log_path.read_text(encoding="utf-8")
+            transcript_snapshot = _extract_latest_transcript_snapshot(log_text)
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(f"resume log read failed: {log_path} ({exc})")
+            log_text = ""
+
     user_log_path = _select_existing_user_utterance_log_path(config, device_id)
     if user_log_path is not None:
-        user_entries = _read_user_utterance_entries(
+        snapshot_entries = _read_user_utterance_entries(
             user_log_path,
-            max_entries=max(1, int(max_turns)),
+            max_entries=max(max(1, int(max_turns)) * 8, 24),
         )
-        if user_entries:
+        if snapshot_entries:
+            latest_snapshot = _extract_latest_user_utterance_snapshot(snapshot_entries)
+            for key in (
+                "latest_experiment_session_id",
+                "latest_current_step_id",
+                "latest_experiment_yaml_path",
+                "latest_local_substep_step_id",
+                "latest_local_substep_index",
+            ):
+                if not str(latest_snapshot.get(key, "") or "").strip():
+                    latest_snapshot[key] = str(
+                        transcript_snapshot.get(key, "") or ""
+                    ).strip()
+            user_entries = snapshot_entries[-max(1, int(max_turns)) :]
             while user_entries:
-                context_text = _format_user_utterance_block(user_entries)
+                context_text = _format_user_utterance_block(
+                    user_entries,
+                    latest_snapshot=latest_snapshot,
+                )
                 if len(context_text) <= max_chars or len(user_entries) == 1:
-                    latest_snapshot = _extract_latest_user_utterance_snapshot(
-                        user_entries
+                    preferred_resume_log_path = (
+                        str(log_path)
+                        if log_path is not None
+                        else str(user_log_path)
                     )
                     return {
-                        "log_path": str(user_log_path),
+                        "log_path": preferred_resume_log_path,
+                        "transcript_log_path": str(log_path) if log_path is not None else "",
+                        "user_log_path": str(user_log_path),
                         "context_text": context_text[:max_chars],
                         "turn_count": str(len(user_entries)),
                         "latest_experiment_session_id": latest_snapshot.get(
@@ -805,24 +1000,24 @@ def build_resume_context(
                         "latest_experiment_yaml_path": latest_snapshot.get(
                             "latest_experiment_yaml_path", ""
                         ),
+                        "latest_local_substep_step_id": latest_snapshot.get(
+                            "latest_local_substep_step_id", ""
+                        ),
+                        "latest_local_substep_index": latest_snapshot.get(
+                            "latest_local_substep_index", ""
+                        ),
                     }
                 user_entries = user_entries[1:]
 
-    candidates = resolve_experiment_log_paths(config, device_id)
-    log_path = _select_existing_log_path(candidates)
     if log_path is None:
         logger.bind(tag=TAG).info(
             f"resume context skipped: no device log found for device_id={device_id}"
         )
         return None
 
-    try:
-        log_text = log_path.read_text(encoding="utf-8")
-    except Exception as exc:
-        logger.bind(tag=TAG).warning(f"resume log read failed: {log_path} ({exc})")
+    if not log_text:
         return None
 
-    transcript_snapshot = _extract_latest_transcript_snapshot(log_text)
     turns = _parse_turns(log_text)
     if not turns:
         partial_turn = _parse_latest_partial_turn(log_text)
@@ -841,6 +1036,12 @@ def build_resume_context(
                     ),
                     "latest_experiment_yaml_path": transcript_snapshot.get(
                         "latest_experiment_yaml_path", ""
+                    ),
+                    "latest_local_substep_step_id": transcript_snapshot.get(
+                        "latest_local_substep_step_id", ""
+                    ),
+                    "latest_local_substep_index": transcript_snapshot.get(
+                        "latest_local_substep_index", ""
                     ),
                 }
 
@@ -865,6 +1066,12 @@ def build_resume_context(
                 "latest_experiment_yaml_path": transcript_snapshot.get(
                     "latest_experiment_yaml_path", ""
                 ),
+                "latest_local_substep_step_id": transcript_snapshot.get(
+                    "latest_local_substep_step_id", ""
+                ),
+                "latest_local_substep_index": transcript_snapshot.get(
+                    "latest_local_substep_index", ""
+                ),
             }
         return None
 
@@ -884,6 +1091,12 @@ def build_resume_context(
                 ),
                 "latest_experiment_yaml_path": transcript_snapshot.get(
                     "latest_experiment_yaml_path", ""
+                ),
+                "latest_local_substep_step_id": transcript_snapshot.get(
+                    "latest_local_substep_step_id", ""
+                ),
+                "latest_local_substep_index": transcript_snapshot.get(
+                    "latest_local_substep_index", ""
                 ),
             }
         selected = selected[1:]

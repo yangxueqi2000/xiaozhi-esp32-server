@@ -36,10 +36,12 @@ class _FakeLogger:
 fake_logger_module = types.ModuleType("config.logger")
 fake_logger_module.setup_logging = lambda: _FakeLogger()
 sys.modules.setdefault("config.logger", fake_logger_module)
+sys.modules.setdefault("opuslib_next", types.ModuleType("opuslib_next"))
 
 from core.providers.llm.codex.codex import (
     _CodexSession,
     _decode_stderr_line,
+    _experiment_context_from_kwargs,
     _experiment_prompt_block,
     _load_codex_mcp_server_configs,
     _recoverable_stderr_reason,
@@ -383,6 +385,30 @@ class CodexPromptStateTest(unittest.TestCase):
             prompt_text,
         )
 
+    def test_experiment_context_from_kwargs_keeps_local_substep_state(self):
+        context = _experiment_context_from_kwargs(
+            {
+                "experiment_current_step_id": "step_01_alkaline_analysis",
+                "experiment_local_substep_step_id": "step_01_alkaline_analysis",
+                "experiment_local_substep_index": "8",
+                "experiment_resume_latest_local_substep_step_id": (
+                    "step_01_alkaline_analysis"
+                ),
+                "experiment_resume_latest_local_substep_index": "8",
+            }
+        )
+
+        self.assertEqual(
+            "step_01_alkaline_analysis",
+            context["experiment_local_substep_step_id"],
+        )
+        self.assertEqual("8", context["experiment_local_substep_index"])
+        self.assertEqual(
+            "step_01_alkaline_analysis",
+            context["experiment_resume_latest_local_substep_step_id"],
+        )
+        self.assertEqual("8", context["experiment_resume_latest_local_substep_index"])
+
     def test_experiment_prompt_block_includes_graph_alignment_and_uvvis_execution_guards(self):
         prompt_text = _experiment_prompt_block(
             {
@@ -413,6 +439,38 @@ class CodexPromptStateTest(unittest.TestCase):
         self.assertIn("inspect the shared uv_data_common directory", prompt_text)
         self.assertIn("uvvis_measure_kinetics", prompt_text)
         self.assertIn("Do not verbalize internal orchestration rules", prompt_text)
+
+    def test_experiment_prompt_block_includes_local_substep_recovery_guard(self):
+        prompt_text = _experiment_prompt_block(
+            {
+                "experiment_prewarm_wait_result": "ready",
+                "experiment_prewarm_status": "completed",
+                "experiment_prewarm_ready_level": "completed",
+                "experiment_session_id": "exp-1",
+                "experiment_current_step_id": "step_01_alkaline_analysis",
+                "experiment_local_substep_step_id": "step_01_alkaline_analysis",
+                "experiment_local_substep_index": "8",
+                "experiment_resume_recovery_required": "true",
+                "experiment_resume_latest_current_step_id": "step_01_alkaline_analysis",
+                "experiment_resume_latest_local_substep_step_id": (
+                    "step_01_alkaline_analysis"
+                ),
+                "experiment_resume_latest_local_substep_index": "8",
+            },
+            "\u7ee7\u7eed\u521a\u624d\u5b9e\u9a8c",
+        )
+
+        self.assertIn("Trusted local substep anchor:", prompt_text)
+        self.assertIn("local_substep_index=8", prompt_text)
+        self.assertIn(
+            "Do not ask the student to repeat data from earlier local substeps",
+            prompt_text,
+        )
+        self.assertIn("Trusted recovery substep snapshot:", prompt_text)
+        self.assertIn(
+            "Do not re-ask measurements, masses, burette readings",
+            prompt_text,
+        )
 
     def test_recent_photo_confirmation_context_is_included_on_later_turn(self):
         session = self._make_session()

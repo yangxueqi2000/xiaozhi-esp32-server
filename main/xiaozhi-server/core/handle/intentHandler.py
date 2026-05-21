@@ -467,8 +467,18 @@ def _yaml_step_uses_local_substeps(step: dict) -> bool:
 
 
 def _clear_local_experiment_substep_state(conn) -> None:
+    old_step_id = str(getattr(conn, "_experiment_local_substep_step_id", "") or "").strip()
+    old_index = getattr(conn, "_experiment_local_substep_index", 0)
     conn._experiment_local_substep_step_id = ""
     conn._experiment_local_substep_index = 0
+    if (old_step_id or int(old_index or 0) != 0) and hasattr(
+        conn,
+        "_persist_experiment_local_substep_state",
+    ):
+        try:
+            conn._persist_experiment_local_substep_state()
+        except Exception:
+            pass
 
 
 def _get_local_experiment_substep_index(
@@ -503,8 +513,18 @@ def _set_local_experiment_substep_index(
         return 0
 
     clamped_index = max(0, min(int(index), substep_count - 1))
+    old_step_id = str(getattr(conn, "_experiment_local_substep_step_id", "") or "").strip()
+    old_index = getattr(conn, "_experiment_local_substep_index", 0)
     conn._experiment_local_substep_step_id = target_step_id
     conn._experiment_local_substep_index = clamped_index
+    if (
+        (old_step_id != target_step_id or int(old_index or 0) != clamped_index)
+        and hasattr(conn, "_persist_experiment_local_substep_state")
+    ):
+        try:
+            conn._persist_experiment_local_substep_state()
+        except Exception:
+            pass
     return clamped_index
 
 
@@ -519,6 +539,7 @@ def _build_experiment_step_meta_from_yaml_substep(
     if not isinstance(substep, dict):
         return meta
 
+    parent_step_title = str(meta.get("title", "") or "").strip()
     substep_title = str(substep.get("title", "") or "").strip()
     substep_instruction = _first_nonempty_text(
         substep.get("instruction", ""),
@@ -535,6 +556,9 @@ def _build_experiment_step_meta_from_yaml_substep(
 
     meta["substep_index"] = index + 1
     meta["substep_count"] = count
+    meta["is_local_substep"] = True
+    if parent_step_title:
+        meta["parent_step_title"] = parent_step_title
     return meta
 
 
@@ -638,6 +662,91 @@ def _load_fallback_experiment_step_meta_from_yaml(
     return meta
 
 
+def _load_current_local_experiment_substep_meta_from_yaml(
+    conn,
+    *,
+    step_id: str = "",
+    prefer_first_substep: bool = False,
+) -> dict:
+    target_step_id = str(
+        step_id
+        or getattr(conn, "experiment_current_step_id", "")
+        or _get_active_local_experiment_step_id(conn)
+        or ""
+    ).strip()
+    if not target_step_id:
+        return {}
+
+    yaml_step = _resolve_experiment_step_by_id(conn).get(target_step_id)
+    if not _yaml_step_uses_local_substeps(yaml_step):
+        return {}
+
+    base_meta = _build_experiment_step_meta_from_yaml_step(
+        yaml_step,
+        prefer_first_substep=prefer_first_substep,
+    )
+    return _resolve_local_experiment_substep_view(conn, base_meta).get(
+        "step_meta",
+        base_meta,
+    )
+
+
+def _prefer_yaml_local_substep_meta(
+    conn,
+    step_meta: dict,
+    *,
+    prefer_first_substep: bool = False,
+) -> dict:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if session_id:
+        return step_meta
+
+    target_step_id = str(
+        (step_meta or {}).get("step_id", "")
+        or getattr(conn, "experiment_current_step_id", "")
+        or _get_active_local_experiment_step_id(conn)
+        or ""
+    ).strip()
+    if not target_step_id:
+        return step_meta
+
+    local_substep_meta = _load_current_local_experiment_substep_meta_from_yaml(
+        conn,
+        step_id=target_step_id,
+        prefer_first_substep=prefer_first_substep,
+    )
+    if not local_substep_meta:
+        return step_meta
+
+    return _merge_experiment_step_meta(local_substep_meta, step_meta)
+
+
+def _restore_resume_local_experiment_substep_state(
+    conn,
+    *,
+    require_step_match: bool = True,
+    source: str = "resume_context",
+) -> bool:
+    restore = getattr(conn, "_restore_experiment_local_substep_state", None)
+    if not callable(restore):
+        return False
+
+    return bool(
+        restore(
+            step_id=str(
+                getattr(conn, "experiment_resume_latest_local_substep_step_id", "")
+                or ""
+            ).strip(),
+            index=str(
+                getattr(conn, "experiment_resume_latest_local_substep_index", "")
+                or ""
+            ).strip(),
+            source=source,
+            require_step_match=require_step_match,
+        )
+    )
+
+
 def _merge_experiment_step_meta(primary: dict, fallback: dict) -> dict:
     merged = dict(fallback or {})
     for key, value in (primary or {}).items():
@@ -651,10 +760,12 @@ def _get_cached_experiment_step_meta(conn) -> dict:
     fallback = _extract_experiment_step_meta(
         getattr(conn, "experiment_progress_summary", None)
     )
-    return _enrich_experiment_step_meta_from_yaml(
+    meta = _enrich_experiment_step_meta_from_yaml(
         conn,
         _merge_experiment_step_meta(primary, fallback),
     )
+    meta = _resolve_local_experiment_substep_view(conn, meta).get("step_meta", meta)
+    return _prefer_yaml_local_substep_meta(conn, meta)
 
 
 def _extract_experiment_current_progress(payload):
@@ -827,6 +938,519 @@ def _first_nonempty_text(*values) -> str:
         if text:
             return text
     return ""
+
+
+def _rewrite_user_facing_record_instruction(text: str) -> str:
+    instruction = _first_nonempty_text(text)
+    if not instruction:
+        return ""
+
+    stripped = instruction.rstrip("。！？!?；;，, ").strip()
+    if not stripped.startswith("记录"):
+        return instruction
+
+    target = stripped[len("记录") :].strip()
+    if not target:
+        return instruction
+    return f"先把{target}记下来"
+
+
+def _extract_spoken_numbers_from_text(text: str) -> list[float]:
+    values = []
+    for token in re.findall(r"[0-9零一二两三四五六七八九十百千万点半\.]+", str(text or "")):
+        value = textUtils.parse_spoken_number(token)
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _get_active_local_experiment_step_id(conn) -> str:
+    return str(getattr(conn, "_experiment_local_substep_step_id", "") or "").strip()
+
+
+def _extract_local_substep_report_requirement(step_meta: dict) -> dict:
+    if not bool((step_meta or {}).get("is_local_substep")):
+        return {}
+
+    instruction = _first_nonempty_text(
+        (step_meta or {}).get("instruction", ""),
+        (step_meta or {}).get("description", ""),
+    )
+    if not instruction:
+        return {}
+
+    cleaned = instruction.rstrip("。！？!?；; ").strip()
+    if not cleaned:
+        return {}
+
+    weight_match = re.search(r"于\s*([A-Za-z0-9_]+)", cleaned)
+    weight_target = str(weight_match.group(1) or "").strip() if weight_match else ""
+    if "记录实际质量" in cleaned:
+        subject = weight_target or "这一份样品"
+        return {
+            "kind": "mass",
+            "requires_number": True,
+            "completion_prompt": f"记录完告诉我{subject}的实际质量。",
+            "missing_reply": f"把{subject}的实际质量报给我，我收到就带你下一步。",
+        }
+
+    if cleaned.startswith("记录"):
+        target = cleaned[len("记录") :].strip()
+        if not target:
+            return {}
+        requires_number = any(
+            token in target for token in ("读数", "体积", "质量", "浓度", "取样量")
+        )
+        return {
+            "kind": "record",
+            "requires_number": requires_number,
+            "completion_prompt": f"记录完告诉我{target}。",
+            "missing_reply": f"把{target}告诉我，我收到就带你下一步。",
+        }
+
+    rewritten_match = re.match(r"^先把(.+?)记下(?:来)?$", cleaned)
+    if rewritten_match:
+        target = str(rewritten_match.group(1) or "").strip()
+        if not target:
+            return {}
+        requires_number = any(
+            token in target for token in ("读数", "体积", "质量", "浓度", "取样量")
+        )
+        return {
+            "kind": "record",
+            "requires_number": requires_number,
+            "completion_prompt": f"记录完告诉我{target}。",
+            "missing_reply": f"把{target}告诉我，我收到就带你下一步。",
+        }
+
+    return {}
+
+
+def _local_substep_report_is_satisfied(filtered_text: str, requirement: dict) -> bool:
+    normalized = _first_nonempty_text(filtered_text)
+    if not normalized or not requirement:
+        return False
+
+    if not bool(requirement.get("requires_number")):
+        return True
+
+    return bool(_extract_spoken_numbers_from_text(normalized))
+
+
+_LOCAL_SUBSTEP_TARGET_RE = re.compile(
+    r"(?<![A-Za-z0-9_])((?:std|analysis|sample)_\d+)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+_EXP3_STD_INITIAL_SUBSTEP_INDEXES = {8, 14, 20}
+_EXP3_STD_FINAL_SUBSTEP_INDEXES = {10, 16, 22}
+_EXP3_ANALYSIS_ALIQUOT_SUBSTEP_INDEXES = {31, 37, 43}
+_EXP3_ANALYSIS_INITIAL_SUBSTEP_INDEXES = {34, 40, 46}
+_EXP3_ANALYSIS_FINAL_SUBSTEP_INDEXES = {36, 42, 48}
+_EXP3_SAMPLE_PREPARATION_UPDATES = {
+    24: {"dissolved_confirmed": True},
+    25: {"heated_for_dissolution": True},
+    26: {
+        "cooled_before_transfer": True,
+        "transferred_to_100ml_flask": True,
+    },
+    27: {"diluted_to_mark": True},
+    28: {"mixed_confirmed": True},
+}
+
+
+def _normalize_local_substep_target_label(value: str) -> str:
+    return re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
+
+
+def _extract_local_substep_target_label(step_meta: dict) -> str:
+    haystack = " ".join(
+        str((step_meta or {}).get(key, "") or "").strip()
+        for key in ("instruction", "description", "title", "step_id")
+    )
+    match = _LOCAL_SUBSTEP_TARGET_RE.search(haystack)
+    if match:
+        return _normalize_local_substep_target_label(match.group(1))
+
+    try:
+        substep_index = int((step_meta or {}).get("substep_index") or 0)
+    except Exception:
+        substep_index = 0
+
+    if substep_index == 23 or 24 <= substep_index <= 28:
+        return "sample_1"
+
+    return ""
+
+
+def _extract_local_substep_numeric_value(filtered_text: str) -> float | None:
+    values = _extract_spoken_numbers_from_text(filtered_text)
+    return values[0] if values else None
+
+
+def _extract_numeric_suffix_text(value: str) -> str:
+    match = re.search(r"(\d+)$", str(value or "").strip())
+    return str(match.group(1) or "").strip() if match else ""
+
+
+def _clone_current_data(value):
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _clone_current_list(value):
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _merge_ordered_record_item(
+    existing_items,
+    *,
+    key_name: str,
+    item: dict,
+    order: list[str],
+) -> list[dict]:
+    merged_items = _clone_current_list(existing_items)
+    target_key = str(item.get(key_name, "") or "").strip()
+    if not target_key:
+        return merged_items
+
+    updated = False
+    for index, existing in enumerate(merged_items):
+        if str(existing.get(key_name, "") or "").strip() == target_key:
+            combined = dict(existing)
+            combined.update(item)
+            merged_items[index] = combined
+            updated = True
+            break
+
+    if not updated:
+        merged_items.append(dict(item))
+
+    ordering = {name: position for position, name in enumerate(order)}
+    merged_items.sort(
+        key=lambda row: (
+            ordering.get(str(row.get(key_name, "") or "").strip(), len(ordering)),
+            str(row.get(key_name, "") or "").strip(),
+        )
+    )
+    return merged_items
+
+
+def _find_local_substep_weighing_mass(current_data: dict, target_label: str) -> float | None:
+    for item in _clone_current_list((current_data or {}).get("weighing_records")):
+        if str(item.get("record_id", "") or "").strip() == target_label:
+            value = item.get("actual_mass_g")
+            if isinstance(value, (int, float)):
+                return float(value)
+    return None
+
+
+def _extract_local_substep_endpoint_observation(filtered_text: str) -> str:
+    normalized = str(filtered_text or "").strip()
+    if not normalized:
+        return ""
+    if "黄色" in normalized and "橙色" in normalized:
+        if "恰变" in normalized or "刚变" in normalized:
+            return "黄色恰变橙色"
+        return "黄色变橙色"
+    return ""
+
+
+def _extract_local_substep_trial_validity(filtered_text: str) -> bool | None:
+    normalized = str(filtered_text or "").strip()
+    if not normalized:
+        return None
+    if any(token in normalized for token in ("无效", "重做", "失败")):
+        return False
+    if any(token in normalized for token in ("有效", "正常", "可以", "可用")):
+        return True
+    return None
+
+
+def _compose_exp3_standardization_trial_item(
+    target_label: str,
+    current_data: dict,
+) -> dict:
+    trial_suffix = _extract_numeric_suffix_text(target_label) or "1"
+    return {
+        "trial_id": trial_suffix,
+        "container_label": target_label,
+        "standard_material_label": target_label,
+        "standard_mass_g": _find_local_substep_weighing_mass(current_data, target_label),
+    }
+
+
+def _compose_exp3_analysis_trial_item(target_label: str) -> dict:
+    trial_suffix = _extract_numeric_suffix_text(target_label) or "1"
+    return {
+        "trial_id": trial_suffix,
+        "container_label": target_label,
+        "aliquot_source_label": "sample_1",
+    }
+
+
+def _refresh_exp3_trial_measurement_status(item: dict) -> dict:
+    updated = dict(item or {})
+    required_fields = (
+        "burette_initial_ml",
+        "burette_final_ml",
+        "hcl_volume_used_ml",
+        "endpoint_observation",
+        "endpoint_confirmed",
+        "trial_valid",
+    )
+    if all(updated.get(field) not in (None, "") for field in required_fields):
+        updated["measurement_status"] = "measured"
+    elif any(field in updated for field in required_fields):
+        updated["measurement_status"] = "pending_measured_in_real_run"
+    return updated
+
+
+def _build_exp3_local_substep_write_fields(
+    step_meta: dict,
+    filtered_text: str,
+    current_data: dict,
+) -> dict:
+    step_id = str((step_meta or {}).get("step_id", "") or "").strip()
+    if step_id != "step_01_alkaline_analysis":
+        return {}
+
+    try:
+        substep_index = int((step_meta or {}).get("substep_index") or 0)
+    except Exception:
+        substep_index = 0
+
+    target_label = _extract_local_substep_target_label(step_meta)
+    first_value = _extract_local_substep_numeric_value(filtered_text)
+    spoken_values = _extract_spoken_numbers_from_text(filtered_text)
+    prepared_current = _clone_current_data(current_data)
+    write_fields = {}
+
+    if substep_index in {5, 11, 17, 23} and first_value is not None:
+        record_id = target_label or ("sample_1" if substep_index == 23 else "")
+        if not record_id:
+            return {}
+        material_name = "无水Na2CO3" if record_id.startswith("std_") else "工业碱样品"
+        weighing_item = {
+            "record_id": record_id,
+            "material_name": material_name,
+            "actual_mass_g": float(first_value),
+            "weighing_valid": True,
+        }
+        write_fields["weighing_records"] = _merge_ordered_record_item(
+            prepared_current.get("weighing_records"),
+            key_name="record_id",
+            item=weighing_item,
+            order=["std_1", "std_2", "std_3", "sample_1"],
+        )
+        prepared_current.update(write_fields)
+        if record_id.startswith("std_"):
+            trial_item = _compose_exp3_standardization_trial_item(
+                record_id,
+                prepared_current,
+            )
+            trial_item["standard_mass_g"] = float(first_value)
+            write_fields["standardization_trials"] = _merge_ordered_record_item(
+                prepared_current.get("standardization_trials"),
+                key_name="container_label",
+                item=_refresh_exp3_trial_measurement_status(trial_item),
+                order=["std_1", "std_2", "std_3"],
+            )
+
+    elif substep_index in _EXP3_SAMPLE_PREPARATION_UPDATES:
+        prep_item = _clone_current_data(prepared_current.get("analysis_sample_preparation"))
+        prep_item.setdefault("sample_record_id", "sample_1")
+        prep_item.update(_EXP3_SAMPLE_PREPARATION_UPDATES[substep_index])
+        write_fields["analysis_sample_preparation"] = prep_item
+
+    elif substep_index in _EXP3_STD_INITIAL_SUBSTEP_INDEXES and target_label and first_value is not None:
+        trial_item = _compose_exp3_standardization_trial_item(target_label, prepared_current)
+        trial_item["burette_initial_ml"] = float(first_value)
+        write_fields["standardization_trials"] = _merge_ordered_record_item(
+            prepared_current.get("standardization_trials"),
+            key_name="container_label",
+            item=_refresh_exp3_trial_measurement_status(trial_item),
+            order=["std_1", "std_2", "std_3"],
+        )
+
+    elif substep_index in _EXP3_STD_FINAL_SUBSTEP_INDEXES and target_label and first_value is not None:
+        trial_item = _compose_exp3_standardization_trial_item(target_label, prepared_current)
+        initial_value = None
+        for existing in _clone_current_list(prepared_current.get("standardization_trials")):
+            if str(existing.get("container_label", "") or "").strip() == target_label:
+                trial_item.update(existing)
+                initial_value = existing.get("burette_initial_ml")
+                break
+        trial_item["burette_final_ml"] = float(first_value)
+        if len(spoken_values) >= 2:
+            trial_item["hcl_volume_used_ml"] = float(spoken_values[1])
+        elif isinstance(initial_value, (int, float)):
+            trial_item["hcl_volume_used_ml"] = round(
+                float(first_value) - float(initial_value),
+                4,
+            )
+        observation = _extract_local_substep_endpoint_observation(filtered_text)
+        if observation:
+            trial_item["endpoint_observation"] = observation
+            trial_item["endpoint_confirmed"] = True
+            write_fields["titration_endpoint_rule_confirmed"] = True
+        trial_valid = _extract_local_substep_trial_validity(filtered_text)
+        if trial_valid is not None:
+            trial_item["trial_valid"] = trial_valid
+        write_fields["standardization_trials"] = _merge_ordered_record_item(
+            prepared_current.get("standardization_trials"),
+            key_name="container_label",
+            item=_refresh_exp3_trial_measurement_status(trial_item),
+            order=["std_1", "std_2", "std_3"],
+        )
+
+    elif substep_index in _EXP3_ANALYSIS_ALIQUOT_SUBSTEP_INDEXES and target_label:
+        trial_item = _compose_exp3_analysis_trial_item(target_label)
+        trial_item["aliquot_volume_ml"] = 25.0
+        write_fields["analysis_trials"] = _merge_ordered_record_item(
+            prepared_current.get("analysis_trials"),
+            key_name="container_label",
+            item=_refresh_exp3_trial_measurement_status(trial_item),
+            order=["analysis_1", "analysis_2", "analysis_3"],
+        )
+
+    elif substep_index in _EXP3_ANALYSIS_INITIAL_SUBSTEP_INDEXES and target_label and first_value is not None:
+        trial_item = _compose_exp3_analysis_trial_item(target_label)
+        trial_item["aliquot_volume_ml"] = 25.0
+        for existing in _clone_current_list(prepared_current.get("analysis_trials")):
+            if str(existing.get("container_label", "") or "").strip() == target_label:
+                trial_item.update(existing)
+                break
+        trial_item["burette_initial_ml"] = float(first_value)
+        write_fields["analysis_trials"] = _merge_ordered_record_item(
+            prepared_current.get("analysis_trials"),
+            key_name="container_label",
+            item=_refresh_exp3_trial_measurement_status(trial_item),
+            order=["analysis_1", "analysis_2", "analysis_3"],
+        )
+
+    elif substep_index in _EXP3_ANALYSIS_FINAL_SUBSTEP_INDEXES and target_label and first_value is not None:
+        trial_item = _compose_exp3_analysis_trial_item(target_label)
+        trial_item["aliquot_volume_ml"] = 25.0
+        initial_value = None
+        for existing in _clone_current_list(prepared_current.get("analysis_trials")):
+            if str(existing.get("container_label", "") or "").strip() == target_label:
+                trial_item.update(existing)
+                initial_value = existing.get("burette_initial_ml")
+                break
+        trial_item["burette_final_ml"] = float(first_value)
+        if len(spoken_values) >= 2:
+            trial_item["hcl_volume_used_ml"] = float(spoken_values[1])
+        elif isinstance(initial_value, (int, float)):
+            trial_item["hcl_volume_used_ml"] = round(
+                float(first_value) - float(initial_value),
+                4,
+            )
+        observation = _extract_local_substep_endpoint_observation(filtered_text)
+        if observation:
+            trial_item["endpoint_observation"] = observation
+            trial_item["endpoint_confirmed"] = True
+            write_fields["titration_endpoint_rule_confirmed"] = True
+        trial_valid = _extract_local_substep_trial_validity(filtered_text)
+        if trial_valid is not None:
+            trial_item["trial_valid"] = trial_valid
+        write_fields["analysis_trials"] = _merge_ordered_record_item(
+            prepared_current.get("analysis_trials"),
+            key_name="container_label",
+            item=_refresh_exp3_trial_measurement_status(trial_item),
+            order=["analysis_1", "analysis_2", "analysis_3"],
+        )
+
+    if write_fields and "real_measurement_status" not in write_fields:
+        write_fields["real_measurement_status"] = str(
+            prepared_current.get("real_measurement_status")
+            or "pending_measured_in_real_run"
+        ).strip()
+
+    return write_fields
+
+
+async def _write_local_substep_graph_fields_if_needed(
+    conn,
+    step_meta: dict,
+    filtered_text: str,
+) -> dict:
+    if not bool((step_meta or {}).get("is_local_substep")):
+        return {"attempted": False, "ok": True}
+
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return {"attempted": False, "ok": True}
+
+    try:
+        progress_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "get_current_progress",
+            {"session_id": session_id},
+            priority="foreground",
+        )
+        current_progress = _extract_experiment_current_progress(progress_payload)
+        if current_progress is None:
+            start_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "start_trial",
+                {"session_id": session_id},
+                priority="foreground",
+            )
+            current_progress = _extract_experiment_current_progress(start_payload)
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "ok": False,
+            "message": f"加载实验记录进度失败: {exc}",
+        }
+
+    current_data = {}
+    if isinstance(current_progress, dict):
+        current_data = _clone_current_data(current_progress.get("current_data"))
+
+    write_fields = _build_exp3_local_substep_write_fields(
+        step_meta,
+        filtered_text,
+        current_data,
+    )
+    if not write_fields:
+        return {"attempted": False, "ok": True}
+
+    try:
+        add_fields_payload = await _call_experiment_graph_tool_fast(
+            conn,
+            "add_fields",
+            {"session_id": session_id, "data": write_fields},
+            priority="foreground",
+        )
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "ok": False,
+            "message": f"写入实验记录失败: {exc}",
+        }
+
+    body = _experiment_result_body(add_fields_payload)
+    ok = bool(body.get("ok"))
+    errors = body.get("errors")
+    if ok:
+        return {
+            "attempted": True,
+            "ok": True,
+            "current_progress": _extract_experiment_current_progress(add_fields_payload),
+        }
+
+    message_parts = []
+    if isinstance(errors, list) and errors:
+        message_parts.extend(str(item or "").strip() for item in errors if str(item or "").strip())
+    message = str(body.get("message", "") or "").strip()
+    if message:
+        message_parts.append(message)
+    return {
+        "attempted": True,
+        "ok": False,
+        "message": "；".join(message_parts) or "实验记录写入失败",
+    }
 
 
 def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
@@ -1033,8 +1657,17 @@ def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
         step_meta.get("description", ""),
         title,
     )
+    instruction = _rewrite_user_facing_record_instruction(instruction)
+    parent_step_title = _first_nonempty_text(step_meta.get("parent_step_title", ""))
+    if (
+        step_meta.get("is_local_substep")
+        and instruction
+        and (not parent_step_title or title == parent_step_title)
+    ):
+        title = ""
     safety = _first_nonempty_text(step_meta.get("safety", ""))
     tip = _first_nonempty_text(step_meta.get("tip", ""))
+    local_report_requirement = _extract_local_substep_report_requirement(step_meta)
 
     if not instruction:
         return ""
@@ -1082,7 +1715,9 @@ def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
         parts.append(f"注意{safety}。")
     elif tip:
         parts.append(f"{tip}。")
-    parts.append("做好后告诉我。")
+    parts.append(
+        str(local_report_requirement.get("completion_prompt") or "做好后告诉我。").strip()
+    )
     return "".join(parts)
 
 
@@ -1407,6 +2042,8 @@ async def _reset_experiment_fresh_start_context(conn) -> None:
         ("experiment_reference_query", ""),
         ("experiment_resume_recovery_required", False),
         ("experiment_resume_latest_current_step_id", ""),
+        ("experiment_resume_latest_local_substep_step_id", ""),
+        ("experiment_resume_latest_local_substep_index", ""),
         ("experiment_resume_latest_session_id", ""),
         ("experiment_resume_log_path", ""),
         ("experiment_resume_turn_count", 0),
@@ -1499,6 +2136,10 @@ async def _handle_explicit_experiment_resume_request(
     target_step_id = str(
         getattr(conn, "experiment_resume_latest_current_step_id", "") or ""
     ).strip()
+    if not target_step_id:
+        target_step_id = str(
+            getattr(conn, "experiment_resume_latest_local_substep_step_id", "") or ""
+        ).strip()
     log_path = str(getattr(conn, "experiment_resume_log_path", "") or "").strip()
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
 
@@ -1534,6 +2175,44 @@ async def _handle_explicit_experiment_resume_request(
         log_path,
     )
     if not recovered:
+        if _resume_should_allow_local_step_fallback(conn, target_step_id):
+            resumed = await _speak_explicit_resume_local_step_fallback(
+                conn,
+                original_text,
+                target_step_id=target_step_id,
+                log_path=log_path,
+                source="explicit_resume_local_log_fallback",
+            )
+            if resumed:
+                return True
+        if not recovery_reply and target_step_id:
+            conn.logger.bind(tag=TAG).warning(
+                "experiment explicit resume replay unavailable; falling back to local log-guided step resume: "
+                f"device_id={getattr(conn, 'device_id', '')}, "
+                f"target_step_id={target_step_id}, "
+                f"session_id={session_id or ''}, "
+                f"log_path={log_path}"
+            )
+            conn.experiment_current_step_id = target_step_id
+            conn.experiment_current_step = {"result": {"step": {"id": target_step_id}}}
+            conn.experiment_progress_summary = {
+                "result": {"summary": {"current_step": {"step_id": target_step_id}}}
+            }
+            _restore_resume_local_experiment_substep_state(
+                conn,
+                require_step_match=True,
+                source="explicit_resume_from_device_log_fallback",
+            )
+            step_meta = _get_cached_experiment_step_meta(conn)
+            reply = _prepare_fastpath_spoken_reply(
+                _compose_experiment_step_reply(step_meta, mode="guide"),
+                fallback_step_meta=step_meta,
+                fallback_mode="guide",
+            )
+            if reply:
+                await _start_direct_intent_turn(conn, original_text)
+                speak_txt(conn, reply)
+                return True
         reply = recovery_reply or (
             "我找到了上次实验的日志，但当前图谱没法自动跳到那一步。"
             "你可以让我重新开始，或者明确告诉我要跳到哪一步。"
@@ -1546,6 +2225,15 @@ async def _handle_explicit_experiment_resume_request(
         conn,
         session_id,
         reason="explicit_resume_from_device_log",
+    )
+    _restore_resume_local_experiment_substep_state(
+        conn,
+        require_step_match=True,
+        source="explicit_resume_from_device_log",
+    )
+    step_meta = _resolve_local_experiment_substep_view(conn, step_meta).get(
+        "step_meta",
+        step_meta,
     )
     reply = _prepare_fastpath_spoken_reply(
         _compose_experiment_step_reply(step_meta, mode="guide"),
@@ -1820,8 +2508,23 @@ def _is_experiment_fast_path_available(conn) -> bool:
 
     if getattr(conn, "experiment_session_id", ""):
         return True
+    if _get_active_local_experiment_step_id(conn):
+        return True
     step_meta = _get_cached_experiment_step_meta(conn)
-    return bool(step_meta.get("instruction") or step_meta.get("title"))
+    if step_meta.get("instruction") or step_meta.get("title"):
+        return True
+
+    current_step_id = str(
+        getattr(conn, "experiment_current_step_id", "")
+        or _get_active_local_experiment_step_id(conn)
+        or ""
+    ).strip()
+    fallback_meta = _load_fallback_experiment_step_meta_from_yaml(
+        conn,
+        step_id=current_step_id,
+        prefer_first_substep=True,
+    )
+    return bool(fallback_meta.get("instruction") or fallback_meta.get("title"))
 
 
 def _is_experiment_opening_fast_path_enabled(conn) -> bool:
@@ -1922,9 +2625,12 @@ async def _call_experiment_graph_tool_fast(
 async def _load_experiment_step_meta(conn) -> dict:
     step_meta = _get_cached_experiment_step_meta(conn)
     if step_meta.get("instruction") or step_meta.get("title"):
-        return step_meta
+        return _prefer_yaml_local_substep_meta(conn, step_meta)
 
     current_step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
+    local_step_id = _get_active_local_experiment_step_id(conn)
+    if not current_step_id and local_step_id:
+        current_step_id = local_step_id
 
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     if not session_id:
@@ -1933,7 +2639,16 @@ async def _load_experiment_step_meta(conn) -> dict:
             step_id=current_step_id,
             prefer_first_substep=True,
         )
-        return _merge_experiment_step_meta(step_meta, fallback_meta)
+        merged = _merge_experiment_step_meta(step_meta, fallback_meta)
+        merged = _resolve_local_experiment_substep_view(conn, merged).get(
+            "step_meta",
+            merged,
+        )
+        return _prefer_yaml_local_substep_meta(
+            conn,
+            merged,
+            prefer_first_substep=True,
+        )
 
     try:
         step_payload, progress_payload = await asyncio.gather(
@@ -1956,7 +2671,12 @@ async def _load_experiment_step_meta(conn) -> dict:
             step_id=current_step_id,
             prefer_first_substep=False,
         )
-        return _merge_experiment_step_meta(step_meta, fallback_meta)
+        merged = _merge_experiment_step_meta(step_meta, fallback_meta)
+        merged = _resolve_local_experiment_substep_view(conn, merged).get(
+            "step_meta",
+            merged,
+        )
+        return _prefer_yaml_local_substep_meta(conn, merged)
 
     conn.experiment_current_step = step_payload
     conn.experiment_progress_summary = progress_payload
@@ -1974,7 +2694,11 @@ async def _load_experiment_step_meta(conn) -> dict:
         )
         if current_step_id:
             conn.experiment_current_step_id = current_step_id
-    return loaded_meta
+    loaded_meta = _resolve_local_experiment_substep_view(conn, loaded_meta).get(
+        "step_meta",
+        loaded_meta,
+    )
+    return _prefer_yaml_local_substep_meta(conn, loaded_meta)
 
 
 async def _load_experiment_overview_title(conn) -> str:
@@ -2045,13 +2769,14 @@ async def _refresh_experiment_step_cache(conn, session_id: str):
             if getattr(conn, "experiment_resume_recovery_required", False):
                 conn.experiment_resume_latest_current_step_id = current_step_id
     conn._experiment_graph_refresh_required = False
-    return _enrich_experiment_step_meta_from_yaml(
+    meta = _enrich_experiment_step_meta_from_yaml(
         conn,
         _merge_experiment_step_meta(
             _extract_experiment_step_meta(step_payload),
             _extract_experiment_step_meta(progress_payload),
         ),
     )
+    return _resolve_local_experiment_substep_view(conn, meta).get("step_meta", meta)
 
 
 def _step_supports_confirmation_autofill(step_payload) -> bool:
@@ -2898,6 +3623,176 @@ def _collect_resume_log_user_texts_by_step(log_path: str) -> dict[str, list[str]
     return grouped
 
 
+def _best_resume_substep_match_index(substeps: list[dict], text: str) -> int | None:
+    normalized_text = str(text or "").strip()
+    if not normalized_text or not substeps:
+        return None
+
+    best_index = None
+    best_score = 0.0
+    for index, substep in enumerate(substeps):
+        if not isinstance(substep, dict):
+            continue
+        instruction = str(substep.get("instruction", "") or "").strip()
+        description = str(substep.get("description", "") or "").strip()
+        score = _yaml_step_context_match_score(
+            normalized_text,
+            {
+                "title": instruction,
+                "description": description,
+                "prompts": {"instruction": instruction},
+            },
+        )
+        if score > best_score:
+            best_index = index
+            best_score = score
+
+    if best_index is None or best_score < 0.36:
+        return None
+    return best_index
+
+
+def _infer_resume_local_substep_index_from_log(
+    conn,
+    target_step_id: str,
+    log_path: str,
+) -> int | None:
+    path_text = str(log_path or "").strip()
+    step_id = str(target_step_id or "").strip()
+    if not path_text or not step_id:
+        return None
+
+    step = _resolve_experiment_step_by_id(conn).get(step_id)
+    if not isinstance(step, dict):
+        return None
+    substeps = _extract_yaml_substeps(step)
+    if not substeps:
+        return None
+
+    try:
+        log_text = Path(path_text).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        log_text = ""
+
+    best_index = None
+    awaiting_user_reply = False
+    user_replied_after_match = False
+    last_index = len(substeps) - 1
+
+    def _consume_log_exchange(user_text: str, assistant_text: str) -> None:
+        nonlocal best_index
+        nonlocal awaiting_user_reply
+        nonlocal user_replied_after_match
+
+        normalized_user = str(user_text or "").strip()
+        normalized_assistant = str(assistant_text or "").strip()
+
+        assistant_match = _best_resume_substep_match_index(
+            substeps,
+            normalized_assistant,
+        )
+        if assistant_match is not None:
+            best_index = assistant_match
+            awaiting_user_reply = True
+            user_replied_after_match = False
+
+        if not normalized_user or _is_explicit_experiment_resume_request(normalized_user):
+            return
+
+        user_match = _best_resume_substep_match_index(substeps, normalized_user)
+        if user_match is not None:
+            best_index = user_match
+            awaiting_user_reply = False
+            user_replied_after_match = True
+            return
+
+        if awaiting_user_reply:
+            awaiting_user_reply = False
+            user_replied_after_match = True
+
+    if log_text:
+        for turn in experiment_resume._parse_turns(log_text):
+            _consume_log_exchange(
+                str(turn.get("user", "")).strip(),
+                str(turn.get("assistant", "")).strip(),
+            )
+    else:
+        for entry in experiment_resume.read_transcript_entries(path_text):
+            role = str(entry.get("role", "")).strip().upper()
+            text = str(entry.get("text", "")).strip()
+            if not text:
+                continue
+            if role == "ASSISTANT":
+                _consume_log_exchange("", text)
+            elif role == "USER":
+                _consume_log_exchange(text, "")
+
+    if best_index is None:
+        return None
+    if user_replied_after_match and best_index < last_index:
+        return best_index + 1
+    return best_index
+
+
+def _resume_should_allow_local_step_fallback(conn, target_step_id: str) -> bool:
+    step_id = str(target_step_id or "").strip()
+    if not step_id:
+        return False
+
+    step = _resolve_experiment_step_by_id(conn).get(step_id)
+    if not isinstance(step, dict):
+        return False
+    if _yaml_step_uses_local_substeps(step):
+        return True
+    return len(_resolve_experiment_yaml_step_order(conn)) == 1
+
+
+async def _speak_explicit_resume_local_step_fallback(
+    conn,
+    original_text: str,
+    *,
+    target_step_id: str,
+    log_path: str,
+    source: str,
+) -> bool:
+    step_id = str(target_step_id or "").strip()
+    if not step_id:
+        return False
+
+    conn.experiment_current_step_id = step_id
+    conn.experiment_current_step = {"result": {"step": {"id": step_id}}}
+    conn.experiment_progress_summary = {
+        "result": {"summary": {"current_step": {"step_id": step_id}}}
+    }
+
+    inferred_local_index = _infer_resume_local_substep_index_from_log(
+        conn,
+        step_id,
+        log_path,
+    )
+    if inferred_local_index is not None:
+        conn.experiment_resume_latest_local_substep_step_id = step_id
+        conn.experiment_resume_latest_local_substep_index = str(inferred_local_index)
+        _restore_resume_local_experiment_substep_state(
+            conn,
+            require_step_match=True,
+            source=source,
+        )
+
+    step_meta = _prefer_yaml_local_substep_meta(conn, {"step_id": step_id})
+    reply = _prepare_fastpath_spoken_reply(
+        _compose_experiment_step_reply(step_meta, mode="guide"),
+        fallback_step_meta=step_meta,
+        fallback_mode="guide",
+    )
+    if not reply:
+        return False
+
+    await _start_direct_intent_turn(conn, original_text)
+    speak_txt(conn, reply)
+    return True
+
+
 def _infer_experiment_resume_target_step_from_log(conn, log_path: str) -> str:
     path_text = str(log_path or "").strip()
     if not path_text:
@@ -2912,6 +3807,8 @@ def _infer_experiment_resume_target_step_from_log(conn, log_path: str) -> str:
     order = _resolve_experiment_yaml_step_order(conn)
     if not order:
         return ""
+    if len(order) == 1:
+        return order[0]
     step_by_id = _resolve_experiment_step_by_id(conn)
 
     best_step_id = ""
@@ -2927,6 +3824,14 @@ def _infer_experiment_resume_target_step_from_log(conn, log_path: str) -> str:
             best_score = score
 
     if best_score < 0.46:
+        for step_id in order:
+            inferred_local_index = _infer_resume_local_substep_index_from_log(
+                conn,
+                step_id,
+                path_text,
+            )
+            if inferred_local_index is not None:
+                return step_id
         return ""
     return best_step_id
 
@@ -8279,6 +9184,25 @@ async def handle_experiment_control_fast_intent(
     waiting_for_step_start = _assistant_waiting_for_step_start(conn)
     explicitly_ready_to_start = _is_explicit_ready_to_start_reply(filtered_text)
     action = _classify_short_experiment_control(conn, filtered_text)
+    current_local_step_meta = {}
+    local_report_requirement = {}
+
+    if not waiting_for_step_start:
+        current_local_step_meta = _prefer_yaml_local_substep_meta(
+            conn,
+            await _load_experiment_step_meta(conn),
+        )
+        local_report_requirement = _extract_local_substep_report_requirement(
+            current_local_step_meta
+        )
+        if (
+            not action
+            and local_report_requirement
+            and _local_substep_report_is_satisfied(
+                filtered_text, local_report_requirement
+            )
+        ):
+            action = "advance"
 
     if not action:
         if not _is_experiment_fast_path_action_enabled(conn, "confirm"):
@@ -8342,10 +9266,61 @@ async def handle_experiment_control_fast_intent(
         return True
 
     if action == "advance":
-        step_meta = await _load_experiment_step_meta(conn)
+        step_meta = current_local_step_meta or await _load_experiment_step_meta(conn)
+        step_meta = _prefer_yaml_local_substep_meta(conn, step_meta)
+        local_report_requirement = _extract_local_substep_report_requirement(step_meta)
+        if local_report_requirement and not _local_substep_report_is_satisfied(
+            filtered_text,
+            local_report_requirement,
+        ):
+            reply = _prepare_fastpath_spoken_reply(
+                str(local_report_requirement.get("missing_reply") or "").strip(),
+                fallback_step_meta=step_meta,
+                fallback_mode="guide",
+            )
+            if not reply:
+                return False
+            await _start_direct_intent_turn(conn, original_text)
+            if ready_reply_unlocks_step:
+                _grant_experiment_ready_guard_bypass(conn)
+            speak_txt(conn, reply)
+            return True
+        local_write_result = await _write_local_substep_graph_fields_if_needed(
+            conn,
+            step_meta,
+            filtered_text,
+        )
+        if local_write_result.get("attempted") and not local_write_result.get("ok"):
+            conn.logger.bind(tag=TAG).warning(
+                "local substep graph write failed: "
+                f"step_id={str(step_meta.get('step_id', '') or '').strip()}, "
+                f"substep_index={step_meta.get('substep_index', 0)}, "
+                f"message={str(local_write_result.get('message', '') or '').strip()}"
+            )
+            reply = _prepare_fastpath_spoken_reply(
+                "我这边还没有成功记下刚才这条实验数据，请把刚才的结果再报一次。",
+                fallback_step_meta=step_meta,
+                fallback_mode="repeat",
+            )
+            if not reply:
+                return False
+            await _start_direct_intent_turn(conn, original_text)
+            if ready_reply_unlocks_step:
+                _grant_experiment_ready_guard_bypass(conn)
+            speak_txt(conn, reply)
+            return True
         local_substep_view, advanced_local_substep = _advance_local_experiment_substep_view(
             conn,
             step_meta,
+        )
+        conn.logger.bind(tag=TAG).info(
+            "local substep advance view: "
+            f"step_id={local_substep_view.get('step_id', '')}, "
+            f"enabled={local_substep_view.get('enabled', False)}, "
+            f"index={local_substep_view.get('index', 0)}, "
+            f"count={local_substep_view.get('count', 0)}, "
+            f"advanced={advanced_local_substep}, "
+            f"instruction={str((local_substep_view.get('step_meta') or {}).get('instruction', '') or '').strip()}"
         )
         if advanced_local_substep:
             next_step_meta = local_substep_view.get("step_meta", step_meta)
