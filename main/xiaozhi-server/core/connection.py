@@ -1975,6 +1975,105 @@ class ConnectionHandler:
         )
         return payload
 
+    async def _call_server_mcp_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        priority: str = "foreground",
+    ):
+        func_handler = getattr(self, "func_handler", None)
+        server_executor = getattr(func_handler, "server_mcp_executor", None)
+        manager = getattr(server_executor, "mcp_manager", None)
+        if manager is None:
+            raise RuntimeError("server MCP manager is not ready")
+        raw_result = await manager.execute_tool(
+            tool_name,
+            arguments,
+            priority=priority,
+        )
+        payload = finalize_server_mcp_payload(
+            raw_result,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        sync_server_mcp_payload_state(
+            self,
+            tool_name=tool_name,
+            payload=payload,
+            arguments=arguments,
+        )
+        return payload
+
+    def _should_prewarm_uvvis_session(self, yaml_path: str = "") -> bool:
+        path_text = str(yaml_path or self.experiment_yaml_path or "").replace("\\", "/").lower()
+        if not path_text:
+            return False
+        return "exp2_uv_vis_analysis" in path_text
+
+    async def _prewarm_uvvis_session_if_needed(self, *, yaml_path: str = "") -> None:
+        if not self._should_prewarm_uvvis_session(yaml_path):
+            return
+
+        existing_key = str(getattr(self, "_uvvis_session_key", "") or "").strip()
+        if existing_key:
+            self.logger.bind(tag=TAG).info(
+                "uvvis prewarm skipped: session already acquired "
+                f"device_id={self.device_id}, session_key={existing_key}"
+            )
+            return
+
+        func_handler = getattr(self, "func_handler", None)
+        server_executor = getattr(func_handler, "server_mcp_executor", None)
+        manager = getattr(server_executor, "mcp_manager", None)
+        if manager is None:
+            self.logger.bind(tag=TAG).warning(
+                "uvvis prewarm skipped: server MCP manager is not ready"
+            )
+            return
+
+        try:
+            ready = await manager.ensure_client_initialized("uvvis")
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"uvvis prewarm client initialize failed: {exc}"
+            )
+            return
+
+        if not ready or not manager.is_mcp_tool("uvvis_session"):
+            self.logger.bind(tag=TAG).warning(
+                "uvvis prewarm skipped: uvvis_session tool is not ready"
+            )
+            return
+
+        try:
+            payload = await self._call_server_mcp_tool(
+                "uvvis_session",
+                {"action": "acquire"},
+                priority="prewarm_minimal",
+            )
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"uvvis prewarm acquire failed: {exc}"
+            )
+            return
+
+        body = self._experiment_result_body(payload)
+        session_key = str(body.get("session_key", "") or payload.get("session_key", "") or "").strip()
+        if session_key:
+            setattr(self, "_uvvis_session_key", session_key)
+            self.logger.bind(tag=TAG).info(
+                "uvvis prewarm acquired session: "
+                f"device_id={self.device_id}, session_key={session_key}"
+            )
+            return
+
+        message = str(body.get("message", "") or payload.get("message", "") or "").strip()
+        self.logger.bind(tag=TAG).warning(
+            "uvvis prewarm acquire returned no session key: "
+            f"device_id={self.device_id}, message={message or 'unknown'}"
+        )
+
     async def _run_experiment_prewarm_deep_stage(
         self,
         *,
@@ -2406,6 +2505,15 @@ class ConnectionHandler:
                             f"device_id={self.device_id}, "
                             f"session_id={self.experiment_session_id}, error={exc}"
                         )
+
+                try:
+                    await self._prewarm_uvvis_session_if_needed(yaml_path=yaml_path)
+                except Exception as exc:
+                    self.logger.bind(tag=TAG).warning(
+                        "uvvis prewarm failed during experiment prewarm: "
+                        f"device_id={self.device_id}, yaml_path={yaml_path}, error={exc}"
+                    )
+
                 if self.chat_session_id and self.experiment_session_id:
                     await save_experiment_session_binding(
                         self.config,

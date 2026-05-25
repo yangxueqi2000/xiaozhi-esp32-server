@@ -86,7 +86,7 @@ class _FakeConn:
         self.dialogue = _FakeDialogue()
         self.client_abort = False
         self.sentence_id = None
-        self.device_id = ""
+        self.device_id = "94:a9:90:28:ea:58"
         self.headers = {}
         self.session_id = ""
         self.experiment_session_id = "exp-1"
@@ -171,7 +171,14 @@ class UVVisSharedDarkAirIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(
             [
-                ("uvvis_prepare_dark_current", {"session_key": "lease-1"}),
+                (
+                    "uvvis_prepare_dark_current",
+                    {
+                        "session_key": "lease-1",
+                        "output_dir": str(Path("data").resolve() / "uv_data_common" / "94_a9_90_28_ea_58"),
+                        "shared_output_dir": str((Path("data") / "uv_data_common").resolve()),
+                    },
+                ),
             ],
             executed,
         )
@@ -214,7 +221,14 @@ class UVVisSharedDarkAirIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(
             [
-                ("uvvis_prepare_dark_current", {"session_key": "lease-1"}),
+                (
+                    "uvvis_prepare_dark_current",
+                    {
+                        "session_key": "lease-1",
+                        "output_dir": str(Path("data").resolve() / "uv_data_common" / "94_a9_90_28_ea_58"),
+                        "shared_output_dir": str((Path("data") / "uv_data_common").resolve()),
+                    },
+                ),
             ],
             executed,
         )
@@ -257,7 +271,14 @@ class UVVisSharedDarkAirIntentTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(
             [
-                ("uvvis_prepare_dark_current", {"session_key": "lease-1"}),
+                (
+                    "uvvis_prepare_dark_current",
+                    {
+                        "session_key": "lease-1",
+                        "output_dir": str(Path("data").resolve() / "uv_data_common" / "94_a9_90_28_ea_58"),
+                        "shared_output_dir": str((Path("data") / "uv_data_common").resolve()),
+                    },
+                ),
             ],
             executed,
         )
@@ -287,6 +308,9 @@ class UVVisSharedDarkAirIntentTest(unittest.IsolatedAsyncioTestCase):
                     "session_key": "lease-1",
                     "sample_positions": [1, 2, 3, 4, 5],
                     "ready_for_samples": True,
+                    "output_dir": str(
+                        Path("data").resolve() / "uv_data_common" / "94_a9_90_28_ea_58"
+                    ),
                 },
                 arguments,
             )

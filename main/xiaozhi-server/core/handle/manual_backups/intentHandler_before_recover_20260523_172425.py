@@ -11,7 +11,7 @@ import yaml
 from core.utils.dialogue import Message
 from core.providers.tts.dto.dto import ContentType
 from core.handle.helloHandle import checkWakeupWords
-from core.session import rotate_session_binding
+from core.session import rotate_session_binding, save_experiment_session_binding
 from plugins_func.register import Action, ActionResponse
 from core.handle.sendAudioHandle import send_stt_message
 from core.utils import experiment_resume, textUtils
@@ -28,22 +28,22 @@ TAG = __name__
 
 
 async def handle_user_intent(conn, text):
-    # 预处理输入文本，处理可能的JSON格式
+    # 棰勫鐞嗚緭鍏ユ枃鏈紝澶勭悊鍙兘鐨凧SON鏍煎紡
     try:
         if text.strip().startswith('{') and text.strip().endswith('}'):
             parsed_data = json.loads(text)
             if isinstance(parsed_data, dict) and "content" in parsed_data:
-                text = parsed_data["content"]  # 提取content用于意图分析
-                conn.current_speaker = parsed_data.get("speaker")  # 保留说话人信息
+                text = parsed_data["content"]  # 鎻愬彇content鐢ㄤ簬鎰忓浘鍒嗘瀽
+                conn.current_speaker = parsed_data.get("speaker")  # 淇濈暀璇磋瘽浜轰俊鎭?
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # 检查是否有明确的退出命令
+    # 妫€鏌ユ槸鍚︽湁鏄庣‘鐨勯€€鍑哄懡浠?
     _, filtered_text = remove_punctuation_and_length(text)
     if await check_direct_exit(conn, filtered_text):
         return True
 
-    # 检查是否是唤醒词
+    # 妫€鏌ユ槸鍚︽槸鍞ら啋璇?
     if await checkWakeupWords(conn, filtered_text):
         return True
 
@@ -61,7 +61,7 @@ async def handle_user_intent(conn, text):
             return False
 
     # Keep photo and UV-Vis direct handlers ahead of the generic experiment fast
-    # path so confirmations like "可以拍照" still follow the device shortcut.
+    # path so confirmations like "鍙互鎷嶇収" still follow the device shortcut.
     await _maybe_refresh_experiment_state_before_direct_handlers(
         conn,
         reason="before_direct_handlers",
@@ -116,13 +116,13 @@ async def handle_user_intent(conn, text):
 
     if conn.intent_type == "function_call":
         _maybe_stage_experiment_ready_guard_bypass_for_normal_turn(conn, filtered_text)
-        # 使用支持function calling的聊天方法,不再进行意图分析
+        # 浣跨敤鏀寔function calling鐨勮亰澶╂柟娉?涓嶅啀杩涜鎰忓浘鍒嗘瀽
         return False
-    # 使用LLM进行意图分析
+    # 浣跨敤LLM杩涜鎰忓浘鍒嗘瀽
     intent_result = await analyze_intent_with_llm(conn, text)
     if not intent_result:
         return False
-    # 会话开始时生成sentence_id
+    # 浼氳瘽寮€濮嬫椂鐢熸垚sentence_id
     conn.sentence_id = str(uuid.uuid4().hex)
     if _assistant_waiting_for_step_start(conn) and _is_explicit_ready_to_start_reply(
         filtered_text
@@ -131,17 +131,17 @@ async def handle_user_intent(conn, text):
             conn,
             force=True,
         )
-    # 处理各种意图
+    # 澶勭悊鍚勭鎰忓浘
     return await process_intent_result(conn, intent_result, text)
 
 
 async def check_direct_exit(conn, text):
-    """检查是否有明确的退出命令"""
+    """妫€鏌ユ槸鍚︽湁鏄庣‘鐨勯€€鍑哄懡浠?""
     _, text = remove_punctuation_and_length(text)
     cmd_exit = conn.cmd_exit
     for cmd in cmd_exit:
         if text == cmd:
-            conn.logger.bind(tag=TAG).info(f"识别到明确的退出命令: {text}")
+            conn.logger.bind(tag=TAG).info(f"璇嗗埆鍒版槑纭殑閫€鍑哄懡浠? {text}")
             await send_stt_message(conn, text)
             await conn.close()
             return True
@@ -149,18 +149,18 @@ async def check_direct_exit(conn, text):
 
 
 async def analyze_intent_with_llm(conn, text):
-    """使用LLM分析用户意图"""
+    """浣跨敤LLM鍒嗘瀽鐢ㄦ埛鎰忓浘"""
     if not hasattr(conn, "intent") or not conn.intent:
-        conn.logger.bind(tag=TAG).warning("意图识别服务未初始化")
+        conn.logger.bind(tag=TAG).warning("鎰忓浘璇嗗埆鏈嶅姟鏈垵濮嬪寲")
         return None
 
-    # 对话历史记录
+    # 瀵硅瘽鍘嗗彶璁板綍
     dialogue = conn.dialogue
     try:
         intent_result = await conn.intent.detect_intent(conn, dialogue.dialogue, text)
         return intent_result
     except Exception as e:
-        conn.logger.bind(tag=TAG).error(f"意图识别失败: {str(e)}")
+        conn.logger.bind(tag=TAG).error(f"鎰忓浘璇嗗埆澶辫触: {str(e)}")
 
     return None
 
@@ -259,17 +259,17 @@ def _matches_any_pattern(text: str, patterns) -> bool:
 def _looks_like_question_reply(text: str) -> bool:
     if not text:
         return False
-    if text.endswith(("吗", "么", "嘛", "呢")):
+    if text.endswith(("鍚?, "涔?, "鍢?, "鍛?)):
         return True
     question_tokens = (
-        "可不可以",
-        "能不能",
-        "行不行",
-        "要不要",
-        "是不是",
-        "为什么",
-        "怎么",
-        "如何",
+        "鍙笉鍙互",
+        "鑳戒笉鑳?,
+        "琛屼笉琛?,
+        "瑕佷笉瑕?,
+        "鏄笉鏄?,
+        "涓轰粈涔?,
+        "鎬庝箞",
+        "濡備綍",
     )
     return _contains_any(text, question_tokens)
 
@@ -356,6 +356,41 @@ def _extract_experiment_step_interaction(payload) -> dict:
     if not isinstance(interaction, dict):
         return {}
     return interaction
+
+
+def _is_current_graph_step_completed(payload) -> bool:
+    body = _experiment_result_body(payload)
+    summary = body.get("summary")
+    if not isinstance(summary, dict):
+        return False
+
+    current_step = summary.get("current_step")
+    if isinstance(current_step, dict):
+        explicit = _normalize_bool(current_step.get("is_completed"))
+        if explicit is True:
+            return True
+
+    current_details = summary.get("current_step_details")
+    if not isinstance(current_details, dict):
+        return False
+
+    explicit = _normalize_bool(current_details.get("is_completed"))
+    if explicit is True:
+        return True
+
+    try:
+        valid_record_count = int(current_details.get("valid_record_count"))
+    except (TypeError, ValueError):
+        valid_record_count = None
+    try:
+        min_trials = int(current_details.get("min_trials"))
+    except (TypeError, ValueError):
+        min_trials = None
+
+    if valid_record_count is not None and min_trials is not None:
+        return valid_record_count >= max(min_trials, 1)
+
+    return False
 
 
 def _extract_yaml_step_prompt_value(step: dict, key: str) -> str:
@@ -470,24 +505,24 @@ def _extract_experiment_schema_view(payload) -> dict:
 
 def _clean_field_description(text: str) -> str:
     value = " ".join(str(text or "").split()).strip()
-    value = re.sub(r"^[已请需]+", "", value)
-    value = value.replace("是否", "")
-    return value.strip("，。；;: ")
+    value = re.sub(r"^[宸茶闇€]+", "", value)
+    value = value.replace("鏄惁", "")
+    return value.strip("锛屻€傦紱;: ")
 
 
 _CHINESE_DIGIT_MAP = str.maketrans(
     {
-        "零": "0",
-        "一": "1",
-        "二": "2",
-        "两": "2",
-        "三": "3",
-        "四": "4",
-        "五": "5",
-        "六": "6",
-        "七": "7",
-        "八": "8",
-        "九": "9",
+        "闆?: "0",
+        "涓€": "1",
+        "浜?: "2",
+        "涓?: "2",
+        "涓?: "3",
+        "鍥?: "4",
+        "浜?: "5",
+        "鍏?: "6",
+        "涓?: "7",
+        "鍏?: "8",
+        "涔?: "9",
     }
 )
 
@@ -498,19 +533,19 @@ def _normalize_confirmation_signature(text: str) -> str:
         return ""
     norm = norm.translate(_CHINESE_DIGIT_MAP)
     norm = norm.replace("->", "-")
-    norm = norm.replace("至", "到")
-    norm = re.sub(r"([0-9]+)到([0-9]+)", r"\1-\2", norm)
-    norm = norm.replace("已按", "按")
-    norm = norm.replace("已经", "已")
-    norm = norm.replace("完成了", "完成")
-    norm = norm.replace("加入了", "加入")
-    norm = norm.replace("双杯", "烧杯")
-    norm = norm.replace("磁子", "磁转子")
+    norm = norm.replace("鑷?, "鍒?)
+    norm = re.sub(r"([0-9]+)鍒?[0-9]+)", r"\1-\2", norm)
+    norm = norm.replace("宸叉寜", "鎸?)
+    norm = norm.replace("宸茬粡", "宸?)
+    norm = norm.replace("瀹屾垚浜?, "瀹屾垚")
+    norm = norm.replace("鍔犲叆浜?, "鍔犲叆")
+    norm = norm.replace("鍙屾澂", "鐑ф澂")
+    norm = norm.replace("纾佸瓙", "纾佽浆瀛?)
     return norm
 
 
 def _confirmation_char_ngrams(text: str, n: int = 2) -> set:
-    clean = re.sub(r"[\s，。；：、,.!?？]", "", text)
+    clean = re.sub(r"[\s锛屻€傦紱锛氥€?.!?锛焆", "", text)
     if not clean:
         return set()
     if len(clean) < n:
@@ -568,16 +603,16 @@ def _format_missing_field_prompts(missing_fields, schema_by_name: dict) -> list:
 def _compose_missing_field_reply(missing_fields, schema_by_name: dict) -> str:
     prompts = _format_missing_field_prompts(missing_fields, schema_by_name)
     if not prompts:
-        return "继续前还差这一步的关键信息，你补一句当前结果就行。"
+        return "缁х画鍓嶈繕宸繖涓€姝ョ殑鍏抽敭淇℃伅锛屼綘琛ヤ竴鍙ュ綋鍓嶇粨鏋滃氨琛屻€?
     if len(prompts) > 3:
-        return "继续前还差这一步的一整组关键记录。你把当前这一步要记录的数据按顺序告诉我就行。"
+        return "缁х画鍓嶈繕宸繖涓€姝ョ殑涓€鏁寸粍鍏抽敭璁板綍銆備綘鎶婂綋鍓嶈繖涓€姝ヨ璁板綍鐨勬暟鎹寜椤哄簭鍛婅瘔鎴戝氨琛屻€?
     if len(prompts) == 1:
-        return f"继续前还差这一步的一个确认：{prompts[0]}。你补一句这个就行。"
+        return f"缁х画鍓嶈繕宸繖涓€姝ョ殑涓€涓‘璁わ細{prompts[0]}銆備綘琛ヤ竴鍙ヨ繖涓氨琛屻€?
     if len(prompts) == 2:
-        joined = f"{prompts[0]}，还有 {prompts[1]}"
+        joined = f"{prompts[0]}锛岃繕鏈?{prompts[1]}"
     else:
-        joined = "、".join(prompts[:3])
-    return f"继续前还差这几个确认：{joined}。你补一句这几个结果就行。"
+        joined = "銆?.join(prompts[:3])
+    return f"缁х画鍓嶈繕宸繖鍑犱釜纭锛歿joined}銆備綘琛ヤ竴鍙ヨ繖鍑犱釜缁撴灉灏辫銆?
 
 
 def _first_nonempty_text(*values) -> str:
@@ -595,11 +630,11 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
     )
 
     if mode == "repeat":
-        prefix = "当前这一步："
+        prefix = "褰撳墠杩欎竴姝ワ細"
     elif mode == "next":
-        prefix = "接下来做这一步："
+        prefix = "鎺ヤ笅鏉ュ仛杩欎竴姝ワ細"
     else:
-        prefix = "现在做这一步："
+        prefix = "鐜板湪鍋氳繖涓€姝ワ細"
 
     signature = _normalize_text_for_match(
         " ".join(
@@ -620,15 +655,46 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
     def _signature_has_all(*tokens: str) -> bool:
         return all(token in signature for token in tokens if token)
 
+    if step_id:
+        exact_reply_map = {
+            "step_3_uv_vis_shared_dark_air_prep": (
+                "鍏堟鏌?鍒?鍙锋牱鍝佷綅閮戒负绌猴紝鍙傛瘮浣嶄篃涓嶈鏀句换浣曟恫浣撱€?
+                "閮界┖浜嗗氨鍛婅瘔鎴戯紝鍙互寮€濮嬫椂鐩存帴璇粹€滃紑濮嬫壂鎻忊€濄€?
+            ),
+            "step_3_uv_vis_shared_dark_blank_prep": (
+                f"{prefix}1-5鍙锋牱鍝侊細绾按绌虹櫧鏍℃銆?
+                "璇峰湪 1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁鍏ョ函姘存瘮鑹茬毧锛屽叡 6 涓紝鏀惧ソ鍚庡憡璇夋垜鍙互寮€濮嬫壂鎻忋€?
+            ),
+            "step_3_uv_vis_sample1-5_load_cuvette": (
+                "鎶?鍒?鍙风湡瀹炴牱鍝佸垎鍒鍏ユ瘮鑹茬毧锛屾寜缂栧彿鏀惧叆鏍峰搧浣嶏紝浠櫒鍘熺敓鍙傛瘮浣嶆斁绾按锛屾摝鍑€澶栧锛屽仛濂藉憡璇夋垜銆?
+            ),
+            "step_3_uv_vis_sample1-4_load_cuvette": (
+                "鎶?鍒?鍙风湡瀹炴牱鍝佸垎鍒鍏ユ瘮鑹茬毧锛屾寜缂栧彿鏀惧叆鏍峰搧浣嶏紝浠櫒鍘熺敓鍙傛瘮浣嶆斁绾按锛屾摝鍑€澶栧锛屽仛濂藉憡璇夋垜銆?
+            ),
+            "step_3_uv_vis_sample1-5_record_data": (
+                "纭1鍒?鍙锋牱鍝佷綅閮藉凡鏀惧ソ鐪熷疄鏍峰搧锛屼华鍣ㄥ師鐢熷弬姣斾綅鏄函姘淬€傛斁濂戒簡鍛婅瘔鎴戝紑濮嬫壂鎻忋€?
+            ),
+            "step_3_uv_vis_sample1-4_record_data": (
+                "纭1鍒?鍙锋牱鍝佷綅閮藉凡鏀惧ソ鐪熷疄鏍峰搧锛屼华鍣ㄥ師鐢熷弬姣斾綅鏄函姘淬€傛斁濂戒簡鍛婅瘔鎴戝紑濮嬫壂鎻忋€?
+            ),
+            "step_3_uv_vis_sample5_clean_cuvette": (
+                f"{prefix}绱-鍙娴嬮噺鍚庯細缁熶竴娓呮礂姣旇壊鐨裤€?
+                "鎸夎鑼冨鐞嗘畫娑插苟娓呮礂姣旇壊鐨匡紝涓哄悗缁姩鍔涘瀹為獙鍋氬噯澶囷紝鍋氬ソ鍛婅瘔鎴戙€?
+            ),
+        }
+        exact_reply = exact_reply_map.get(step_id)
+        if exact_reply:
+            return exact_reply
+
     looks_like_pure_water_blank_step = signature and (
-        _signature_has_any("纯水空白校正", "纯水空白")
+        _signature_has_any("绾按绌虹櫧鏍℃", "绾按绌虹櫧")
         and not _signature_has_any(
-                "装入比色皿",
-                "真实样品",
-                "批量测光谱",
-                "动力学",
-                "反应液",
-                "参比液",
+                "瑁呭叆姣旇壊鐨?,
+                "鐪熷疄鏍峰搧",
+                "鎵归噺娴嬪厜璋?,
+                "鍔ㄥ姏瀛?,
+                "鍙嶅簲娑?,
+                "鍙傛瘮娑?,
                 "sample1-5record",
                 "sample2",
                 "sample4",
@@ -636,162 +702,150 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
     )
     if looks_like_pure_water_blank_step:
         return (
-            f"{prefix}1-5号样品：纯水空白校正。"
-            "请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。"
+            f"{prefix}1-5鍙锋牱鍝侊細绾按绌虹櫧鏍℃銆?
+            "璇峰湪 1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁鍏ョ函姘存瘮鑹茬毧锛屽叡 6 涓紝鏀惧ソ鍚庡憡璇夋垜鍙互寮€濮嬫壂鎻忋€?
         )
 
     if signature and _signature_has_any(
-            "暗电流校正",
-            "暗电流和空气能量校正",
-            "暗电流和空气基线",
-            "共享暗电流和空气能量校正",
-            "共享暗电流和空气基线",
+            "鏆楃數娴佹牎姝?,
+            "鏆楃數娴佸拰绌烘皵鑳介噺鏍℃",
+            "鏆楃數娴佸拰绌烘皵鍩虹嚎",
+            "鍏变韩鏆楃數娴佸拰绌烘皵鑳介噺鏍℃",
+            "鍏变韩鏆楃數娴佸拰绌烘皵鍩虹嚎",
             "shareddarkcurrent",
     ):
         return (
-            "先检查1到5号样品位都为空，参比位也不要放任何液体。"
-            "都空了就告诉我。可以开始时直接说“开始扫描”。"
+            "鍏堟鏌?鍒?鍙锋牱鍝佷綅閮戒负绌猴紝鍙傛瘮浣嶄篃涓嶈鏀句换浣曟恫浣撱€?
+            "閮界┖浜嗗氨鍛婅瘔鎴戙€傚彲浠ュ紑濮嬫椂鐩存帴璇粹€滃紑濮嬫壂鎻忊€濄€?
         )
 
     if signature and (
-        _signature_has_any("装入比色皿", "样品装杯")
+        _signature_has_any("瑁呭叆姣旇壊鐨?, "鏍峰搧瑁呮澂")
         or (
-            _signature_has_any("真实样品", "样品位")
-            and _signature_has_any("参比位", "纯水")
-            and _signature_has_any("比色皿", "装入")
+            _signature_has_any("鐪熷疄鏍峰搧", "鏍峰搧浣?)
+            and _signature_has_any("鍙傛瘮浣?, "绾按")
+            and _signature_has_any("姣旇壊鐨?, "瑁呭叆")
         )
     ):
         return (
-            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保持为空，擦净外壁，做好告诉我。"
+            "鎶?鍒?鍙风湡瀹炴牱鍝佸垎鍒鍏ユ瘮鑹茬毧锛屾寜缂栧彿鏀惧叆鏍峰搧浣嶏紝鍙傛瘮浣嶄繚鎸佷负绌猴紝鎿﹀噣澶栧锛屽仛濂藉憡璇夋垜銆?
         )
 
     if signature and (
         _signature_has_any(
-            "批量测光谱",
-            "批量光谱测量",
-            "记录数据",
+            "鎵归噺娴嬪厜璋?,
+            "鎵归噺鍏夎氨娴嬮噺",
+            "璁板綍鏁版嵁",
             "lambda max",
             "lambdamax",
         )
         or (
-            _signature_has_any("1-5号样品", "1到5号样品")
-            and _signature_has_any("测量", "光谱")
-            and _signature_has_any("参比位", "纯水")
+            _signature_has_any("1-5鍙锋牱鍝?, "1鍒?鍙锋牱鍝?)
+            and _signature_has_any("娴嬮噺", "鍏夎氨")
+            and _signature_has_any("鍙傛瘮浣?, "绾按")
         )
     ):
         return (
-            "确认1到5号样品位都已放好真实样品，参比位保持为空。"
-            "放好了告诉我开始测量。"
+            "纭1鍒?鍙锋牱鍝佷綅閮藉凡鏀惧ソ鐪熷疄鏍峰搧锛屽弬姣斾綅淇濇寔涓虹┖銆?
+            "鏀惧ソ浜嗗憡璇夋垜寮€濮嬫祴閲忋€?
         )
 
-    if signature and _signature_has_any("统一清洗比色皿", "清洗比色皿", "测量后清洗"):
+    if signature and _signature_has_any("缁熶竴娓呮礂姣旇壊鐨?, "娓呮礂姣旇壊鐨?, "娴嬮噺鍚庢竻娲?):
         return (
-            f"{prefix}紫外-可见测量后：统一清洗比色皿。"
-            "按规范处理残液并清洗比色皿，为后续动力学实验做准备，做好告诉我。"
+            f"{prefix}绱-鍙娴嬮噺鍚庯細缁熶竴娓呮礂姣旇壊鐨裤€?
+            "鎸夎鑼冨鐞嗘畫娑插苟娓呮礂姣旇壊鐨匡紝涓哄悗缁姩鍔涘瀹為獙鍋氬噯澶囷紝鍋氬ソ鍛婅瘔鎴戙€?
         )
 
-    if signature and _signature_has_all("2号样品", "动力学") and _signature_has_any("参比液", "参比位") and not _signature_has_any("反应液", "400纳米", "吸光度"):
+    if signature and _signature_has_all("2鍙锋牱鍝?, "鍔ㄥ姏瀛?) and _signature_has_any("鍙傛瘮娑?, "鍙傛瘮浣?) and not _signature_has_any("鍙嶅簲娑?, "400绾崇背", "鍚稿厜搴?):
         return (
-            f"{prefix}2号样品动力学：配制参比液。"
-            "按要求配好2号样品参比液，放入参比位并检查比色皿外壁和透光面，做好告诉我。"
+            f"{prefix}2鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弬姣旀恫銆?
+            "鎸夎姹傞厤濂?鍙锋牱鍝佸弬姣旀恫锛屾斁鍏ュ弬姣斾綅骞舵鏌ユ瘮鑹茬毧澶栧鍜岄€忓厜闈紝鍋氬ソ鍛婅瘔鎴戙€?
         )
 
-    if signature and _signature_has_all("2号样品", "动力学") and _signature_has_any("反应液", "样品位") and not _signature_has_any("400纳米", "吸光度"):
+    if signature and _signature_has_all("2鍙锋牱鍝?, "鍔ㄥ姏瀛?) and _signature_has_any("鍙嶅簲娑?, "鏍峰搧浣?) and not _signature_has_any("400绾崇背", "鍚稿厜搴?):
         return (
-            f"{prefix}2号样品动力学：配制反应液。"
-            "按要求配好2号样品反应液，放入样品位并确认参比和样品比色皿都放置正确，做好告诉我。"
+            f"{prefix}2鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弽搴旀恫銆?
+            "鎸夎姹傞厤濂?鍙锋牱鍝佸弽搴旀恫锛屾斁鍏ユ牱鍝佷綅骞剁‘璁ゅ弬姣斿拰鏍峰搧姣旇壊鐨块兘鏀剧疆姝ｇ‘锛屽仛濂藉憡璇夋垜銆?
         )
 
-    if signature and _signature_has_all("2号样品", "动力学") and _signature_has_any("400纳米", "吸光度", "动力学测量"):
+    if signature and _signature_has_all("2鍙锋牱鍝?, "鍔ㄥ姏瀛?) and _signature_has_any("400绾崇背", "鍚稿厜搴?, "鍔ㄥ姏瀛︽祴閲?):
         return (
-            f"{prefix}2号样品动力学：开始按时间记录吸光度。"
-            "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
+            f"{prefix}2鍙锋牱鍝佸姩鍔涘锛氬紑濮嬫寜鏃堕棿璁板綍鍚稿厜搴︺€?
+            "淇濇寔鍙傛瘮娑插拰鍙嶅簲娑叉寜瑕佹眰鏀惧ソ锛屽彲浠ュ紑濮嬫椂鍛婅瘔鎴戯紝鎴戝氨寮€濮?00绾崇背鍔ㄥ姏瀛︽祴閲忋€?
         )
 
-    if signature and _signature_has_all("4号样品", "动力学") and _signature_has_any("参比液", "参比位") and not _signature_has_any("反应液", "400纳米", "吸光度"):
+    if signature and _signature_has_all("4鍙锋牱鍝?, "鍔ㄥ姏瀛?) and _signature_has_any("鍙傛瘮娑?, "鍙傛瘮浣?) and not _signature_has_any("鍙嶅簲娑?, "400绾崇背", "鍚稿厜搴?):
         return (
-            f"{prefix}4号样品动力学：配制参比液。"
-            "按要求配好4号样品参比液，放入参比位并检查比色皿外壁和透光面，做好告诉我。"
+            f"{prefix}4鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弬姣旀恫銆?
+            "鎸夎姹傞厤濂?鍙锋牱鍝佸弬姣旀恫锛屾斁鍏ュ弬姣斾綅骞舵鏌ユ瘮鑹茬毧澶栧鍜岄€忓厜闈紝鍋氬ソ鍛婅瘔鎴戙€?
         )
 
-    if signature and _signature_has_all("4号样品", "动力学") and _signature_has_any("反应液", "样品位") and not _signature_has_any("400纳米", "吸光度"):
+    if signature and _signature_has_all("4鍙锋牱鍝?, "鍔ㄥ姏瀛?) and _signature_has_any("鍙嶅簲娑?, "鏍峰搧浣?) and not _signature_has_any("400绾崇背", "鍚稿厜搴?):
         return (
-            f"{prefix}4号样品动力学：配制反应液。"
-            "按要求配好4号样品反应液，放入样品位并确认参比和样品比色皿都放置正确，做好告诉我。"
+            f"{prefix}4鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弽搴旀恫銆?
+            "鎸夎姹傞厤濂?鍙锋牱鍝佸弽搴旀恫锛屾斁鍏ユ牱鍝佷綅骞剁‘璁ゅ弬姣斿拰鏍峰搧姣旇壊鐨块兘鏀剧疆姝ｇ‘锛屽仛濂藉憡璇夋垜銆?
         )
 
-    if signature and _signature_has_all("4号样品", "动力学") and _signature_has_any("400纳米", "吸光度", "动力学测量"):
+    if signature and _signature_has_all("4鍙锋牱鍝?, "鍔ㄥ姏瀛?) and _signature_has_any("400绾崇背", "鍚稿厜搴?, "鍔ㄥ姏瀛︽祴閲?):
         return (
-            f"{prefix}4号样品动力学：开始按时间记录吸光度。"
-            "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
+            f"{prefix}4鍙锋牱鍝佸姩鍔涘锛氬紑濮嬫寜鏃堕棿璁板綍鍚稿厜搴︺€?
+            "淇濇寔鍙傛瘮娑插拰鍙嶅簲娑叉寜瑕佹眰鏀惧ソ锛屽彲浠ュ紑濮嬫椂鍛婅瘔鎴戯紝鎴戝氨寮€濮?00绾崇背鍔ㄥ姏瀛︽祴閲忋€?
         )
 
-    if signature and _signature_has_any("step_6_data_analysis", "uvvis数据分析", "uv-vis数据分析", "紫外可见数据分析") and _signature_has_any("分析", "数据", "图谱"):
-        return "UV-Vis 测量部分已经完成，接下来整理数据结果。"
+    if signature and _signature_has_any("step_6_data_analysis", "uvvis鏁版嵁鍒嗘瀽", "uv-vis鏁版嵁鍒嗘瀽", "绱鍙鏁版嵁鍒嗘瀽") and _signature_has_any("鍒嗘瀽", "鏁版嵁", "鍥捐氨"):
+        return "UV-Vis 娴嬮噺閮ㄥ垎宸茬粡瀹屾垚锛屾帴涓嬫潵鏁寸悊鏁版嵁缁撴灉銆?
 
     if not step_id:
         return ""
 
     reply_map = {
         "step_3_uv_vis_shared_dark_air_prep": (
-            "先检查1到5号样品位都为空，参比位也不要放任何液体。"
-            "都空了就告诉我。可以开始时直接说“开始扫描”。"
+            "鍏堟鏌?鍒?鍙锋牱鍝佷綅閮戒负绌猴紝鍙傛瘮浣嶄篃涓嶈鏀句换浣曟恫浣撱€?
+            "閮界┖浜嗗氨鍛婅瘔鎴戙€傚彲浠ュ紑濮嬫椂鐩存帴璇粹€滃紑濮嬫壂鎻忊€濄€?
         ),
         "step_3_uv_vis_shared_dark_blank_prep": (
-            f"{prefix}1-5号样品：纯水空白校正。"
-            "请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。"
-        ),
-        "step_3_uv_vis_sample1-4_load_cuvette": (
-            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位放纯水，擦净外壁。"
-            "放好后告诉我是第几组。"
-        ),
-        "step_3_uv_vis_sample1-4_record_data": (
-            "确认1到5号样品位都已放好真实样品，参比位是纯水。"
-            "可以开始时直接说开始扫描。"
-        ),
-        "step_3_uv_vis_sample1-4_clean_cuvettes": (
-            f"{prefix}紫外-可见测量后：统一清洗比色皿。"
-            "按规范处理残液并清洗比色皿，为后续动力学实验做准备，做好告诉我。"
+            f"{prefix}1-5鍙锋牱鍝侊細绾按绌虹櫧鏍℃銆?
+            "璇峰湪 1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁鍏ョ函姘存瘮鑹茬毧锛屽叡 6 涓紝鏀惧ソ鍚庡憡璇夋垜鍙互寮€濮嬫壂鎻忋€?
         ),
         "step_3_uv_vis_sample1-5_load_cuvette": (
-            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保持为空，擦净外壁，做好告诉我。"
+            "鎶?鍒?鍙风湡瀹炴牱鍝佸垎鍒鍏ユ瘮鑹茬毧锛屾寜缂栧彿鏀惧叆鏍峰搧浣嶏紝鍙傛瘮浣嶄繚鎸佷负绌猴紝鎿﹀噣澶栧锛屽仛濂藉憡璇夋垜銆?
         ),
         "step_3_uv_vis_sample1-5_record_data": (
-            "确认1到5号样品位都已放好真实样品，参比位保持为空。"
-            "放好了告诉我开始测量。"
+            "纭1鍒?鍙锋牱鍝佷綅閮藉凡鏀惧ソ鐪熷疄鏍峰搧锛屽弬姣斾綅淇濇寔涓虹┖銆?
+            "鏀惧ソ浜嗗憡璇夋垜寮€濮嬫祴閲忋€?
         ),
         "step_3_uv_vis_sample5_clean_cuvette": (
-            f"{prefix}紫外-可见测量后：统一清洗比色皿。"
-            "按规范处理残液并清洗比色皿，为后续动力学实验做准备，做好告诉我。"
+            f"{prefix}绱-鍙娴嬮噺鍚庯細缁熶竴娓呮礂姣旇壊鐨裤€?
+            "鎸夎鑼冨鐞嗘畫娑插苟娓呮礂姣旇壊鐨匡紝涓哄悗缁姩鍔涘瀹為獙鍋氬噯澶囷紝鍋氬ソ鍛婅瘔鎴戙€?
         ),
         "step_4_kinetics_sample2_reference_solution_preparation": (
-            f"{prefix}2号样品动力学：配制参比液。"
-            "按要求配好2号样品参比液，放入参比位并检查比色皿外壁和透光面，做好告诉我。"
+            f"{prefix}2鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弬姣旀恫銆?
+            "鎸夎姹傞厤濂?鍙锋牱鍝佸弬姣旀恫锛屾斁鍏ュ弬姣斾綅骞舵鏌ユ瘮鑹茬毧澶栧鍜岄€忓厜闈紝鍋氬ソ鍛婅瘔鎴戙€?
         ),
         "step_4_kinetics_sample2_reaction_solution_preparation": (
-            f"{prefix}2号样品动力学：配制反应液。"
-            "按要求配好2号样品反应液，放入样品位并确认参比和样品比色皿都放置正确，做好告诉我。"
+            f"{prefix}2鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弽搴旀恫銆?
+            "鎸夎姹傞厤濂?鍙锋牱鍝佸弽搴旀恫锛屾斁鍏ユ牱鍝佷綅骞剁‘璁ゅ弬姣斿拰鏍峰搧姣旇壊鐨块兘鏀剧疆姝ｇ‘锛屽仛濂藉憡璇夋垜銆?
         ),
         "step_4_kinetics_sample2_measurement": (
-            f"{prefix}2号样品动力学：开始按时间记录吸光度。"
-            "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
+            f"{prefix}2鍙锋牱鍝佸姩鍔涘锛氬紑濮嬫寜鏃堕棿璁板綍鍚稿厜搴︺€?
+            "淇濇寔鍙傛瘮娑插拰鍙嶅簲娑叉寜瑕佹眰鏀惧ソ锛屽彲浠ュ紑濮嬫椂鍛婅瘔鎴戯紝鎴戝氨寮€濮?00绾崇背鍔ㄥ姏瀛︽祴閲忋€?
         ),
         "step_5_kinetics_sample4_reference_solution_preparation": (
-            f"{prefix}4号样品动力学：配制参比液。"
-            "按要求配好4号样品参比液，放入参比位并检查比色皿外壁和透光面，做好告诉我。"
+            f"{prefix}4鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弬姣旀恫銆?
+            "鎸夎姹傞厤濂?鍙锋牱鍝佸弬姣旀恫锛屾斁鍏ュ弬姣斾綅骞舵鏌ユ瘮鑹茬毧澶栧鍜岄€忓厜闈紝鍋氬ソ鍛婅瘔鎴戙€?
         ),
         "step_5_kinetics_sample4_reaction_solution_preparation": (
-            f"{prefix}4号样品动力学：配制反应液。"
-            "按要求配好4号样品反应液，放入样品位并确认参比和样品比色皿都放置正确，做好告诉我。"
+            f"{prefix}4鍙锋牱鍝佸姩鍔涘锛氶厤鍒跺弽搴旀恫銆?
+            "鎸夎姹傞厤濂?鍙锋牱鍝佸弽搴旀恫锛屾斁鍏ユ牱鍝佷綅骞剁‘璁ゅ弬姣斿拰鏍峰搧姣旇壊鐨块兘鏀剧疆姝ｇ‘锛屽仛濂藉憡璇夋垜銆?
         ),
         "step_5_kinetics_sample4_measurement": (
-            f"{prefix}4号样品动力学：开始按时间记录吸光度。"
-            "保持参比液和反应液按要求放好，可以开始时告诉我，我就开始400纳米动力学测量。"
+            f"{prefix}4鍙锋牱鍝佸姩鍔涘锛氬紑濮嬫寜鏃堕棿璁板綍鍚稿厜搴︺€?
+            "淇濇寔鍙傛瘮娑插拰鍙嶅簲娑叉寜瑕佹眰鏀惧ソ锛屽彲浠ュ紑濮嬫椂鍛婅瘔鎴戯紝鎴戝氨寮€濮?00绾崇背鍔ㄥ姏瀛︽祴閲忋€?
         ),
-        "step_6_data_analysis": "UV-Vis 测量部分已经完成，接下来整理数据结果。",
+        "step_6_data_analysis": "UV-Vis 娴嬮噺閮ㄥ垎宸茬粡瀹屾垚锛屾帴涓嬫潵鏁寸悊鏁版嵁缁撴灉銆?,
         "step_6_kinetics_combined_measurement": (
-            f"{prefix}2号和4号样品动力学：联合开始按时间记录吸光度。"
-            "请保持参比位为纯水、1号位留空，2和3号位放2号样品的反应液和参比液，4和5号位放4号样品的反应液和参比液。全部放好后告诉我，我就开始400纳米动力学测量。"
+            f"{prefix}2鍙峰拰4鍙锋牱鍝佸姩鍔涘锛氳仈鍚堝紑濮嬫寜鏃堕棿璁板綍鍚稿厜搴︺€?
+            "璇蜂繚鎸佸弬姣斾綅涓虹函姘淬€?鍙蜂綅鐣欑┖锛?鍜?鍙蜂綅鏀?鍙锋牱鍝佺殑鍙嶅簲娑插拰鍙傛瘮娑诧紝4鍜?鍙蜂綅鏀?鍙锋牱鍝佺殑鍙嶅簲娑插拰鍙傛瘮娑层€傚叏閮ㄦ斁濂藉悗鍛婅瘔鎴戯紝鎴戝氨寮€濮?00绾崇背鍔ㄥ姏瀛︽祴閲忋€?
         ),
     }
     return reply_map.get(step_id, "")
@@ -827,33 +881,33 @@ def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
                 if value
             )
         )
-        sample_name = _format_sample_name(sample_index, "当前样品")
-        return f"{sample_name}颜色已经稳定，现在可以拍照吗？"
+        sample_name = _format_sample_name(sample_index, "褰撳墠鏍峰搧")
+        return f"{sample_name}棰滆壊宸茬粡绋冲畾锛岀幇鍦ㄥ彲浠ユ媿鐓у悧锛?
 
     if title and title not in instruction:
-        core = f"{title}。{instruction}"
+        core = f"{title}銆倇instruction}"
     else:
         core = instruction
 
     if mode == "repeat":
-        parts = [f"当前这一步：{core}。"]
+        parts = [f"褰撳墠杩欎竴姝ワ細{core}銆?]
         if safety:
-            parts.append(f"注意{safety}。")
+            parts.append(f"娉ㄦ剰{safety}銆?)
         elif tip:
-            parts.append(f"{tip}。")
-        parts.append("做好后告诉我。")
+            parts.append(f"{tip}銆?)
+        parts.append("鍋氬ソ鍚庡憡璇夋垜銆?)
         return "".join(parts)
 
     if mode == "next":
-        parts = [f"接下来做这一步：{core}。"]
+        parts = [f"鎺ヤ笅鏉ュ仛杩欎竴姝ワ細{core}銆?]
     else:
-        parts = [f"现在做这一步：{core}。"]
+        parts = [f"鐜板湪鍋氳繖涓€姝ワ細{core}銆?]
 
     if safety:
-        parts.append(f"注意{safety}。")
+        parts.append(f"娉ㄦ剰{safety}銆?)
     elif tip:
-        parts.append(f"{tip}。")
-    parts.append("做好后告诉我。")
+        parts.append(f"{tip}銆?)
+    parts.append("鍋氬ソ鍚庡憡璇夋垜銆?)
     return "".join(parts)
 
 
@@ -891,10 +945,10 @@ def _compose_photo_confirmation_advance_reply(
     if followup.startswith(confirmation):
         return followup
 
-    confirmation = confirmation.rstrip("。！？!?；;，, ").strip()
+    confirmation = confirmation.rstrip("銆傦紒锛??锛?锛? ").strip()
     if confirmation:
-        confirmation = f"{confirmation}。"
-    return f"{confirmation}我接着带你做下一步。{followup}"
+        confirmation = f"{confirmation}銆?
+    return f"{confirmation}鎴戞帴鐫€甯︿綘鍋氫笅涓€姝ャ€倇followup}"
 
 
 def _extract_experiment_overview_title(payload) -> str:
@@ -930,12 +984,12 @@ def _extract_experiment_overview_title(payload) -> str:
 def _compose_experiment_start_reply(experiment_title: str, step_reply: str) -> str:
     title = " ".join(str(experiment_title or "").split()).strip()
     if title:
-        if title.startswith("《") and title.endswith("》"):
+        if title.startswith("銆?) and title.endswith("銆?):
             formatted_title = title
         else:
-            formatted_title = f"《{title.strip('《》')}》"
-        return f"今天我们做{formatted_title}。你准备好开始了吗？"
-    return "今天我们做当前实验。你准备好开始了吗？"
+            formatted_title = f"銆妠title.strip('銆娿€?)}銆?
+        return f"浠婂ぉ鎴戜滑鍋歿formatted_title}銆備綘鍑嗗濂藉紑濮嬩簡鍚楋紵"
+    return "浠婂ぉ鎴戜滑鍋氬綋鍓嶅疄楠屻€備綘鍑嗗濂藉紑濮嬩簡鍚楋紵"
 
 
 def _is_explicit_experiment_start_request(filtered_text: str) -> bool:
@@ -943,20 +997,20 @@ def _is_explicit_experiment_start_request(filtered_text: str) -> bool:
     if not norm:
         return False
     explicit_tokens = (
-        "开始流程",
-        "开始当前实验流程",
-        "开始当前实验",
-        "准备开始",
-        "准备开始实验",
-        "准备开始流程",
-        "开始今天的实验",
-        "开始今天实验",
-        "开始本次实验",
-        "开始这个实验",
-        "开始实验",
-        "开始做实验",
-        "开始做今天的实验",
-        "开始今天做的实验",
+        "寮€濮嬫祦绋?,
+        "寮€濮嬪綋鍓嶅疄楠屾祦绋?,
+        "寮€濮嬪綋鍓嶅疄楠?,
+        "鍑嗗寮€濮?,
+        "鍑嗗寮€濮嬪疄楠?,
+        "鍑嗗寮€濮嬫祦绋?,
+        "寮€濮嬩粖澶╃殑瀹為獙",
+        "寮€濮嬩粖澶╁疄楠?,
+        "寮€濮嬫湰娆″疄楠?,
+        "寮€濮嬭繖涓疄楠?,
+        "寮€濮嬪疄楠?,
+        "寮€濮嬪仛瀹為獙",
+        "寮€濮嬪仛浠婂ぉ鐨勫疄楠?,
+        "寮€濮嬩粖澶╁仛鐨勫疄楠?,
     )
     return _contains_any(norm, explicit_tokens)
 
@@ -1002,28 +1056,28 @@ def _looks_like_experiment_detail_request(norm: str) -> bool:
     if not norm:
         return False
     detail_tokens = (
-        "为什么",
-        "原理",
-        "依据",
-        "详细",
-        "注意事项",
-        "是什么",
-        "做什么",
-        "要做什么",
-        "需要什么",
-        "多少",
-        "浓度",
-        "体积",
-        "怎么配",
-        "怎么算",
-        "公式",
-        "字段",
+        "涓轰粈涔?,
+        "鍘熺悊",
+        "渚濇嵁",
+        "璇︾粏",
+        "娉ㄦ剰浜嬮」",
+        "鏄粈涔?,
+        "鍋氫粈涔?,
+        "瑕佸仛浠€涔?,
+        "闇€瑕佷粈涔?,
+        "澶氬皯",
+        "娴撳害",
+        "浣撶Н",
+        "鎬庝箞閰?,
+        "鎬庝箞绠?,
+        "鍏紡",
+        "瀛楁",
         "schema",
-        "参考",
-        "后面所有",
-        "全部步骤",
-        "整个实验",
-        "完整流程",
+        "鍙傝€?,
+        "鍚庨潰鎵€鏈?,
+        "鍏ㄩ儴姝ラ",
+        "鏁翠釜瀹為獙",
+        "瀹屾暣娴佺▼",
     )
     return _contains_any(norm, detail_tokens)
 
@@ -1033,40 +1087,40 @@ def _assistant_waiting_for_step_completion(conn) -> bool:
     if not last_text:
         return False
     tokens = (
-        "做好后告诉我",
-        "做好告诉我",
-        "做完告诉我",
-        "完成后告诉我",
-        "完成了告诉我",
-        "做完了告诉我",
-        "测完告诉我",
-        "扫完告诉我",
-        "结束后告诉我",
-        "加完告诉我",
-        "加好了告诉我",
-        "拍完告诉我",
-        "拍好了告诉我",
-        "看完告诉我",
-        "观察完告诉我",
-        "记录完告诉我",
+        "鍋氬ソ鍚庡憡璇夋垜",
+        "鍋氬ソ鍛婅瘔鎴?,
+        "鍋氬畬鍛婅瘔鎴?,
+        "瀹屾垚鍚庡憡璇夋垜",
+        "瀹屾垚浜嗗憡璇夋垜",
+        "鍋氬畬浜嗗憡璇夋垜",
+        "娴嬪畬鍛婅瘔鎴?,
+        "鎵畬鍛婅瘔鎴?,
+        "缁撴潫鍚庡憡璇夋垜",
+        "鍔犲畬鍛婅瘔鎴?,
+        "鍔犲ソ浜嗗憡璇夋垜",
+        "鎷嶅畬鍛婅瘔鎴?,
+        "鎷嶅ソ浜嗗憡璇夋垜",
+        "鐪嬪畬鍛婅瘔鎴?,
+        "瑙傚療瀹屽憡璇夋垜",
+        "璁板綍瀹屽憡璇夋垜",
     )
     completion_markers = (
-        "做好",
-        "做完",
-        "完成",
-        "测完",
-        "扫完",
-        "结束",
-        "加完",
-        "加好",
-        "拍完",
-        "拍好",
-        "看完",
-        "观察完",
-        "记录完",
+        "鍋氬ソ",
+        "鍋氬畬",
+        "瀹屾垚",
+        "娴嬪畬",
+        "鎵畬",
+        "缁撴潫",
+        "鍔犲畬",
+        "鍔犲ソ",
+        "鎷嶅畬",
+        "鎷嶅ソ",
+        "鐪嬪畬",
+        "瑙傚療瀹?,
+        "璁板綍瀹?,
     )
     return _contains_any(last_text, tokens) or (
-        "告诉我" in last_text and _contains_any(last_text, completion_markers)
+        "鍛婅瘔鎴? in last_text and _contains_any(last_text, completion_markers)
     )
 
 
@@ -1075,12 +1129,12 @@ def _assistant_waiting_for_step_start(conn) -> bool:
     if not last_text:
         return False
     tokens = (
-        "准备好开始了吗",
-        "准备好了吗",
-        "可以开始了吗",
-        "现在开始吗",
-        "要开始了吗",
-        "要不要开始",
+        "鍑嗗濂藉紑濮嬩簡鍚?,
+        "鍑嗗濂戒簡鍚?,
+        "鍙互寮€濮嬩簡鍚?,
+        "鐜板湪寮€濮嬪悧",
+        "瑕佸紑濮嬩簡鍚?,
+        "瑕佷笉瑕佸紑濮?,
     )
     return _contains_any(last_text, tokens)
 
@@ -1091,13 +1145,13 @@ def _is_explicit_ready_to_start_reply(filtered_text: str) -> bool:
         return False
 
     ready_tokens = (
-        "准备好了",
-        "我准备好了",
-        "已经准备好了",
-        "可以开始",
-        "可以开始了",
-        "开始吧",
-        "开始做吧",
+        "鍑嗗濂戒簡",
+        "鎴戝噯澶囧ソ浜?,
+        "宸茬粡鍑嗗濂戒簡",
+        "鍙互寮€濮?,
+        "鍙互寮€濮嬩簡",
+        "寮€濮嬪惂",
+        "寮€濮嬪仛鍚?,
         "ready",
     )
     if _contains_any(norm, ready_tokens):
@@ -1105,7 +1159,7 @@ def _is_explicit_ready_to_start_reply(filtered_text: str) -> bool:
 
     return bool(
         re.fullmatch(
-            r"(?:那就|现在|可以|那我们|我们|我)?开始(?:(?:第?[一二三四五六七八九十0-9]+步)|(?:(?:这个|今天的|本次)?实验))?(?:吧|啦|了)?",
+            r"(?:閭ｅ氨|鐜板湪|鍙互|閭ｆ垜浠瑋鎴戜滑|鎴??寮€濮??:(?:绗?[涓€浜屼笁鍥涗簲鍏竷鍏節鍗?-9]+姝?|(?:(?:杩欎釜|浠婂ぉ鐨剕鏈)?瀹為獙))?(?:鍚鍟浜??",
             norm,
         )
     )
@@ -1210,6 +1264,15 @@ async def _handle_explicit_experiment_resume_request(
     conn,
     original_text: str,
 ) -> bool:
+    def _step_index(step_id: str) -> int:
+        normalized_step_id = str(step_id or "").strip()
+        if not normalized_step_id:
+            return -1
+        try:
+            return _resolve_experiment_yaml_step_order(conn).index(normalized_step_id)
+        except ValueError:
+            return -1
+
     previous_session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     try:
         await _reset_experiment_fresh_start_context(conn)
@@ -1221,6 +1284,53 @@ async def _handle_explicit_experiment_resume_request(
 
     graph_step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
     graph_session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    log_path = str(getattr(conn, "experiment_resume_log_path", "") or "").strip()
+    target_step_id = str(
+        getattr(conn, "experiment_resume_latest_current_step_id", "") or ""
+    ).strip()
+    if (not log_path or not target_step_id) and str(
+        getattr(conn, "device_id", "") or ""
+    ).strip():
+        try:
+            resume_context = experiment_resume.build_resume_context(
+                getattr(conn, "config", {}) or {},
+                str(getattr(conn, "device_id", "") or "").strip(),
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"experiment explicit resume build_resume_context failed: {exc}"
+            )
+            resume_context = None
+        if isinstance(resume_context, dict):
+            if not log_path:
+                log_path = str(resume_context.get("log_path", "") or "").strip()
+            if not target_step_id:
+                target_step_id = str(
+                    resume_context.get("latest_current_step_id", "") or ""
+                ).strip()
+    report_candidate = _best_resume_report_candidate(conn)
+    report_target_step_id = (
+        str((report_candidate or {}).get("current_step_id", "") or "").strip()
+        if isinstance(report_candidate, dict)
+        else ""
+    )
+    if report_target_step_id:
+        step_order = _resolve_experiment_yaml_step_order(conn)
+        try:
+            report_index = step_order.index(report_target_step_id)
+        except ValueError:
+            report_index = -1
+        try:
+            current_target_index = step_order.index(target_step_id) if target_step_id else -1
+        except ValueError:
+            current_target_index = -1
+        if report_index > current_target_index:
+            target_step_id = report_target_step_id
+            conn.logger.bind(tag=TAG).info(
+                "experiment explicit resume target upgraded from exported report: "
+                f"target_step_id={target_step_id}"
+            )
+
     graph_completed_steps = 0
     if hasattr(conn, "_extract_experiment_completed_steps_count"):
         try:
@@ -1233,9 +1343,197 @@ async def _handle_explicit_experiment_resume_request(
         except Exception:
             graph_completed_steps = 0
 
+    graph_is_behind_resume_target = False
+    if graph_step_id and target_step_id:
+        graph_index = _step_index(graph_step_id)
+        target_index = _step_index(target_step_id)
+        graph_is_behind_resume_target = (
+            graph_index >= 0 and target_index >= 0 and graph_index < target_index
+        )
+        if graph_is_behind_resume_target:
+            conn.logger.bind(tag=TAG).info(
+                "experiment explicit resume prefers log recovery over current graph: "
+                f"graph_session_id={graph_session_id}, graph_step_id={graph_step_id}, "
+                f"target_step_id={target_step_id}, log_path={log_path or 'missing'}"
+            )
+
+    report_session_id = (
+        str((report_candidate or {}).get("session_id", "") or "").strip()
+        if isinstance(report_candidate, dict)
+        else ""
+    )
+    if (
+        graph_is_behind_resume_target
+        and report_session_id
+        and report_session_id != graph_session_id
+    ):
+        try:
+            report_state_payload, report_progress_payload = await asyncio.gather(
+                _call_experiment_graph_tool_fast(
+                    conn,
+                    "get_state",
+                    {"session_id": report_session_id},
+                    priority="foreground",
+                ),
+                _call_experiment_graph_tool_fast(
+                    conn,
+                    "get_progress_summary",
+                    {"session_id": report_session_id},
+                    priority="foreground",
+                ),
+            )
+            report_session_step_id = ""
+            if hasattr(conn, "_extract_experiment_current_step_id"):
+                report_session_step_id = str(
+                    conn._extract_experiment_current_step_id(
+                        report_state_payload,
+                        report_progress_payload,
+                    )
+                    or ""
+                ).strip()
+            report_session_completed_steps = 0
+            if hasattr(conn, "_extract_experiment_completed_steps_count"):
+                try:
+                    report_session_completed_steps = int(
+                        conn._extract_experiment_completed_steps_count(
+                            report_state_payload,
+                            report_progress_payload,
+                        )
+                        or 0
+                    )
+                except Exception:
+                    report_session_completed_steps = 0
+
+            report_session_step_index = _step_index(report_session_step_id)
+            target_index = _step_index(target_step_id)
+            if (
+                report_session_step_index >= 0
+                and target_index >= 0
+                and report_session_step_index >= target_index
+            ):
+                conn.experiment_session_id = report_session_id
+                conn.experiment_current_step_id = report_session_step_id
+                conn.experiment_progress_summary = report_progress_payload
+                try:
+                    report_group_number = int(
+                        (report_candidate or {}).get("current_group_number") or 0
+                    )
+                except Exception:
+                    report_group_number = 0
+                if report_group_number >= 1:
+                    setattr(conn, "experiment_current_group_number", report_group_number)
+                await save_experiment_session_binding(
+                    getattr(conn, "config", {}) or {},
+                    chat_session_id=str(getattr(conn, "chat_session_id", "") or ""),
+                    model_session_key=str(getattr(conn, "model_session_key", "") or ""),
+                    device_id=str(getattr(conn, "device_id", "") or ""),
+                    user_id=str(getattr(conn, "user_id", "") or ""),
+                    yaml_path=str(getattr(conn, "experiment_yaml_path", "") or ""),
+                    experiment_session_id=report_session_id,
+                    status="active",
+                    source="resume_report_session",
+                    current_step_id=report_session_step_id,
+                    completed_steps_count=report_session_completed_steps,
+                    total_steps=getattr(conn, "_extract_experiment_total_steps", lambda *_: 0)(
+                        report_progress_payload
+                    ),
+                )
+                graph_session_id = report_session_id
+                graph_step_id = report_session_step_id
+                graph_completed_steps = report_session_completed_steps
+                graph_is_behind_resume_target = False
+                conn.logger.bind(tag=TAG).info(
+                    "experiment explicit resume rebound to exported-report session: "
+                    f"session_id={report_session_id}, step_id={report_session_step_id}, "
+                    f"completed_steps={report_session_completed_steps}"
+                )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                "experiment explicit resume report-session rebind failed: "
+                f"session_id={report_session_id}, error={exc}"
+            )
+
+    report_group_number = None
+    if isinstance(report_candidate, dict):
+        try:
+            report_group_number = int(report_candidate.get("current_group_number") or 0)
+        except Exception:
+            report_group_number = None
+        if report_group_number is not None and report_group_number < 1:
+            report_group_number = None
+
+    if graph_is_behind_resume_target and graph_session_id and target_step_id:
+        redirect_args = {
+            "session_id": graph_session_id,
+            "step_id": target_step_id,
+            "force": True,
+        }
+        if report_group_number is not None:
+            redirect_args["group_number"] = report_group_number
+        try:
+            redirect_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "redirect_to_step",
+                redirect_args,
+                priority="foreground",
+            )
+            if bool(_experiment_result_body(redirect_payload).get("ok")):
+                rebound_meta = await _safe_refresh_experiment_step_cache(
+                    conn,
+                    graph_session_id,
+                    reason="explicit_resume_redirect_to_report_target",
+                )
+                rebound_step_id = str(rebound_meta.get("step_id", "") or "").strip()
+                if rebound_step_id:
+                    conn.experiment_current_step_id = rebound_step_id
+                if report_group_number is not None:
+                    setattr(conn, "experiment_current_group_number", report_group_number)
+                rebound_progress = getattr(conn, "experiment_progress_summary", None)
+                rebound_completed_steps = 0
+                if hasattr(conn, "_extract_experiment_completed_steps_count"):
+                    try:
+                        rebound_completed_steps = int(
+                            conn._extract_experiment_completed_steps_count(
+                                rebound_progress
+                            )
+                            or 0
+                        )
+                    except Exception:
+                        rebound_completed_steps = 0
+                await save_experiment_session_binding(
+                    getattr(conn, "config", {}) or {},
+                    chat_session_id=str(getattr(conn, "chat_session_id", "") or ""),
+                    model_session_key=str(
+                        getattr(conn, "model_session_key", "") or ""
+                    ),
+                    device_id=str(getattr(conn, "device_id", "") or ""),
+                    user_id=str(getattr(conn, "user_id", "") or ""),
+                    yaml_path=str(getattr(conn, "experiment_yaml_path", "") or ""),
+                    experiment_session_id=graph_session_id,
+                    status="active",
+                    source="resume_redirect_to_report_target",
+                    current_step_id=rebound_step_id,
+                    completed_steps_count=rebound_completed_steps,
+                    total_steps=getattr(
+                        conn, "_extract_experiment_total_steps", lambda *_: 0
+                    )(rebound_progress),
+                )
+                graph_step_id = rebound_step_id
+                graph_is_behind_resume_target = False
+                conn.logger.bind(tag=TAG).info(
+                    "experiment explicit resume redirected current graph to report target: "
+                    f"session_id={graph_session_id}, target_step_id={target_step_id}, "
+                    f"resolved_step_id={rebound_step_id}, group_number={report_group_number or ''}"
+                )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                "experiment explicit resume redirect-to-report-target failed: "
+                f"session_id={graph_session_id}, target_step_id={target_step_id}, error={exc}"
+            )
+
     if graph_session_id and graph_step_id and (
         graph_completed_steps > 0 or graph_step_id != "step_prepare_setup_all"
-    ):
+    ) and not graph_is_behind_resume_target:
         step_meta = await _safe_refresh_experiment_step_cache(
             conn,
             graph_session_id,
@@ -1247,7 +1545,7 @@ async def _handle_explicit_experiment_resume_request(
             fallback_mode="guide",
         )
         if not reply:
-            reply = "我已经接回到上次实验记录对应的步骤了，你跟着这一步继续做。"
+            reply = "鎴戝凡缁忔帴鍥炲埌涓婃瀹為獙璁板綍瀵瑰簲鐨勬楠や簡锛屼綘璺熺潃杩欎竴姝ョ户缁仛銆?
         await _start_direct_intent_turn(conn, original_text)
         speak_txt(conn, reply)
         return True
@@ -1265,16 +1563,18 @@ async def _handle_explicit_experiment_resume_request(
                 f"experiment explicit resume context prepare failed: {exc}"
             )
 
-    target_step_id = str(
-        getattr(conn, "experiment_resume_latest_current_step_id", "") or ""
-    ).strip()
-    log_path = str(getattr(conn, "experiment_resume_log_path", "") or "").strip()
+    if not target_step_id:
+        target_step_id = str(
+            getattr(conn, "experiment_resume_latest_current_step_id", "") or ""
+        ).strip()
+    if not log_path:
+        log_path = str(getattr(conn, "experiment_resume_log_path", "") or "").strip()
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
 
     if not log_path:
         reply = (
-            "这个设备当前没有找到可用于续接的实验记录，只能重新开始。"
-            "你说开始今天的实验，我就从第一步带你做。"
+            "杩欎釜璁惧褰撳墠娌℃湁鎵惧埌鍙敤浜庣画鎺ョ殑瀹為獙璁板綍锛屽彧鑳介噸鏂板紑濮嬨€?
+            "浣犺寮€濮嬩粖澶╃殑瀹為獙锛屾垜灏变粠绗竴姝ュ甫浣犲仛銆?
         )
         await _start_direct_intent_turn(conn, original_text)
         speak_txt(conn, reply)
@@ -1290,8 +1590,8 @@ async def _handle_explicit_experiment_resume_request(
             )
         else:
             reply = (
-                "我找到了这个设备之前的实验日志，但还不能可靠判断现在实际做到哪一步。"
-                "请直接告诉我当前实际步骤，比如“现在做到2号样品拍照”或“现在做到丁达尔观察”。"
+                "鎴戞壘鍒颁簡杩欎釜璁惧涔嬪墠鐨勫疄楠屾棩蹇楋紝浣嗚繕涓嶈兘鍙潬鍒ゆ柇鐜板湪瀹為檯鍋氬埌鍝竴姝ャ€?
+                "璇风洿鎺ュ憡璇夋垜褰撳墠瀹為檯姝ラ锛屾瘮濡傗€滅幇鍦ㄥ仛鍒?鍙锋牱鍝佹媿鐓р€濇垨鈥滅幇鍦ㄥ仛鍒颁竵杈惧皵瑙傚療鈥濄€?
             )
             await _start_direct_intent_turn(conn, original_text)
             speak_txt(conn, reply)
@@ -1304,8 +1604,8 @@ async def _handle_explicit_experiment_resume_request(
     )
     if not recovered:
         reply = recovery_reply or (
-            "我找到了上次实验的日志，但当前图谱没法自动跳到那一步。"
-            "你可以让我重新开始，或者明确告诉我要跳到哪一步。"
+            "鎴戞壘鍒颁簡涓婃瀹為獙鐨勬棩蹇楋紝浣嗗綋鍓嶅浘璋辨病娉曡嚜鍔ㄨ烦鍒伴偅涓€姝ャ€?
+            "浣犲彲浠ヨ鎴戦噸鏂板紑濮嬶紝鎴栬€呮槑纭憡璇夋垜瑕佽烦鍒板摢涓€姝ャ€?
         )
         await _start_direct_intent_turn(conn, original_text)
         speak_txt(conn, reply)
@@ -1323,9 +1623,9 @@ async def _handle_explicit_experiment_resume_request(
     )
     if not reply:
         if resume_context_prepared:
-            reply = "我已经按上次实验日志接回当前步骤了，你跟着这一步继续做。"
+            reply = "鎴戝凡缁忔寜涓婃瀹為獙鏃ュ織鎺ュ洖褰撳墠姝ラ浜嗭紝浣犺窡鐫€杩欎竴姝ョ户缁仛銆?
         else:
-            reply = "我已经接回到上次实验记录对应的步骤了，你跟着这一步继续做。"
+            reply = "鎴戝凡缁忔帴鍥炲埌涓婃瀹為獙璁板綍瀵瑰簲鐨勬楠や簡锛屼綘璺熺潃杩欎竴姝ョ户缁仛銆?
 
     await _start_direct_intent_turn(conn, original_text)
     speak_txt(conn, reply)
@@ -1338,28 +1638,28 @@ def _looks_like_generic_experiment_control_text(filtered_text: str) -> bool:
         return False
 
     generic_tokens = {
-        "缁х画",
-        "缁х画鍚?",
-        "缁х画涓嬩竴姝?",
-        "涓嬩竴姝?",
-        "寰€涓嬭蛋",
-        "寰€鍚庤蛋",
-        "鍋氬ソ浜?",
-        "鍋氬畬浜?",
-        "瀹屾垚浜?",
-        "宸插畬鎴?",
-        "宸茬粡鍋氬ソ浜?",
-        "宸茬粡瀹屾垚浜?",
-        "閮藉仛濂戒簡",
-        "閮藉仛瀹屼簡",
-        "褰撳墠姝ラ宸插畬鎴?",
-        "杩欐瀹屾垚浜?",
-        "杩欎竴姝ュ畬鎴愪簡",
-        "濂戒簡",
-        "鍙互浜?",
-        "琛屼簡",
-        "濂藉暒",
-        "ok浜?",
+        "缂佈呯敾",
+        "缂佈呯敾閸?",
+        "缂佈呯敾娑撳绔村?",
+        "娑撳绔村?",
+        "瀵扳偓娑撳铔?,
+        "瀵扳偓閸氬氦铔?,
+        "閸嬫艾銈芥禍?",
+        "閸嬫艾鐣禍?",
+        "鐎瑰本鍨氭禍?",
+        "瀹告彃鐣幋?",
+        "瀹歌尙绮￠崑姘偨娴?",
+        "瀹歌尙绮＄€瑰本鍨氭禍?",
+        "闁棄浠涙總鎴掔啊",
+        "闁棄浠涚€瑰奔绨?,
+        "瑜版挸澧犲銉╊€冨鎻掔暚閹?",
+        "鏉╂瑦顒炵€瑰本鍨氭禍?",
+        "鏉╂瑤绔村銉ョ暚閹存劒绨?,
+        "婵傛垝绨?,
+        "閸欘垯浜掓禍?",
+        "鐞涘奔绨?,
+        "婵傝棄鏆?,
+        "ok娴?",
     }
     if norm in generic_tokens:
         return True
@@ -1367,20 +1667,20 @@ def _looks_like_generic_experiment_control_text(filtered_text: str) -> bool:
     if len(norm) > 18:
         return False
 
-    if _contains_any(norm, ("鏍峰搧", "agno3", "h2o2", "nabh4", "kbr", "绾按")):
+    if _contains_any(norm, ("閺嶅嘲鎼?, "agno3", "h2o2", "nabh4", "kbr", "缁绢垱鎸?)):
         return False
 
-    if re.search(r"[0-9涓€浜屼笁鍥涗簲鍏竷鍏節鍗?]", norm):
+    if re.search(r"[0-9娑撯偓娴滃奔绗侀崶娑楃安閸忣厺绔烽崗顐＄瘈閸?]", norm):
         return False
 
     generic_fragments = (
-        "缁х画",
-        "涓嬩竴姝?",
-        "鍋氬ソ",
-        "鍋氬畬",
-        "瀹屾垚",
-        "宸插畬鎴?",
-        "濂戒簡",
+        "缂佈呯敾",
+        "娑撳绔村?",
+        "閸嬫艾銈?,
+        "閸嬫艾鐣?,
+        "鐎瑰本鍨?,
+        "瀹告彃鐣幋?",
+        "婵傛垝绨?,
     )
     return _contains_any(norm, generic_fragments)
 
@@ -1425,13 +1725,13 @@ def _maybe_stage_experiment_ready_guard_bypass_for_normal_turn(
 
 PURE_SHORT_COMPLETION_PATTERNS = (
     re.compile(
-        r"^(?:(?:我|这步|这一步|当前步骤|当前这步|本步|这轮|已经|已|都|就|现在|目前|刚刚|这里|这边|样品)){0,3}"
-        r"(?:加|装|配|放|做|弄|拍|扫|看|测|量|记|写|填|观察|确认|核对|处理|准备|调|搅拌|滴加|记录|补记)?"
-        r"(?:好|完|成)(?:了|啦)$"
+        r"^(?:(?:鎴憒杩欐|杩欎竴姝褰撳墠姝ラ|褰撳墠杩欐|鏈|杩欒疆|宸茬粡|宸瞸閮絴灏眧鐜板湪|鐩墠|鍒氬垰|杩欓噷|杩欒竟|鏍峰搧)){0,3}"
+        r"(?:鍔爘瑁厊閰峾鏀緗鍋殀寮剕鎷峾鎵珅鐪媩娴媩閲弢璁皘鍐檤濉珅瑙傚療|纭|鏍稿|澶勭悊|鍑嗗|璋億鎼呮媽|婊村姞|璁板綍|琛ヨ)?"
+        r"(?:濂絴瀹寍鎴?(?:浜唡鍟?$"
     ),
     re.compile(
-        r"^(?:(?:我|这步|这一步|当前步骤|当前这步|本步|这轮|已经|已|都|就|现在|目前|刚刚|这里|这边|样品)){0,3}"
-        r"(?:搞定|结束|齐活|妥)(?:了|啦)?$"
+        r"^(?:(?:鎴憒杩欐|杩欎竴姝褰撳墠姝ラ|褰撳墠杩欐|鏈|杩欒疆|宸茬粡|宸瞸閮絴灏眧鐜板湪|鐩墠|鍒氬垰|杩欓噷|杩欒竟|鏍峰搧)){0,3}"
+        r"(?:鎼炲畾|缁撴潫|榻愭椿|濡?(?:浜唡鍟??$"
     ),
 )
 
@@ -1447,10 +1747,10 @@ def _assistant_waiting_after_sidetrack_question(conn) -> bool:
     return _contains_any(
         recent,
         (
-            "我们现在能继续做实验了吗",
-            "现在能继续做实验了吗",
-            "能继续做实验了吗",
-            "继续做实验了吗",
+            "鎴戜滑鐜板湪鑳界户缁仛瀹為獙浜嗗悧",
+            "鐜板湪鑳界户缁仛瀹為獙浜嗗悧",
+            "鑳界户缁仛瀹為獙浜嗗悧",
+            "缁х画鍋氬疄楠屼簡鍚?,
         ),
     )
 
@@ -1462,14 +1762,14 @@ def _looks_like_sidetrack_continue_reply(filtered_text: str) -> bool:
     return _contains_any(
         norm,
         (
-            "可以继续",
-            "继续吧",
-            "继续做实验",
-            "继续进行实验",
-            "接着做",
-            "接着实验",
-            "往下做",
-            "能继续",
+            "鍙互缁х画",
+            "缁х画鍚?,
+            "缁х画鍋氬疄楠?,
+            "缁х画杩涜瀹為獙",
+            "鎺ョ潃鍋?,
+            "鎺ョ潃瀹為獙",
+            "寰€涓嬪仛",
+            "鑳界户缁?,
         ),
     )
 
@@ -1498,18 +1798,18 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
         return ""
 
     clarify_tokens = (
-        "没听懂",
-        "没听清",
-        "再说一遍",
-        "重说一遍",
-        "重新说",
-        "重复一下",
-        "再讲一遍",
-        "再说下",
-        "当前步骤是什么",
-        "这步是什么",
-        "这步怎么做",
-        "什么意思",
+        "娌″惉鎳?,
+        "娌″惉娓?,
+        "鍐嶈涓€閬?,
+        "閲嶈涓€閬?,
+        "閲嶆柊璇?,
+        "閲嶅涓€涓?,
+        "鍐嶈涓€閬?,
+        "鍐嶈涓?,
+        "褰撳墠姝ラ鏄粈涔?,
+        "杩欐鏄粈涔?,
+        "杩欐鎬庝箞鍋?,
+        "浠€涔堟剰鎬?,
     )
     if _contains_any(norm, clarify_tokens):
         return "repeat"
@@ -1518,27 +1818,27 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
         return "guide"
 
     advance_tokens = (
-        "继续下一步",
-        "下一步",
-        "下一组",
-        "下一组继续",
-        "继续下一组",
-        "换下一组",
-        "下一批",
-        "继续下一批",
-        "下一组学生",
-        "下一批学生",
-        "往下走",
-        "往后走",
-        "做完了",
-        "做好了",
-        "完成了",
-        "已完成",
-        "当前步骤已完成",
-        "这步完成了",
-        "这一步完成了",
-        "都做好了",
-        "都做完了",
+        "缁х画涓嬩竴姝?,
+        "涓嬩竴姝?,
+        "涓嬩竴缁?,
+        "涓嬩竴缁勭户缁?,
+        "缁х画涓嬩竴缁?,
+        "鎹笅涓€缁?,
+        "涓嬩竴鎵?,
+        "缁х画涓嬩竴鎵?,
+        "涓嬩竴缁勫鐢?,
+        "涓嬩竴鎵瑰鐢?,
+        "寰€涓嬭蛋",
+        "寰€鍚庤蛋",
+        "鍋氬畬浜?,
+        "鍋氬ソ浜?,
+        "瀹屾垚浜?,
+        "宸插畬鎴?,
+        "褰撳墠姝ラ宸插畬鎴?,
+        "杩欐瀹屾垚浜?,
+        "杩欎竴姝ュ畬鎴愪簡",
+        "閮藉仛濂戒簡",
+        "閮藉仛瀹屼簡",
     )
     if _contains_any(norm, advance_tokens):
         return "advance"
@@ -1549,22 +1849,22 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
         return "advance"
 
     ready_tokens = (
-        "准备好了",
-        "我准备好了",
-        "可以开始",
-        "开始吧",
-        "开始",
+        "鍑嗗濂戒簡",
+        "鎴戝噯澶囧ソ浜?,
+        "鍙互寮€濮?,
+        "寮€濮嬪惂",
+        "寮€濮?,
         "ready",
     )
     if _contains_any(norm, ready_tokens):
         return "guide"
 
     neutral_ack_tokens = (
-        "好了",
-        "可以了",
-        "行了",
-        "好啦",
-        "ok了",
+        "濂戒簡",
+        "鍙互浜?,
+        "琛屼簡",
+        "濂藉暒",
+        "ok浜?,
     )
     if norm in neutral_ack_tokens or _ends_with_any(norm, neutral_ack_tokens):
         if waiting_for_step_completion:
@@ -1572,7 +1872,7 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
         if waiting_for_step_start:
             return "guide"
 
-    if norm in {"继续", "继续吧"}:
+    if norm in {"缁х画", "缁х画鍚?}:
         return "guide" if waiting_for_step_start else "advance"
 
     return ""
@@ -1828,35 +2128,35 @@ def _build_experiment_autofill_fields(
 
 
 _RESUME_LOG_NEGATIVE_TOKENS = (
-    "没做",
-    "还没做",
-    "还没有做",
-    "没做好",
-    "还没做好",
-    "没完成",
-    "还没完成",
-    "先别",
-    "不要",
-    "不行",
-    "没加",
-    "还没加",
+    "娌″仛",
+    "杩樻病鍋?,
+    "杩樻病鏈夊仛",
+    "娌″仛濂?,
+    "杩樻病鍋氬ソ",
+    "娌″畬鎴?,
+    "杩樻病瀹屾垚",
+    "鍏堝埆",
+    "涓嶈",
+    "涓嶈",
+    "娌″姞",
+    "杩樻病鍔?,
 )
 
 _RESUME_LOG_GLOBAL_COMPLETION_TOKENS = (
-    "全部完成",
-    "都完成",
-    "全都完成",
-    "全部做好",
-    "都做好",
-    "全都做好",
-    "全部放好",
-    "都放好",
-    "全都放好",
-    "全部加好",
-    "都加好了",
-    "全都加好了",
-    "已经全部",
-    "都已经",
+    "鍏ㄩ儴瀹屾垚",
+    "閮藉畬鎴?,
+    "鍏ㄩ兘瀹屾垚",
+    "鍏ㄩ儴鍋氬ソ",
+    "閮藉仛濂?,
+    "鍏ㄩ兘鍋氬ソ",
+    "鍏ㄩ儴鏀惧ソ",
+    "閮芥斁濂?,
+    "鍏ㄩ兘鏀惧ソ",
+    "鍏ㄩ儴鍔犲ソ",
+    "閮藉姞濂戒簡",
+    "鍏ㄩ兘鍔犲ソ浜?,
+    "宸茬粡鍏ㄩ儴",
+    "閮藉凡缁?,
 )
 
 
@@ -1874,20 +2174,20 @@ def _resume_log_has_global_completion_signal(user_texts) -> bool:
 
 def _resume_log_text_authorizes_photo(user_texts, *, allow_short_reply: bool = False) -> bool:
     positive_tokens = (
-        "可以拍照",
-        "可以拍",
-        "能拍照",
-        "能拍",
-        "拍吧",
-        "拍照吧",
-        "现在拍",
-        "开始拍",
-        "拍一下",
-        "拍一张",
-        "同意拍照",
-        "授权拍照",
+        "鍙互鎷嶇収",
+        "鍙互鎷?,
+        "鑳芥媿鐓?,
+        "鑳芥媿",
+        "鎷嶅惂",
+        "鎷嶇収鍚?,
+        "鐜板湪鎷?,
+        "寮€濮嬫媿",
+        "鎷嶄竴涓?,
+        "鎷嶄竴寮?,
+        "鍚屾剰鎷嶇収",
+        "鎺堟潈鎷嶇収",
     )
-    short_positive_tokens = ("可以", "好", "行", "同意")
+    short_positive_tokens = ("鍙互", "濂?, "琛?, "鍚屾剰")
     for text in user_texts or []:
         norm = _normalize_confirmation_signature(text)
         if not norm or _contains_any(norm, _RESUME_LOG_NEGATIVE_TOKENS):
@@ -1918,12 +2218,12 @@ def _step_meta_looks_like_photo_permission(step_meta: dict, schema_by_name: dict
         haystack,
         (
             "photo_permission",
-            "拍照权限",
-            "授权拍照",
-            "是否拍照",
-            "询问是否拍照",
-            "同意拍照",
-            "可以拍照",
+            "鎷嶇収鏉冮檺",
+            "鎺堟潈鎷嶇収",
+            "鏄惁鎷嶇収",
+            "璇㈤棶鏄惁鎷嶇収",
+            "鍚屾剰鎷嶇収",
+            "鍙互鎷嶇収",
         ),
     )
 
@@ -1952,12 +2252,12 @@ def _build_resume_photo_permission_fields(
             haystack,
             (
                 "photo_permission",
-                "拍照权限",
-                "授权拍照",
-                "同意拍照",
-                "允许拍照",
-                "请求拍照",
-                "询问拍照",
+                "鎷嶇収鏉冮檺",
+                "鎺堟潈鎷嶇収",
+                "鍚屾剰鎷嶇収",
+                "鍏佽鎷嶇収",
+                "璇锋眰鎷嶇収",
+                "璇㈤棶鎷嶇収",
             ),
         ):
             result[field_name] = True
@@ -2001,17 +2301,17 @@ def _find_resume_photo_meta_for_step(
         score = 0
         if sample_index is not None:
             sample_tokens = (
-                f"{sample_index}号样品",
-                f"{sample_index}号",
-                f"样品{sample_index}",
+                f"{sample_index}鍙锋牱鍝?,
+                f"{sample_index}鍙?,
+                f"鏍峰搧{sample_index}",
             )
             if any(token in name for token in sample_tokens):
                 score += 100
             else:
                 return (-1, 0.0)
-        if _contains_any(name, ("照片", "拍照", "photo", "image", "img")):
+        if _contains_any(name, ("鐓х墖", "鎷嶇収", "photo", "image", "img")):
             score += 20
-        if "重拍" in name or "补拍" in name:
+        if "閲嶆媿" in name or "琛ユ媿" in name:
             score += 5
         try:
             mtime = path.stat().st_mtime
@@ -2153,29 +2453,29 @@ def _looks_like_explicit_completion_report(filtered_text: str) -> bool:
     if _looks_like_pure_short_completion_control(norm):
         return True
     completion_tokens = (
-        "全部完成",
-        "都完成",
-        "全都完成",
-        "已经完成",
-        "已完成",
-        "完成了",
-        "全部做好",
-        "都做好",
-        "全都做好",
-        "做好了",
-        "做完了",
-        "全部混匀",
-        "都混匀了",
-        "全都混匀了",
-        "已经全部混匀",
-        "已全部混匀",
-        "混合均匀",
-        "混匀了",
-        "开始搅拌",
-        "已经开始搅拌",
-        "已开始搅拌",
-        "都已经开始搅拌",
-        "搅拌好了",
+        "鍏ㄩ儴瀹屾垚",
+        "閮藉畬鎴?,
+        "鍏ㄩ兘瀹屾垚",
+        "宸茬粡瀹屾垚",
+        "宸插畬鎴?,
+        "瀹屾垚浜?,
+        "鍏ㄩ儴鍋氬ソ",
+        "閮藉仛濂?,
+        "鍏ㄩ兘鍋氬ソ",
+        "鍋氬ソ浜?,
+        "鍋氬畬浜?,
+        "鍏ㄩ儴娣峰寑",
+        "閮芥贩鍖€浜?,
+        "鍏ㄩ兘娣峰寑浜?,
+        "宸茬粡鍏ㄩ儴娣峰寑",
+        "宸插叏閮ㄦ贩鍖€",
+        "娣峰悎鍧囧寑",
+        "娣峰寑浜?,
+        "寮€濮嬫悈鎷?,
+        "宸茬粡寮€濮嬫悈鎷?,
+        "宸插紑濮嬫悈鎷?,
+        "閮藉凡缁忓紑濮嬫悈鎷?,
+        "鎼呮媽濂戒簡",
     )
     return _contains_any(norm, completion_tokens)
 
@@ -2187,25 +2487,25 @@ def _looks_like_explicit_added_completion_report(filtered_text: str) -> bool:
     if _contains_any(norm, _RESUME_LOG_NEGATIVE_TOKENS):
         return False
     completion_tokens = (
-        "全部加好",
-        "都加好了",
-        "全都加好了",
-        "已经加好了",
-        "已加好了",
-        "全部加完",
-        "都加完了",
-        "全都加完了",
-        "已经加完了",
-        "已加完了",
-        "全部加入",
-        "都加入了",
-        "全都加入了",
-        "已经加入",
-        "已加入",
-        "都已经加入",
-        "全都已经加入",
-        "按顺序加入",
-        "顺序加入",
+        "鍏ㄩ儴鍔犲ソ",
+        "閮藉姞濂戒簡",
+        "鍏ㄩ兘鍔犲ソ浜?,
+        "宸茬粡鍔犲ソ浜?,
+        "宸插姞濂戒簡",
+        "鍏ㄩ儴鍔犲畬",
+        "閮藉姞瀹屼簡",
+        "鍏ㄩ兘鍔犲畬浜?,
+        "宸茬粡鍔犲畬浜?,
+        "宸插姞瀹屼簡",
+        "鍏ㄩ儴鍔犲叆",
+        "閮藉姞鍏ヤ簡",
+        "鍏ㄩ兘鍔犲叆浜?,
+        "宸茬粡鍔犲叆",
+        "宸插姞鍏?,
+        "閮藉凡缁忓姞鍏?,
+        "鍏ㄩ兘宸茬粡鍔犲叆",
+        "鎸夐『搴忓姞鍏?,
+        "椤哄簭鍔犲叆",
     )
     return _contains_any(norm, completion_tokens)
 
@@ -2217,11 +2517,11 @@ def _looks_like_addition_confirmation_description(description: str) -> bool:
     return _contains_any(
         norm,
         (
-            "加入",
-            "加液",
-            "滴加",
-            "加完",
-            "加好",
+            "鍔犲叆",
+            "鍔犳恫",
+            "婊村姞",
+            "鍔犲畬",
+            "鍔犲ソ",
         ),
     )
 
@@ -2267,17 +2567,17 @@ def _build_experiment_current_step_confirmation_fields(
 
 
 _CHINESE_NUMERIC_CHAR_MAP = {
-    "零": "0",
-    "一": "1",
-    "二": "2",
-    "两": "2",
-    "三": "3",
-    "四": "4",
-    "五": "5",
-    "六": "6",
-    "七": "7",
-    "八": "8",
-    "九": "9",
+    "闆?: "0",
+    "涓€": "1",
+    "浜?: "2",
+    "涓?: "2",
+    "涓?: "3",
+    "鍥?: "4",
+    "浜?: "5",
+    "鍏?: "6",
+    "涓?: "7",
+    "鍏?: "8",
+    "涔?: "9",
 }
 
 
@@ -2288,14 +2588,14 @@ def _parse_small_chinese_float(token: str) -> float | None:
     if re.fullmatch(r"\d+(?:\.\d+)?", text):
         return _extract_float_value(text)
 
-    normalized = text.replace("两", "二")
-    if normalized == "半":
+    normalized = text.replace("涓?, "浜?)
+    if normalized == "鍗?:
         return 0.5
-    if "点" in normalized:
-        left, right = normalized.split("点", 1)
+    if "鐐? in normalized:
+        left, right = normalized.split("鐐?, 1)
         if not right:
             return None
-        left_value = _parse_small_chinese_integer(left or "零")
+        left_value = _parse_small_chinese_integer(left or "闆?)
         if left_value is None:
             return None
         decimal_digits = "".join(
@@ -2322,16 +2622,16 @@ def _extract_observation_duration_minutes(filtered_text: str) -> float | None:
     if parsed_durations:
         return float(parsed_durations[0]["minutes"])
 
-    numeric_match = re.search(r"(\d+(?:\.\d+)?)\s*(分钟|分|秒钟|秒)", text)
+    numeric_match = re.search(r"(\d+(?:\.\d+)?)\s*(鍒嗛挓|鍒唡绉掗挓|绉?", text)
     if numeric_match:
         value = _extract_float_value(numeric_match.group(1))
         if value is None:
             return None
         unit = numeric_match.group(2)
-        return round(value / 60.0, 4) if "秒" in unit else value
+        return round(value / 60.0, 4) if "绉? in unit else value
 
     chinese_match = re.search(
-        r"([零一二两三四五六七八九十点半]+)\s*(分钟|分|秒钟|秒)",
+        r"([闆朵竴浜屼袱涓夊洓浜斿叚涓冨叓涔濆崄鐐瑰崐]+)\s*(鍒嗛挓|鍒唡绉掗挓|绉?",
         text,
     )
     if not chinese_match:
@@ -2340,7 +2640,7 @@ def _extract_observation_duration_minutes(filtered_text: str) -> float | None:
     if value is None:
         return None
     unit = chinese_match.group(2)
-    return round(value / 60.0, 4) if "秒" in unit else value
+    return round(value / 60.0, 4) if "绉? in unit else value
 
 
 def _field_matches_observation_semantics(field_name: str, field: dict, tokens: tuple[str, ...]) -> bool:
@@ -2364,16 +2664,16 @@ def _extract_observation_color_value(filtered_text: str) -> str:
     ):
         return ""
 
-    cleaned = re.sub(r"\d+(?:\.\d+)?\s*(分钟|分|秒钟|秒)", "", text)
-    cleaned = re.sub(r"[零一二两三四五六七八九十点半]+\s*(分钟|分|秒钟|秒)", "", cleaned)
-    cleaned = re.sub(r"(颜色|最终|稳定|用了|用时|大约|大概|约|是|为|记作|已经|确认|样品)", "", cleaned)
-    cleaned = re.sub(r"[0-9一二三四五六七八九十]+\s*号", "", cleaned)
-    cleaned = re.sub(r"\s+", "", cleaned).strip("，,。；;：: ")
+    cleaned = re.sub(r"\d+(?:\.\d+)?\s*(鍒嗛挓|鍒唡绉掗挓|绉?", "", text)
+    cleaned = re.sub(r"[闆朵竴浜屼袱涓夊洓浜斿叚涓冨叓涔濆崄鐐瑰崐]+\s*(鍒嗛挓|鍒唡绉掗挓|绉?", "", cleaned)
+    cleaned = re.sub(r"(棰滆壊|鏈€缁坾绋冲畾|鐢ㄤ簡|鐢ㄦ椂|澶х害|澶ф|绾鏄瘄涓簗璁颁綔|宸茬粡|纭|鏍峰搧)", "", cleaned)
+    cleaned = re.sub(r"[0-9涓€浜屼笁鍥涗簲鍏竷鍏節鍗乚+\s*鍙?, "", cleaned)
+    cleaned = re.sub(r"\s+", "", cleaned).strip("锛?銆傦紱;锛? ")
     if not cleaned:
         return ""
     if len(cleaned) > 12:
         return ""
-    if _contains_any(cleaned, ("可以拍照", "下一步", "继续", "然后呢", "干嘛", "没错", "对")):
+    if _contains_any(cleaned, ("鍙互鎷嶇収", "涓嬩竴姝?, "缁х画", "鐒跺悗鍛?, "骞插槢", "娌￠敊", "瀵?)):
         return ""
     return cleaned
 
@@ -2386,7 +2686,7 @@ def _build_experiment_current_step_tyndall_fields(
     norm = _normalize_confirmation_signature(filtered_text)
     if not norm or _looks_like_question_reply(filtered_text):
         return {}
-    if not _contains_any(norm, ("丁达尔", "tyndall")):
+    if not _contains_any(norm, ("涓佽揪灏?, "tyndall")):
         return {}
 
     tyndall_fields = []
@@ -2399,7 +2699,7 @@ def _build_experiment_current_step_tyndall_fields(
         if not _field_matches_observation_semantics(
             field_name,
             field,
-            ("丁达尔", "tyndall"),
+            ("涓佽揪灏?, "tyndall"),
         ):
             continue
         tyndall_fields.append(field_name)
@@ -2411,34 +2711,34 @@ def _build_experiment_current_step_tyndall_fields(
         _contains_any(
             norm,
             (
-                "全部都有",
-                "全都有",
-                "都有",
-                "均有",
-                "都观察到",
-                "都看到了",
-                "都能看到",
-                "都存在",
-                "都有明显",
+                "鍏ㄩ儴閮芥湁",
+                "鍏ㄩ兘鏈?,
+                "閮芥湁",
+                "鍧囨湁",
+                "閮借瀵熷埌",
+                "閮界湅鍒颁簡",
+                "閮借兘鐪嬪埌",
+                "閮藉瓨鍦?,
+                "閮芥湁鏄庢樉",
             ),
         )
-        and _contains_any(norm, ("丁达尔", "tyndall"))
+        and _contains_any(norm, ("涓佽揪灏?, "tyndall"))
     )
     collective_negative = (
         _contains_any(
             norm,
             (
-                "全部都没有",
-                "全都没有",
-                "都没有",
-                "均无",
-                "都看不到",
-                "都没看到",
-                "都未观察到",
-                "都不存在",
+                "鍏ㄩ儴閮芥病鏈?,
+                "鍏ㄩ兘娌℃湁",
+                "閮芥病鏈?,
+                "鍧囨棤",
+                "閮界湅涓嶅埌",
+                "閮芥病鐪嬪埌",
+                "閮芥湭瑙傚療鍒?,
+                "閮戒笉瀛樺湪",
             ),
         )
-        and _contains_any(norm, ("丁达尔", "tyndall"))
+        and _contains_any(norm, ("涓佽揪灏?, "tyndall"))
     )
 
     if collective_positive == collective_negative:
@@ -2460,7 +2760,7 @@ def _step_supports_observation_report(step_payload, schema_by_name: dict) -> boo
         if _field_matches_observation_semantics(
             field_name,
             field,
-            ("最终颜色", "颜色稳定所用时间", "反应时间", "颜色稳定"),
+            ("鏈€缁堥鑹?, "棰滆壊绋冲畾鎵€鐢ㄦ椂闂?, "鍙嶅簲鏃堕棿", "棰滆壊绋冲畾"),
         ):
             return True
     return False
@@ -2493,17 +2793,17 @@ def _build_experiment_current_step_observation_fields(
         type_text = str(field.get("type", "")).strip().lower()
         if type_text in {"bool", "boolean"}:
             bool_field_names.append(field_name)
-            if _field_matches_observation_semantics(field_name, field, ("颜色稳定", "确认颜色稳定")):
+            if _field_matches_observation_semantics(field_name, field, ("棰滆壊绋冲畾", "纭棰滆壊绋冲畾")):
                 stable_field_name = stable_field_name or field_name
             continue
         if type_text in {"string", "str"} and _field_matches_observation_semantics(
-            field_name, field, ("最终颜色", "颜色")
+            field_name, field, ("鏈€缁堥鑹?, "棰滆壊")
         ):
             color_field_name = color_field_name or field_name
         if type_text in {"float", "number", "int", "integer"} and _field_matches_observation_semantics(
             field_name,
             field,
-            ("颜色稳定所用时间", "反应时间", "稳定时间", "所用时间"),
+            ("棰滆壊绋冲畾鎵€鐢ㄦ椂闂?, "鍙嶅簲鏃堕棿", "绋冲畾鏃堕棿", "鎵€鐢ㄦ椂闂?),
         ):
             time_field_name = time_field_name or field_name
 
@@ -2512,7 +2812,7 @@ def _build_experiment_current_step_observation_fields(
     if time_field_name and duration_minutes is not None:
         observation_fields[time_field_name] = duration_minutes
     if stable_field_name and (
-        duration_minutes is not None or "稳定" in textUtils.normalize_spoken_text(filtered_text or "")
+        duration_minutes is not None or "绋冲畾" in textUtils.normalize_spoken_text(filtered_text or "")
     ):
         observation_fields[stable_field_name] = True
 
@@ -2614,15 +2914,107 @@ async def _try_apply_current_confirmation_report(
         f"text={filtered_text}, write_fields={sorted(write_fields.keys())}"
     )
 
+    group_number = await _sync_exp2_group_number_from_turn(
+        conn,
+        "",
+        filtered_text,
+        preferred_step_id=_get_current_experiment_step_id(conn),
+    )
     completed, reply = await _complete_experiment_step_with_fields(
         conn,
         fields=write_fields,
         auto_advance=True,
-        fallback_reply="我先记下了当前这一步的确认结果。",
+        fallback_reply="鎴戝厛璁颁笅浜嗗綋鍓嶈繖涓€姝ョ殑纭缁撴灉銆?,
+        group_number=group_number,
     )
     if completed or reply:
         return reply
     return None
+
+
+def _compose_confirmation_step_writeback_block_reply(
+    conn,
+    step_payload,
+    progress_payload,
+    schema_payload,
+) -> str | None:
+    if not _step_supports_confirmation_autofill(step_payload):
+        return None
+
+    current_progress = _extract_experiment_current_progress(progress_payload)
+    missing_fields = list((current_progress or {}).get("missing_fields") or [])
+    if not missing_fields:
+        return None
+
+    schema_by_name = _extract_experiment_schema_view(schema_payload)
+    step_meta = _merge_experiment_step_meta(
+        _extract_experiment_step_meta(step_payload),
+        _extract_experiment_step_meta(getattr(conn, "experiment_progress_summary", None)),
+    )
+    missing_reply = _compose_missing_field_reply(missing_fields, schema_by_name)
+    current_step_reply = _compose_experiment_step_reply(step_meta, mode="guide")
+    if missing_reply and current_step_reply:
+        return f"鎴戣繖杈硅繕娌℃妸褰撳墠杩欎竴姝ユ垚鍔熷啓鍏ュ疄楠岃褰曘€倇missing_reply}"
+    if missing_reply:
+        return f"鎴戣繖杈硅繕娌℃妸褰撳墠杩欎竴姝ユ垚鍔熷啓鍏ュ疄楠岃褰曘€倇missing_reply}"
+    if current_step_reply:
+        return current_step_reply
+    return "鎴戣繖杈硅繕娌℃妸褰撳墠杩欎竴姝ユ垚鍔熷啓鍏ュ疄楠岃褰曪紝鍏堟寜褰撳墠杩欎竴姝ョ户缁‘璁ゅ悗鍐嶅憡璇夋垜銆?
+
+
+async def _load_confirmation_step_writeback_block_reply(
+    conn,
+    session_id: str,
+) -> str | None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+
+    try:
+        step_payload, progress_payload, schema_payload = await asyncio.gather(
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_step",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_current_progress",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_schema",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+        )
+    except Exception:
+        return None
+
+    current_progress = _extract_experiment_current_progress(progress_payload)
+    if current_progress is None:
+        try:
+            start_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "start_trial",
+                {"session_id": session_id},
+                priority="foreground",
+            )
+        except Exception:
+            return None
+        current_progress = _extract_experiment_current_progress(start_payload)
+        if isinstance(current_progress, dict):
+            progress_payload = start_payload
+
+    return _compose_confirmation_step_writeback_block_reply(
+        conn,
+        step_payload,
+        progress_payload,
+        schema_payload,
+    )
 
 
 def _collect_resume_log_user_texts_by_step(log_path: str) -> dict[str, list[str]]:
@@ -2639,6 +3031,92 @@ def _collect_resume_log_user_texts_by_step(log_path: str) -> dict[str, list[str]
             continue
         grouped.setdefault(step_id, []).append(text)
     return grouped
+
+
+def _normalize_device_id_for_report_compare(device_id: str) -> str:
+    return str(device_id or "").strip().lower().replace(":", "_").replace("-", "_")
+
+
+def _normalize_path_text_for_compare(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).resolve()).lower().replace("/", "\\")
+    except Exception:
+        return raw.lower().replace("/", "\\")
+
+
+def _infer_resume_target_step_from_exported_reports(conn) -> str:
+    report = _best_resume_report_candidate(conn)
+    if isinstance(report, dict):
+        return str(report.get("current_step_id", "") or "").strip()
+    return ""
+
+
+def _best_resume_report_candidate(conn) -> dict | None:
+    yaml_path = str(getattr(conn, "experiment_yaml_path", "") or "").strip()
+    normalized_yaml_path = _normalize_path_text_for_compare(yaml_path)
+    normalized_device_id = _normalize_device_id_for_report_compare(
+        str(getattr(conn, "device_id", "") or "").strip()
+    )
+    if not normalized_yaml_path or not normalized_device_id:
+        return ""
+
+    try:
+        data_root = Path(yaml_path).resolve().parent.parent / "data"
+    except Exception:
+        return ""
+    if not data_root.exists():
+        return ""
+
+    step_order = _resolve_experiment_yaml_step_order(conn)
+    if not step_order:
+        return ""
+    index_by_id = {step_id: idx for idx, step_id in enumerate(step_order)}
+
+    best_step_id = ""
+    best_score = (-1, -1, "")
+    best_payload = None
+    for report_path in data_root.rglob("experimental_graph_records.yaml"):
+        try:
+            payload = yaml.safe_load(
+                report_path.read_text(encoding="utf-8", errors="ignore")
+            )
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        source_yaml_path = _normalize_path_text_for_compare(
+            str(payload.get("source_yaml_path", "") or "").strip()
+        )
+        report_device_id = _normalize_device_id_for_report_compare(
+            str(payload.get("device_id", "") or "").strip()
+        )
+        current_step_id = str(payload.get("current_step_id", "") or "").strip()
+        if source_yaml_path != normalized_yaml_path:
+            continue
+        if report_device_id != normalized_device_id:
+            continue
+        step_index = index_by_id.get(current_step_id, -1)
+        if step_index < 0:
+            continue
+        completed_count = len(payload.get("completed_step_ids") or [])
+        score = (step_index, completed_count, str(report_path))
+        if score > best_score:
+            best_score = score
+            best_step_id = current_step_id
+            best_payload = {
+                "report_path": str(report_path),
+                "session_id": str(payload.get("session_id", "") or "").strip(),
+                "current_step_id": current_step_id,
+                "current_group_number": payload.get("current_group_number"),
+                "completed_steps_count": completed_count,
+            }
+
+    if best_payload is None or not best_step_id:
+        return None
+    return best_payload
 
 
 def _infer_experiment_resume_target_step_from_log(conn, log_path: str) -> str:
@@ -2685,6 +3163,28 @@ def _resolve_experiment_yaml_step_order(conn) -> list[str]:
     return step_ids
 
 
+def _compare_experiment_step_order(conn, left_step_id: str, right_step_id: str) -> int | None:
+    left = str(left_step_id or "").strip()
+    right = str(right_step_id or "").strip()
+    if not left or not right:
+        return None
+    if left == right:
+        return 0
+    step_order = _resolve_experiment_yaml_step_order(conn)
+    if not step_order:
+        return None
+    try:
+        left_index = step_order.index(left)
+        right_index = step_order.index(right)
+    except ValueError:
+        return None
+    if left_index < right_index:
+        return -1
+    if left_index > right_index:
+        return 1
+    return 0
+
+
 def _compose_resume_log_recovery_blocked_reply(
     step_meta: dict,
     missing_fields,
@@ -2697,20 +3197,20 @@ def _compose_resume_log_recovery_blocked_reply(
     if title:
         if has_log_evidence:
             return (
-                f"我找到上次实验日志了，但在“{title}”这一步，日志里的汇报还不够我自动补齐。"
+                f"鎴戞壘鍒颁笂娆″疄楠屾棩蹇椾簡锛屼絾鍦ㄢ€渰title}鈥濊繖涓€姝ワ紝鏃ュ織閲岀殑姹囨姤杩樹笉澶熸垜鑷姩琛ラ綈銆?
                 f"{missing_reply}"
             )
         return (
-            f"我找到上次实验日志了，但日志里还没有足够内容证明“{title}”这一步已经做完。"
+            f"鎴戞壘鍒颁笂娆″疄楠屾棩蹇椾簡锛屼絾鏃ュ織閲岃繕娌℃湁瓒冲鍐呭璇佹槑鈥渰title}鈥濊繖涓€姝ュ凡缁忓仛瀹屻€?
             f"{missing_reply}"
         )
     if has_log_evidence:
         return (
-            "我找到上次实验日志了，但日志里的汇报还不够我自动补齐当前这一步。"
+            "鎴戞壘鍒颁笂娆″疄楠屾棩蹇椾簡锛屼絾鏃ュ織閲岀殑姹囨姤杩樹笉澶熸垜鑷姩琛ラ綈褰撳墠杩欎竴姝ャ€?
             f"{missing_reply}"
         )
     return (
-        "我找到上次实验日志了，但日志里还没有足够内容证明当前这一步已经做完。"
+        "鎴戞壘鍒颁笂娆″疄楠屾棩蹇椾簡锛屼絾鏃ュ織閲岃繕娌℃湁瓒冲鍐呭璇佹槑褰撳墠杩欎竴姝ュ凡缁忓仛瀹屻€?
         f"{missing_reply}"
     )
 
@@ -2729,8 +3229,8 @@ async def _replay_experiment_progress_from_resume_log(
     step_order = _resolve_experiment_yaml_step_order(conn)
     if not step_order or target_step_id not in step_order:
         return False, (
-            "我找到了上次实验日志，但当前实验 YAML 里没法可靠解析出恢复顺序，"
-            "现在还不能安全地自动续做。"
+            "鎴戞壘鍒颁簡涓婃瀹為獙鏃ュ織锛屼絾褰撳墠瀹為獙 YAML 閲屾病娉曞彲闈犺В鏋愬嚭鎭㈠椤哄簭锛?
+            "鐜板湪杩樹笉鑳藉畨鍏ㄥ湴鑷姩缁仛銆?
         )
 
     current_step_id = _get_current_experiment_step_id(conn)
@@ -2917,18 +3417,18 @@ def _looks_like_confirmation_field_statement(
         return False
 
     negative_tokens = (
-        "没做",
-        "还没做",
-        "还没有做",
-        "没做好",
-        "还没做好",
-        "没完成",
-        "还没完成",
-        "先别",
-        "不要",
-        "不行",
-        "没加",
-        "还没加",
+        "娌″仛",
+        "杩樻病鍋?,
+        "杩樻病鏈夊仛",
+        "娌″仛濂?,
+        "杩樻病鍋氬ソ",
+        "娌″畬鎴?,
+        "杩樻病瀹屾垚",
+        "鍏堝埆",
+        "涓嶈",
+        "涓嶈",
+        "娌″姞",
+        "杩樻病鍔?,
     )
     if _contains_any(norm, negative_tokens):
         return False
@@ -3007,7 +3507,14 @@ async def _handle_confirmation_step_semantic_fast_intent(
         return False
 
     if not reply:
-        return False
+        reply = _compose_confirmation_step_writeback_block_reply(
+            conn,
+            step_payload,
+            progress_payload,
+            schema_payload,
+        )
+        if not reply:
+            return False
 
     next_step_meta = _get_cached_experiment_step_meta(conn)
     reply = _prepare_fastpath_spoken_reply(
@@ -3028,8 +3535,43 @@ async def _handle_confirmation_step_semantic_fast_intent(
     return True
 
 
-def _build_experiment_photo_writeback_fields(schema_by_name: dict, photo_meta: dict) -> dict:
+def _build_experiment_photo_writeback_fields(
+    schema_by_name: dict,
+    photo_meta: dict,
+    *,
+    step_meta: dict | None = None,
+    missing_fields=None,
+) -> dict:
     result = {}
+    normalized_missing = {
+        str(item or "").strip() for item in (missing_fields or []) if str(item or "").strip()
+    }
+
+    if step_meta and _step_meta_looks_like_photo_permission(step_meta, schema_by_name):
+        for field_name, field in (schema_by_name or {}).items():
+            if normalized_missing and field_name not in normalized_missing:
+                continue
+            type_text = str((field or {}).get("type", "")).strip().lower()
+            if type_text not in {"bool", "boolean"}:
+                continue
+            haystack = _normalize_confirmation_signature(
+                f"{field_name} {_clean_field_description((field or {}).get('description', ''))}"
+            )
+            if _contains_any(
+                haystack,
+                (
+                    "photo_permission",
+                    "鎷嶇収鏉冮檺",
+                    "鎺堟潈鎷嶇収",
+                    "鍚屾剰鎷嶇収",
+                    "鍏佽鎷嶇収",
+                    "璇锋眰鎷嶇収",
+                    "璇㈤棶鎷嶇収",
+                    "鍙互鎷嶇収",
+                ),
+            ):
+                result[field_name] = True
+
     if "photo_taken" in schema_by_name:
         result["photo_taken"] = True
     if "color_confirmed_by_photo" in schema_by_name:
@@ -3046,7 +3588,7 @@ def _build_experiment_photo_writeback_fields(schema_by_name: dict, photo_meta: d
 
 def _step_meta_looks_like_photo_confirmation(step_meta: dict) -> bool:
     title = _normalize_text_for_match(step_meta.get("title", ""))
-    if title and _contains_any(title, ("拍照", "照片", "拍摄")):
+    if title and _contains_any(title, ("鎷嶇収", "鐓х墖", "鎷嶆憚")):
         return True
 
     haystack = _normalize_text_for_match(
@@ -3061,26 +3603,26 @@ def _step_meta_looks_like_photo_confirmation(step_meta: dict) -> bool:
     if _contains_any(
         haystack,
         (
-            "颜色稳定后拍照",
-            "拍照确认",
-            "调用mcp工具xiaozhi_take_photo",
-            "拍照后基于照片",
-            "基于照片确认",
-            "拍照成功后",
-            "照片颜色",
+            "棰滆壊绋冲畾鍚庢媿鐓?,
+            "鎷嶇収纭",
+            "璋冪敤mcp宸ュ叿xiaozhi_take_photo",
+            "鎷嶇収鍚庡熀浜庣収鐗?,
+            "鍩轰簬鐓х墖纭",
+            "鎷嶇収鎴愬姛鍚?,
+            "鐓х墖棰滆壊",
         ),
     ):
         return True
 
-    # Some non-photo steps mention "完成后进入拍照记录步骤"; that should not make
+    # Some non-photo steps mention "瀹屾垚鍚庤繘鍏ユ媿鐓ц褰曟楠?; that should not make
     # the current step itself look like a photo-confirmation step.
     if _contains_any(
         haystack,
         (
-            "进入本样品拍照记录步骤",
-            "进入拍照记录步骤",
-            "进入下一步拍照",
-            "完成后进入拍照",
+            "杩涘叆鏈牱鍝佹媿鐓ц褰曟楠?,
+            "杩涘叆鎷嶇収璁板綍姝ラ",
+            "杩涘叆涓嬩竴姝ユ媿鐓?,
+            "瀹屾垚鍚庤繘鍏ユ媿鐓?,
         ),
     ):
         return False
@@ -3153,55 +3695,6 @@ def _extract_sample_index_from_text(text: str) -> int | None:
     return None
 
 
-def _extract_uvvis_group_number_from_text(text: str) -> int | None:
-    src = textUtils.normalize_spoken_text(text or "")
-    if not src:
-        return None
-
-    patterns = (
-        r"\u7b2c\s*([0-9]+)\s*\u7ec4",
-        r"([0-9]+)\s*\u7ec4",
-        r"\u7b2c\s*([\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u4e24]+)\s*\u7ec4",
-        r"([\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u4e24]+)\s*\u7ec4",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, src)
-        if not match:
-            continue
-        parsed = _parse_small_chinese_integer(match.group(1))
-        if parsed is not None and parsed > 0:
-            return parsed
-    return None
-
-
-def _get_current_uvvis_group_number(conn) -> int | None:
-    for value in (
-        getattr(conn, "experiment_current_group_number", None),
-        getattr(conn, "_uvvis_current_group_number", None),
-    ):
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            continue
-        if parsed > 0:
-            return parsed
-    return None
-
-
-def _remember_uvvis_group_number(conn, group_number: int | None) -> int | None:
-    if group_number is None:
-        return _get_current_uvvis_group_number(conn)
-    try:
-        parsed = int(group_number)
-    except (TypeError, ValueError):
-        return _get_current_uvvis_group_number(conn)
-    if parsed <= 0:
-        return _get_current_uvvis_group_number(conn)
-    setattr(conn, "experiment_current_group_number", parsed)
-    setattr(conn, "_uvvis_current_group_number", parsed)
-    return parsed
-
-
 def _format_sample_name(sample_index: int | None, fallback: str = "") -> str:
     if sample_index is not None and sample_index > 0:
         return f"{sample_index}\u53f7\u6837\u54c1"
@@ -3258,45 +3751,49 @@ def _experiment_has_step_id(conn, step_id: str) -> bool:
     )
 
 
+def _uvvis_shared_blank_step_enabled(conn) -> bool:
+    return _experiment_has_step_id(conn, _UVVIS_SHARED_BLANK_STEP_ID)
+
+
 _EXPERIMENT_STEP_MATCH_ALIAS_RULES = (
-    (re.compile(r"agno3", flags=re.IGNORECASE), ("硝酸银",)),
-    (re.compile(r"硝酸银"), ("agno3",)),
-    (re.compile(r"h2o2", flags=re.IGNORECASE), ("过氧化氢",)),
-    (re.compile(r"过氧化氢"), ("h2o2",)),
-    (re.compile(r"nabh4", flags=re.IGNORECASE), ("硼氢化钠",)),
-    (re.compile(r"硼氢化钠"), ("nabh4",)),
-    (re.compile(r"kbr", flags=re.IGNORECASE), ("溴化钾",)),
-    (re.compile(r"溴化钾"), ("kbr",)),
-    (re.compile(r"uv-?vis", flags=re.IGNORECASE), ("紫外可见",)),
-    (re.compile(r"紫外[-－]?可见"), ("uvvis",)),
-    (re.compile(r"去离子水"), ("纯水",)),
-    (re.compile(r"纯水"), ("去离子水",)),
+    (re.compile(r"agno3", flags=re.IGNORECASE), ("纭濋吀閾?,)),
+    (re.compile(r"纭濋吀閾?), ("agno3",)),
+    (re.compile(r"h2o2", flags=re.IGNORECASE), ("杩囨哀鍖栨阿",)),
+    (re.compile(r"杩囨哀鍖栨阿"), ("h2o2",)),
+    (re.compile(r"nabh4", flags=re.IGNORECASE), ("纭兼阿鍖栭挔",)),
+    (re.compile(r"纭兼阿鍖栭挔"), ("nabh4",)),
+    (re.compile(r"kbr", flags=re.IGNORECASE), ("婧村寲閽?,)),
+    (re.compile(r"婧村寲閽?), ("kbr",)),
+    (re.compile(r"uv-?vis", flags=re.IGNORECASE), ("绱鍙",)),
+    (re.compile(r"绱[-锛峕?鍙"), ("uvvis",)),
+    (re.compile(r"鍘荤瀛愭按"), ("绾按",)),
+    (re.compile(r"绾按"), ("鍘荤瀛愭按",)),
 )
 _EXPERIMENT_STEP_HINT_TOKEN_TEXTS = (
-    "柠檬酸钠",
+    "鏌犳閰搁挔",
     "agno3",
-    "硝酸银",
+    "纭濋吀閾?,
     "h2o2",
-    "过氧化氢",
+    "杩囨哀鍖栨阿",
     "kbr",
-    "溴化钾",
+    "婧村寲閽?,
     "nabh4",
-    "硼氢化钠",
-    "纯水",
-    "去离子水",
-    "搅拌",
-    "拍照",
-    "照片",
-    "丁达尔",
-    "比色皿",
-    "参比",
-    "反应液",
+    "纭兼阿鍖栭挔",
+    "绾按",
+    "鍘荤瀛愭按",
+    "鎼呮媽",
+    "鎷嶇収",
+    "鐓х墖",
+    "涓佽揪灏?,
+    "姣旇壊鐨?,
+    "鍙傛瘮",
+    "鍙嶅簲娑?,
     "uvvis",
-    "紫外可见",
-    "吸光度",
-    "动力学",
+    "绱鍙",
+    "鍚稿厜搴?,
+    "鍔ㄥ姏瀛?,
     "400nm",
-    "400纳米",
+    "400绾崇背",
 )
 
 
@@ -3333,7 +3830,7 @@ def _yaml_step_scope_signature(step: dict) -> tuple[str, int | None]:
     )
     normalized = _normalize_experiment_step_match_text(candidate_text)
     if any(
-        token in normalized for token in ("1-5号样品", "1到5号样品", "1至5号样品", "全部样品")
+        token in normalized for token in ("1-5鍙锋牱鍝?, "1鍒?鍙锋牱鍝?, "1鑷?鍙锋牱鍝?, "鍏ㄩ儴鏍峰搧")
     ):
         return "multi_sample", None
     sample_index = _extract_sample_index_from_text(normalized)
@@ -3360,7 +3857,7 @@ def _yaml_step_context_match_score(query_text: str, step: dict) -> float:
         return 0.0
 
     query_has_multi_sample = any(
-        token in query_norm for token in ("1-5号", "1到5号", "1至5号", "每个烧杯", "全部样品")
+        token in query_norm for token in ("1-5鍙?, "1鍒?鍙?, "1鑷?鍙?, "姣忎釜鐑ф澂", "鍏ㄩ儴鏍峰搧")
     )
     query_sample_index = None if query_has_multi_sample else _extract_sample_index_from_text(query_norm)
     step_scope, step_sample_index = _yaml_step_scope_signature(step)
@@ -3520,18 +4017,18 @@ def _yaml_step_is_safe_generic_catchup_confirmation(step: dict) -> bool:
         if _contains_any(
             haystack,
             (
-                "照片",
-                "拍照",
+                "鐓х墖",
+                "鎷嶇収",
                 "photo",
-                "颜色",
-                "观察",
-                "现象",
+                "棰滆壊",
+                "瑙傚療",
+                "鐜拌薄",
                 "absorbance",
-                "吸光",
-                "波长",
+                "鍚稿厜",
+                "娉㈤暱",
                 "kinetics",
                 "csv",
-                "路径",
+                "璺緞",
                 "file",
                 "path",
             ),
@@ -3794,12 +4291,12 @@ def _compose_photo_confirmation_not_advanced_reply(
 ) -> str:
     confirmation = textUtils.prepare_runtime_spoken_text(confirmation_reply)
     followup = textUtils.prepare_runtime_spoken_text(followup_reply)
-    bridge = "当前实验图谱还停在这一步，先按这一步继续。"
+    bridge = "褰撳墠瀹為獙鍥捐氨杩樺仠鍦ㄨ繖涓€姝ワ紝鍏堟寜杩欎竴姝ョ户缁€?
 
     if confirmation and not followup:
-        confirmation = confirmation.rstrip("。！？!? ").strip()
+        confirmation = confirmation.rstrip("銆傦紒锛?? ").strip()
         if confirmation:
-            return f"{confirmation}。{bridge}"
+            return f"{confirmation}銆倇bridge}"
         return bridge
 
     if followup and not confirmation:
@@ -3811,9 +4308,9 @@ def _compose_photo_confirmation_not_advanced_reply(
     if confirmation == followup:
         return f"{bridge}{followup}"
 
-    confirmation = confirmation.rstrip("。！？!? ").strip()
+    confirmation = confirmation.rstrip("銆傦紒锛?? ").strip()
     if confirmation:
-        confirmation = f"{confirmation}。"
+        confirmation = f"{confirmation}銆?
     return f"{confirmation}{bridge}{followup}"
 
 
@@ -3824,8 +4321,8 @@ def _looks_like_internal_experiment_graph_message(message: str) -> bool:
 
     normalized = _normalize_text_for_match(raw_text)
     internal_tokens = (
-        "无法跳转到step",
-        "前置步骤未完成",
+        "鏃犳硶璺宠浆鍒皊tep",
+        "鍓嶇疆姝ラ鏈畬鎴?,
         "redirect_to_step",
         "finish_trial",
         "can_proceed",
@@ -3995,7 +4492,7 @@ async def _advance_photo_confirmation_step_locally(
 
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     if not session_id:
-        return fallback_reply or "拍好了。"
+        return fallback_reply or "鎷嶅ソ浜嗐€?
 
     step_payload, progress_payload, schema_payload = await asyncio.gather(
         _call_experiment_graph_tool_fast(
@@ -4040,8 +4537,13 @@ async def _advance_photo_confirmation_step_locally(
 
     schema_by_name = _extract_experiment_schema_view(schema_payload)
     photo_meta = _extract_photo_result_meta(payload)
-    photo_fields = _build_experiment_photo_writeback_fields(schema_by_name, photo_meta)
     missing_fields = list((current_progress or {}).get("missing_fields") or [])
+    photo_fields = _build_experiment_photo_writeback_fields(
+        schema_by_name,
+        photo_meta,
+        step_meta=step_meta,
+        missing_fields=missing_fields,
+    )
     photo_related_fields = {
         "photo_taken",
         "color_confirmed_by_photo",
@@ -4119,10 +4621,13 @@ async def _advance_photo_confirmation_step_locally(
                     )
 
                 schema_by_name = _extract_experiment_schema_view(schema_payload)
-                photo_fields = _build_experiment_photo_writeback_fields(
-                    schema_by_name, photo_meta
-                )
                 missing_fields = list((current_progress or {}).get("missing_fields") or [])
+                photo_fields = _build_experiment_photo_writeback_fields(
+                    schema_by_name,
+                    photo_meta,
+                    step_meta=step_meta,
+                    missing_fields=missing_fields,
+                )
                 is_photo_confirmation_step = _step_meta_looks_like_photo_confirmation(
                     step_meta
                 ) or (
@@ -4138,7 +4643,7 @@ async def _advance_photo_confirmation_step_locally(
             graph_advanced=False,
             next_step_reply=fallback_reply,
         )
-        return fallback_reply or "拍好了。"
+        return fallback_reply or "鎷嶅ソ浜嗐€?
 
     if photo_fields:
         add_fields_payload = await _call_experiment_graph_tool_fast(
@@ -4166,7 +4671,7 @@ async def _advance_photo_confirmation_step_locally(
         if message:
             return message
         reply = _compose_experiment_step_reply(step_meta, mode="guide")
-        return reply or fallback_reply or "拍好了。"
+        return reply or fallback_reply or "鎷嶅ソ浜嗐€?
 
     can_proceed_payload = await _call_experiment_graph_tool_fast(
         conn,
@@ -4179,7 +4684,7 @@ async def _advance_photo_confirmation_step_locally(
         if message:
             return message
         reply = _compose_experiment_step_reply(step_meta, mode="guide")
-        return reply or fallback_reply or "拍好了。"
+        return reply or fallback_reply or "鎷嶅ソ浜嗐€?
 
     proceed_payload = await _call_experiment_graph_tool_fast(
         conn,
@@ -4192,7 +4697,7 @@ async def _advance_photo_confirmation_step_locally(
         if message:
             return message
         reply = _compose_experiment_step_reply(step_meta, mode="guide")
-        return reply or fallback_reply or "拍好了。"
+        return reply or fallback_reply or "鎷嶅ソ浜嗐€?
 
     next_meta = await _refresh_experiment_step_cache(conn, session_id)
     reply = _compose_experiment_step_reply(next_meta, mode="next")
@@ -4225,7 +4730,7 @@ async def _advance_photo_confirmation_step_locally(
         return spoken_reply
     if reply:
         return reply
-    return fallback_reply or "拍照已经完成，继续做当前下一步。"
+    return fallback_reply or "鎷嶇収宸茬粡瀹屾垚锛岀户缁仛褰撳墠涓嬩竴姝ャ€?
 
 
 async def _advance_photo_confirmation_step_locally_v2(
@@ -4236,7 +4741,7 @@ async def _advance_photo_confirmation_step_locally_v2(
     requested_arguments: dict | None = None,
 ) -> str:
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
-    confirmation_reply = fallback_reply or "拍好了。"
+    confirmation_reply = fallback_reply or "鎷嶅ソ浜嗐€?
     if not session_id:
         return await _finalize_photo_followup_without_graph_advance(
             conn,
@@ -4292,8 +4797,13 @@ async def _advance_photo_confirmation_step_locally_v2(
         current_progress = _extract_experiment_current_progress(start_payload)
 
     schema_by_name = _extract_experiment_schema_view(schema_payload)
-    photo_fields = _build_experiment_photo_writeback_fields(schema_by_name, photo_meta)
     missing_fields = list((current_progress or {}).get("missing_fields") or [])
+    photo_fields = _build_experiment_photo_writeback_fields(
+        schema_by_name,
+        photo_meta,
+        step_meta=step_meta,
+        missing_fields=missing_fields,
+    )
     photo_related_fields = {
         "photo_taken",
         "color_confirmed_by_photo",
@@ -4377,10 +4887,13 @@ async def _advance_photo_confirmation_step_locally_v2(
                 current_progress = _extract_experiment_current_progress(start_payload)
 
             schema_by_name = _extract_experiment_schema_view(schema_payload)
-            photo_fields = _build_experiment_photo_writeback_fields(
-                schema_by_name, photo_meta
-            )
             missing_fields = list((current_progress or {}).get("missing_fields") or [])
+            photo_fields = _build_experiment_photo_writeback_fields(
+                schema_by_name,
+                photo_meta,
+                step_meta=step_meta,
+                missing_fields=missing_fields,
+            )
             is_photo_confirmation_step = _step_meta_looks_like_photo_confirmation(
                 step_meta
             ) or (
@@ -4523,7 +5036,7 @@ async def _advance_photo_confirmation_step_locally_v2(
         return spoken_reply
     if reply:
         return reply
-    return confirmation_reply or "照片已经完成，继续做当前下一步。"
+    return confirmation_reply or "鐓х墖宸茬粡瀹屾垚锛岀户缁仛褰撳墠涓嬩竴姝ャ€?
 
 
 async def _start_direct_intent_turn(conn, original_text: str):
@@ -4538,27 +5051,15 @@ _UVVIS_SHARED_BLANK_STEP_ID = "step_3_uv_vis_shared_dark_blank_prep"
 _UVVIS_SAMPLE_RECORD_STEP_ID = "step_3_uv_vis_sample1-4_record_data"
 _UVVIS_SAMPLE_LOAD_STEP_ID = "step_3_uv_vis_sample1-4_load_cuvette"
 _UVVIS_SAMPLE_CLEAN_STEP_ID = "step_3_uv_vis_sample1-4_clean_cuvettes"
-_UVVIS_LEGACY_SAMPLE_RECORD_STEP_ID = "step_3_uv_vis_sample1-5_record_data"
-_UVVIS_LEGACY_SAMPLE_LOAD_STEP_ID = "step_3_uv_vis_sample1-5_load_cuvette"
-_UVVIS_LEGACY_SAMPLE_CLEAN_STEP_ID = "step_3_uv_vis_sample5_clean_cuvette"
-_UVVIS_SAMPLE_RECORD_STEP_IDS = {
-    _UVVIS_SAMPLE_RECORD_STEP_ID,
-    _UVVIS_LEGACY_SAMPLE_RECORD_STEP_ID,
-}
-_UVVIS_SAMPLE_LOAD_STEP_IDS = {
-    _UVVIS_SAMPLE_LOAD_STEP_ID,
-    _UVVIS_LEGACY_SAMPLE_LOAD_STEP_ID,
-}
-_UVVIS_SAMPLE_CLEAN_STEP_IDS = {
-    _UVVIS_SAMPLE_CLEAN_STEP_ID,
-    _UVVIS_LEGACY_SAMPLE_CLEAN_STEP_ID,
-}
+_UVVIS_SAMPLE_RECORD_STEP_ID_LEGACY = "step_3_uv_vis_sample1-5_record_data"
+_UVVIS_SAMPLE_LOAD_STEP_ID_LEGACY = "step_3_uv_vis_sample1-5_load_cuvette"
+_UVVIS_SAMPLE_CLEAN_STEP_ID_LEGACY = "step_3_uv_vis_sample5_clean_cuvette"
 _UVVIS_KINETICS_SAMPLE2_STEP_ID = "step_4_kinetics_sample2_measurement"
 _UVVIS_KINETICS_SAMPLE4_STEP_ID = "step_5_kinetics_sample4_measurement"
 _UVVIS_KINETICS_COMBINED_STEP_ID = "step_6_kinetics_combined_measurement"
 _UVVIS_ANALYSIS_STEP_ID = "step_6_data_analysis"
-_UVVIS_BUSY_REPLY = "我现在正在工作请你过5min再试"
-_UVVIS_NOT_READY_REPLY = "UV-Vis 这边还没准备好，请稍后再试。"
+_UVVIS_BUSY_REPLY = "鎴戠幇鍦ㄦ鍦ㄥ伐浣滆浣犺繃5min鍐嶈瘯"
+_UVVIS_NOT_READY_REPLY = "UV-Vis 杩欒竟杩樻病鍑嗗濂斤紝璇风◢鍚庡啀璇曘€?
 _UVVIS_SAMPLE_POSITIONS = (1, 2, 3, 4, 5)
 _UVVIS_GROUPED_KINETICS_POSITIONS = (2, 3, 4, 5)
 _UVVIS_SPECTRA_WAVELENGTH_GRID = tuple(range(400, 701, 10))
@@ -4618,14 +5119,14 @@ async def _try_redirect_experiment_step_fast(
 def _legacy_compose_uvvis_step_rejection_reply(step_id: str) -> str:
     step_id = str(step_id or "").strip()
     if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
-        return "当前实验图谱还没推进到 UV-Vis 前置校正，先完成丁达尔现象观察。"
-    if step_id in _UVVIS_SAMPLE_RECORD_STEP_IDS:
-        return "当前实验图谱还没推进到 1-5 号样品的批量光谱测量，先完成前面的步骤。"
+        return "褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒?UV-Vis 鍓嶇疆鏍℃锛屽厛瀹屾垚涓佽揪灏旂幇璞¤瀵熴€?
+    if step_id == _UVVIS_SAMPLE_RECORD_STEP_ID:
+        return "褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒?1-5 鍙锋牱鍝佺殑鎵归噺鍏夎氨娴嬮噺锛屽厛瀹屾垚鍓嶉潰鐨勬楠ゃ€?
     if step_id in {
         _UVVIS_KINETICS_SAMPLE2_STEP_ID,
         _UVVIS_KINETICS_SAMPLE4_STEP_ID,
     }:
-        return "当前实验图谱还没推进到对应的 400 纳米动力学步骤，先完成前面的步骤。"
+        return "褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒板搴旂殑 400 绾崇背鍔ㄥ姏瀛︽楠わ紝鍏堝畬鎴愬墠闈㈢殑姝ラ銆?
     return _UVVIS_NOT_READY_REPLY
 
 
@@ -4646,20 +5147,20 @@ def _looks_like_explicit_uvvis_turn(
     uvvis_tokens = (
         "uvvis",
         "uv-vis",
-        "紫外可见",
-        "光谱",
-        "吸光度",
+        "绱鍙",
+        "鍏夎氨",
+        "鍚稿厜搴?,
         "lambda max",
-        "λmax",
-        "400纳米",
-        "动力学",
-        "暗电流",
-        "空气基线",
-        "纯水空白",
-        "参比位",
-        "样品位",
-        "比色皿",
-        "空白液",
+        "位max",
+        "400绾崇背",
+        "鍔ㄥ姏瀛?,
+        "鏆楃數娴?,
+        "绌烘皵鍩虹嚎",
+        "绾按绌虹櫧",
+        "鍙傛瘮浣?,
+        "鏍峰搧浣?,
+        "姣旇壊鐨?,
+        "绌虹櫧娑?,
     )
     return _contains_any(normalized, uvvis_tokens)
 
@@ -4672,17 +5173,17 @@ def _assistant_recently_prompted_uvvis_action(conn) -> bool:
     uvvis_prompt_tokens = (
         "uvvis",
         "uv-vis",
-        "紫外可见",
-        "暗电流",
-        "空气基线",
-        "纯水空白",
-        "参比位",
-        "样品位",
-        "比色皿",
-        "400纳米",
-        "动力学",
-        "光谱",
-        "空白液",
+        "绱鍙",
+        "鏆楃數娴?,
+        "绌烘皵鍩虹嚎",
+        "绾按绌虹櫧",
+        "鍙傛瘮浣?,
+        "鏍峰搧浣?,
+        "姣旇壊鐨?,
+        "400绾崇背",
+        "鍔ㄥ姏瀛?,
+        "鍏夎氨",
+        "绌虹櫧娑?,
     )
     return _contains_any(recent_text, uvvis_prompt_tokens)
 
@@ -4695,11 +5196,11 @@ def _assistant_recently_prompted_pure_water_blank(conn) -> bool:
     return _contains_any(
         recent_text,
         (
-            "纯水空白",
-            "纯水比色皿",
-            "1-5号样品位",
-            "参比位",
-            "6支纯水",
+            "绾按绌虹櫧",
+            "绾按姣旇壊鐨?,
+            "1-5鍙锋牱鍝佷綅",
+            "鍙傛瘮浣?,
+            "6鏀函姘?,
         ),
     )
 
@@ -4721,20 +5222,20 @@ def _looks_like_uvvis_ready_reply(filtered_text: str) -> bool:
     if _looks_like_pure_short_completion_control(norm):
         return True
     ready_tokens = (
-        "放好了",
-        "都放好了",
-        "已经放好了",
-        "已经放好",
-        "可以开始了",
-        "开始吧",
-        "开始测量",
-        "开始扫描",
-        "可以开始扫描",
-        "扫描吧",
-        "开始空架扫描",
-        "开始动力学",
-        "开始记录",
-        "测光谱",
+        "鏀惧ソ浜?,
+        "閮芥斁濂戒簡",
+        "宸茬粡鏀惧ソ浜?,
+        "宸茬粡鏀惧ソ",
+        "鍙互寮€濮嬩簡",
+        "寮€濮嬪惂",
+        "寮€濮嬫祴閲?,
+        "寮€濮嬫壂鎻?,
+        "鍙互寮€濮嬫壂鎻?,
+        "鎵弿鍚?,
+        "寮€濮嬬┖鏋舵壂鎻?,
+        "寮€濮嬪姩鍔涘",
+        "寮€濮嬭褰?,
+        "娴嬪厜璋?,
     )
     return _contains_any(norm, ready_tokens)
 
@@ -4748,16 +5249,16 @@ def _looks_like_uvvis_empty_positions_reply(filtered_text: str) -> bool:
     if _is_affirmative_short_reply_fixed(filtered_text):
         return True
     ready_tokens = (
-        "都空了",
-        "已经都空了",
-        "都留空了",
-        "已经留空了",
-        "样品位都空了",
-        "样品位和参比位都空了",
-        "都准备好了",
-        "准备好了",
-        "已经准备好了",
-        "空架准备好了",
+        "閮界┖浜?,
+        "宸茬粡閮界┖浜?,
+        "閮界暀绌轰簡",
+        "宸茬粡鐣欑┖浜?,
+        "鏍峰搧浣嶉兘绌轰簡",
+        "鏍峰搧浣嶅拰鍙傛瘮浣嶉兘绌轰簡",
+        "閮藉噯澶囧ソ浜?,
+        "鍑嗗濂戒簡",
+        "宸茬粡鍑嗗濂戒簡",
+        "绌烘灦鍑嗗濂戒簡",
     )
     return _contains_any(norm, ready_tokens)
 
@@ -4769,22 +5270,22 @@ def _looks_like_uvvis_empty_then_start_reply(filtered_text: str) -> bool:
     if _is_negative_short_reply_fixed(filtered_text):
         return False
     empty_tokens = (
-        "都空了",
-        "已经都空了",
-        "都留空了",
-        "已经留空了",
-        "样品位都空了",
-        "样品位和参比位都空了",
-        "空架准备好了",
+        "閮界┖浜?,
+        "宸茬粡閮界┖浜?,
+        "閮界暀绌轰簡",
+        "宸茬粡鐣欑┖浜?,
+        "鏍峰搧浣嶉兘绌轰簡",
+        "鏍峰搧浣嶅拰鍙傛瘮浣嶉兘绌轰簡",
+        "绌烘灦鍑嗗濂戒簡",
     )
     start_tokens = (
-        "可以开始了",
-        "开始吧",
-        "开始测量",
-        "开始扫描",
-        "可以开始扫描",
-        "扫描吧",
-        "开始空架扫描",
+        "鍙互寮€濮嬩簡",
+        "寮€濮嬪惂",
+        "寮€濮嬫祴閲?,
+        "寮€濮嬫壂鎻?,
+        "鍙互寮€濮嬫壂鎻?,
+        "鎵弿鍚?,
+        "寮€濮嬬┖鏋舵壂鎻?,
     )
     return _contains_any(norm, empty_tokens) and _contains_any(norm, start_tokens)
 
@@ -4796,13 +5297,13 @@ def _looks_like_uvvis_start_scan_reply(filtered_text: str) -> bool:
     if _is_negative_short_reply_fixed(filtered_text):
         return False
     start_tokens = (
-        "可以开始了",
-        "开始吧",
-        "开始测量",
-        "开始扫描",
-        "可以开始扫描",
-        "扫描吧",
-        "开始空架扫描",
+        "鍙互寮€濮嬩簡",
+        "寮€濮嬪惂",
+        "寮€濮嬫祴閲?,
+        "寮€濮嬫壂鎻?,
+        "鍙互寮€濮嬫壂鎻?,
+        "鎵弿鍚?,
+        "寮€濮嬬┖鏋舵壂鎻?,
     )
     return _contains_any(norm, start_tokens)
 
@@ -4819,21 +5320,29 @@ def _is_uvvis_step(step_id: str) -> bool:
     return str(step_id or "").strip() in {
         _UVVIS_SHARED_DARK_AIR_STEP_ID,
         _UVVIS_SHARED_BLANK_STEP_ID,
+        _UVVIS_SAMPLE_LOAD_STEP_ID,
+        _UVVIS_SAMPLE_LOAD_STEP_ID_LEGACY,
+        _UVVIS_SAMPLE_RECORD_STEP_ID,
+        _UVVIS_SAMPLE_RECORD_STEP_ID_LEGACY,
+        _UVVIS_SAMPLE_CLEAN_STEP_ID,
+        _UVVIS_SAMPLE_CLEAN_STEP_ID_LEGACY,
         _UVVIS_KINETICS_SAMPLE2_STEP_ID,
         _UVVIS_KINETICS_SAMPLE4_STEP_ID,
         _UVVIS_KINETICS_COMBINED_STEP_ID,
         _UVVIS_ANALYSIS_STEP_ID,
-    } | _UVVIS_SAMPLE_LOAD_STEP_IDS | _UVVIS_SAMPLE_RECORD_STEP_IDS | _UVVIS_SAMPLE_CLEAN_STEP_IDS
+    }
 
 
 def _is_uvvis_measurement_step(step_id: str) -> bool:
     return str(step_id or "").strip() in {
         _UVVIS_SHARED_DARK_AIR_STEP_ID,
         _UVVIS_SHARED_BLANK_STEP_ID,
+        _UVVIS_SAMPLE_RECORD_STEP_ID,
+        _UVVIS_SAMPLE_RECORD_STEP_ID_LEGACY,
         _UVVIS_KINETICS_SAMPLE2_STEP_ID,
         _UVVIS_KINETICS_SAMPLE4_STEP_ID,
         _UVVIS_KINETICS_COMBINED_STEP_ID,
-    } | _UVVIS_SAMPLE_RECORD_STEP_IDS
+    }
 
 
 def _is_uvvis_kinetics_step(step_id: str) -> bool:
@@ -4848,7 +5357,9 @@ def _is_uvvis_spectra_step(step_id: str) -> bool:
     return str(step_id or "").strip() in {
         _UVVIS_SHARED_DARK_AIR_STEP_ID,
         _UVVIS_SHARED_BLANK_STEP_ID,
-    } | _UVVIS_SAMPLE_RECORD_STEP_IDS
+        _UVVIS_SAMPLE_RECORD_STEP_ID,
+        _UVVIS_SAMPLE_RECORD_STEP_ID_LEGACY,
+    }
 
 
 def _infer_uvvis_step_id_from_context(
@@ -4877,14 +5388,14 @@ def _infer_uvvis_step_id_from_context(
     if not context_text:
         return ""
 
-    if _contains_any(
+    if _uvvis_shared_blank_step_enabled(conn) and _contains_any(
         context_text,
         (
-            "2号样品动力学",
+            "2鍙锋牱鍝佸姩鍔涘",
             "sample2",
-            "2号样品反应液",
-            "2号样品参比液",
-            "2号样品位",
+            "2鍙锋牱鍝佸弽搴旀恫",
+            "2鍙锋牱鍝佸弬姣旀恫",
+            "2鍙锋牱鍝佷綅",
         ),
     ):
         return _UVVIS_KINETICS_COMBINED_STEP_ID
@@ -4892,11 +5403,11 @@ def _infer_uvvis_step_id_from_context(
     if _contains_any(
         context_text,
         (
-            "4号样品动力学",
+            "4鍙锋牱鍝佸姩鍔涘",
             "sample4",
-            "4号样品反应液",
-            "4号样品参比液",
-            "4号样品位",
+            "4鍙锋牱鍝佸弽搴旀恫",
+            "4鍙锋牱鍝佸弬姣旀恫",
+            "4鍙锋牱鍝佷綅",
         ),
     ):
         return _UVVIS_KINETICS_COMBINED_STEP_ID
@@ -4904,12 +5415,12 @@ def _infer_uvvis_step_id_from_context(
     if _contains_any(
         context_text,
         (
-            "暗电流校正",
-            "共享暗电流校正",
-            "暗电流和空气能量校正",
-            "共享暗电流和空气能量校正",
-            "空气能量准备",
-            "空气能量文件",
+            "鏆楃數娴佹牎姝?,
+            "鍏变韩鏆楃數娴佹牎姝?,
+            "鏆楃數娴佸拰绌烘皵鑳介噺鏍℃",
+            "鍏变韩鏆楃數娴佸拰绌烘皵鑳介噺鏍℃",
+            "绌烘皵鑳介噺鍑嗗",
+            "绌烘皵鑳介噺鏂囦欢",
         ),
     ):
         return _UVVIS_SHARED_DARK_AIR_STEP_ID
@@ -4917,14 +5428,14 @@ def _infer_uvvis_step_id_from_context(
     if _contains_any(
         context_text,
         (
-            "暗电流",
-            "空气基线",
-            "空气能量",
-            "纯水空白",
-            "纯水比色皿",
-            "样品位和参比位都留空",
-            "样品位和参比位各放入纯水比色皿",
-            "先不要放任何液体",
+            "鏆楃數娴?,
+            "绌烘皵鍩虹嚎",
+            "绌烘皵鑳介噺",
+            "绾按绌虹櫧",
+            "绾按姣旇壊鐨?,
+            "鏍峰搧浣嶅拰鍙傛瘮浣嶉兘鐣欑┖",
+            "鏍峰搧浣嶅拰鍙傛瘮浣嶅悇鏀惧叆绾按姣旇壊鐨?,
+            "鍏堜笉瑕佹斁浠讳綍娑蹭綋",
         ),
     ):
         return _UVVIS_SHARED_BLANK_STEP_ID
@@ -4932,11 +5443,11 @@ def _infer_uvvis_step_id_from_context(
     if _contains_any(
         context_text,
         (
-            "装入比色皿",
-            "装样准备",
-            "样品比色皿",
-            "放入自动五联架",
-            "参比位纯水比色皿保持不动",
+            "瑁呭叆姣旇壊鐨?,
+            "瑁呮牱鍑嗗",
+            "鏍峰搧姣旇壊鐨?,
+            "鏀惧叆鑷姩浜旇仈鏋?,
+            "鍙傛瘮浣嶇函姘存瘮鑹茬毧淇濇寔涓嶅姩",
         ),
     ):
         return _UVVIS_SAMPLE_LOAD_STEP_ID
@@ -4944,12 +5455,12 @@ def _infer_uvvis_step_id_from_context(
     if _contains_any(
         context_text,
         (
-            "批量测光谱",
-            "光谱测量与记录",
-            "开始1-5号样品的光谱测量",
-            "1-5号样品的光谱",
-            "开始样品测量",
-            "λmax",
+            "鎵归噺娴嬪厜璋?,
+            "鍏夎氨娴嬮噺涓庤褰?,
+            "寮€濮?-5鍙锋牱鍝佺殑鍏夎氨娴嬮噺",
+            "1-5鍙锋牱鍝佺殑鍏夎氨",
+            "寮€濮嬫牱鍝佹祴閲?,
+            "位max",
             "lambda max",
         ),
     ):
@@ -4958,9 +5469,9 @@ def _infer_uvvis_step_id_from_context(
     if _contains_any(
         context_text,
         (
-            "清洗比色皿",
-            "统一清洗比色皿",
-            "测量后的统一清洗",
+            "娓呮礂姣旇壊鐨?,
+            "缁熶竴娓呮礂姣旇壊鐨?,
+            "娴嬮噺鍚庣殑缁熶竴娓呮礂",
         ),
     ):
         return _UVVIS_SAMPLE_CLEAN_STEP_ID
@@ -4968,9 +5479,9 @@ def _infer_uvvis_step_id_from_context(
     if _contains_any(
         context_text,
         (
-            "数据分析",
-            "绘制ag nps吸收光谱",
-            "lambda max与kbr用量",
+            "鏁版嵁鍒嗘瀽",
+            "缁樺埗ag nps鍚告敹鍏夎氨",
+            "lambda max涓巏br鐢ㄩ噺",
         ),
     ):
         return _UVVIS_ANALYSIS_STEP_ID
@@ -5185,6 +5696,48 @@ def _read_uvvis_blank_baseline_state_from_shared_dir(conn) -> dict | None:
     }
 
 
+def _looks_like_uvvis_dark_current_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    if not name or name.startswith("."):
+        return False
+    if "connection_state" in name:
+        return False
+    if path.suffix.lower() != ".json":
+        return False
+    return "dark_current" in name
+
+
+def _read_uvvis_dark_current_state_from_shared_dir(conn) -> dict | None:
+    latest_json: Path | None = None
+
+    for shared_dir in _resolve_uvvis_shared_blank_dirs(conn):
+        try:
+            if not shared_dir.exists() or not shared_dir.is_dir():
+                continue
+        except Exception:
+            continue
+
+        try:
+            candidates = [path for path in shared_dir.rglob("*") if path.is_file()]
+        except Exception:
+            continue
+
+        for candidate in candidates:
+            if not _looks_like_uvvis_dark_current_artifact(candidate):
+                continue
+            if latest_json is None or _stat_mtime(candidate) > _stat_mtime(latest_json):
+                latest_json = candidate
+
+    if latest_json is None:
+        return None
+
+    return {
+        "dark_current_exists": True,
+        "dark_current_status": "reused_from_shared_dir",
+        "dark_current_json": str(latest_json.resolve()),
+    }
+
+
 def _extract_uvvis_liquid_blank_state(payload) -> dict | None:
     named = _collect_payload_named_values(
         payload,
@@ -5331,6 +5884,136 @@ def _extract_int_value(value):
     return parsed
 
 
+_CHINESE_GROUP_DIGITS = {
+    "闆?: 0,
+    "涓€": 1,
+    "浜?: 2,
+    "涓?: 2,
+    "涓?: 3,
+    "鍥?: 4,
+    "浜?: 5,
+    "鍏?: 6,
+    "涓?: 7,
+    "鍏?: 8,
+    "涔?: 9,
+}
+
+
+def _parse_small_chinese_positive_int(text: str) -> int | None:
+    token = str(text or "").strip()
+    if not token:
+        return None
+    if token == "鍗?:
+        return 10
+    if token.startswith("鍗?):
+        ones = _CHINESE_GROUP_DIGITS.get(token[1:])
+        return 10 + ones if ones is not None else None
+    if token.endswith("鍗?):
+        tens = _CHINESE_GROUP_DIGITS.get(token[:-1])
+        return tens * 10 if tens is not None else None
+    if "鍗? in token:
+        left, right = token.split("鍗?, 1)
+        tens = _CHINESE_GROUP_DIGITS.get(left)
+        ones = _CHINESE_GROUP_DIGITS.get(right)
+        if tens is None or ones is None:
+            return None
+        return tens * 10 + ones
+    return _CHINESE_GROUP_DIGITS.get(token)
+
+
+def _extract_explicit_group_number_from_text(*texts: str) -> int | None:
+    combined = " ".join(str(text or "").strip() for text in texts if str(text or "").strip())
+    if not combined:
+        return None
+    normalized = textUtils.normalize_spoken_text(combined)
+    numeric_match = (
+        re.search(r"绗琝s*([0-9]{1,2})\s*缁?, normalized)
+        or re.search(r"([0-9]{1,2})\s*缁?, normalized)
+    )
+    if numeric_match:
+        value = _extract_int_value(numeric_match.group(1))
+        if isinstance(value, int) and value >= 1:
+            return value
+
+    chinese_match = (
+        re.search(r"绗琝s*([闆朵竴浜屼袱涓夊洓浜斿叚涓冨叓涔濆崄]{1,3})\s*缁?, normalized)
+        or re.search(r"([闆朵竴浜屼袱涓夊洓浜斿叚涓冨叓涔濆崄]{1,3})\s*缁?, normalized)
+    )
+    if chinese_match:
+        value = _parse_small_chinese_positive_int(chinese_match.group(1))
+        if isinstance(value, int) and value >= 1:
+            return value
+    return None
+
+
+def _is_exp2_uvvis_experiment(conn) -> bool:
+    yaml_path = str(getattr(conn, "experiment_yaml_path", "") or "").strip().replace("\\", "/").lower()
+    return "exp2_uv_vis_analysis" in yaml_path
+
+
+def _extract_current_progress_group_number(progress_payload) -> int | None:
+    progress = _extract_experiment_current_progress(progress_payload)
+    if not isinstance(progress, dict):
+        return None
+    for candidate in (
+        progress.get("group_number"),
+        (progress.get("current_data") or {}).get("group_number")
+        if isinstance(progress.get("current_data"), dict)
+        else None,
+    ):
+        value = _extract_int_value(candidate)
+        if isinstance(value, int) and value >= 1:
+            return value
+    return None
+
+
+async def _sync_exp2_group_number_from_turn(
+    conn,
+    original_text: str,
+    filtered_text: str,
+    *,
+    preferred_step_id: str = "",
+) -> int | None:
+    if not _is_exp2_uvvis_experiment(conn):
+        return None
+    group_number = _extract_explicit_group_number_from_text(original_text, filtered_text)
+    if group_number is None:
+        return None
+
+    setattr(conn, "experiment_current_group_number", group_number)
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    step_id = str(preferred_step_id or _get_current_experiment_step_id(conn) or "").strip()
+    if not session_id or not step_id:
+        return group_number
+
+    try:
+        await _call_experiment_graph_tool_fast(
+            conn,
+            "redirect_to_step",
+            {
+                "session_id": session_id,
+                "step_id": step_id,
+                "force": True,
+                "group_number": group_number,
+            },
+            priority="foreground",
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"exp2 group sync failed: group_number={group_number}, step_id={step_id}, error={exc}"
+        )
+    return group_number
+
+
+def _resolve_uvvis_group_output_dir(conn, group_number: int | None = None) -> Path:
+    output_root = _resolve_uvvis_native_output_root(conn)
+    device_id = _normalize_uvvis_device_id(conn)
+    target = (output_root / device_id).resolve()
+    if isinstance(group_number, int) and group_number >= 1:
+        target = (target / str(group_number)).resolve()
+    return target
+
+
 def _extract_uvvis_payload_message(payload) -> str:
     text = _extract_text_from_result_payload(payload)
     if text:
@@ -5375,9 +6058,9 @@ def _payload_looks_busy_or_inaccessible(payload) -> bool:
         "lease already held",
         "lease is held",
         "lease owner",
-        "占用",
-        "忙",
-        "请你过5min再试",
+        "鍗犵敤",
+        "蹇?,
+        "璇蜂綘杩?min鍐嶈瘯",
     )
     return any(token in text for token in busy_tokens)
 
@@ -5391,10 +6074,10 @@ def _payload_mentions_missing_blank(payload) -> bool:
         "pure water",
         "pure_water",
         "blank",
-        "空白",
-        "纯水",
-        "参比液",
-        "化学空白",
+        "绌虹櫧",
+        "绾按",
+        "鍙傛瘮娑?,
+        "鍖栧绌虹櫧",
     )
     if not any(token in text for token in missing_tokens):
         return False
@@ -5406,11 +6089,11 @@ def _payload_mentions_missing_blank(payload) -> bool:
             "absent",
             "need",
             "required",
-            "不存在",
-            "缺少",
-            "没有",
-            "未找到",
-            "还没有",
+            "涓嶅瓨鍦?,
+            "缂哄皯",
+            "娌℃湁",
+            "鏈壘鍒?,
+            "杩樻病鏈?,
         )
     )
 
@@ -5473,7 +6156,7 @@ def _payload_mentions_reusable_blank(payload) -> bool:
 
     if not any(
         token in text
-        for token in ("liquid blank", "pure water", "pure_water", "blank", "空白", "纯水")
+        for token in ("liquid blank", "pure water", "pure_water", "blank", "绌虹櫧", "绾按")
     ):
         return False
 
@@ -5486,11 +6169,11 @@ def _payload_mentions_reusable_blank(payload) -> bool:
             "exists",
             "available",
             "already",
-            "可复用",
-            "已存在",
-            "已有",
-            "已记录",
-            "复用",
+            "鍙鐢?,
+            "宸插瓨鍦?,
+            "宸叉湁",
+            "宸茶褰?,
+            "澶嶇敤",
         )
     )
 
@@ -5513,6 +6196,57 @@ def _uvvis_blank_baseline_exists(conn, payload=None) -> bool:
         return True
 
     return False
+
+
+def _extract_uvvis_dark_current_state(payload) -> dict | None:
+    named = _collect_payload_named_values(
+        payload,
+        (
+            "dark_current_exists",
+            "dark_current_status",
+            "dark_current_json",
+        ),
+    )
+    if not named:
+        return None
+
+    return {
+        "dark_current_exists": bool(_normalize_bool(named.get("dark_current_exists"))),
+        "dark_current_status": str(named.get("dark_current_status", "") or "").strip(),
+        "dark_current_json": str(named.get("dark_current_json", "") or "").strip(),
+    }
+
+
+def _dark_current_state_has_artifact(state) -> bool:
+    if not isinstance(state, dict):
+        return False
+    return _path_exists(state.get("dark_current_json"))
+
+
+def _uvvis_dark_current_exists(conn, payload=None) -> bool:
+    disk_state = _read_uvvis_dark_current_state_from_shared_dir(conn)
+    if disk_state is not None:
+        setattr(conn, "_last_uvvis_dark_current_state", disk_state)
+        return True
+
+    payload_state = _extract_uvvis_dark_current_state(payload)
+    if _dark_current_state_has_artifact(payload_state):
+        normalized_payload_state = dict(payload_state)
+        normalized_payload_state["dark_current_exists"] = True
+        setattr(conn, "_last_uvvis_dark_current_state", normalized_payload_state)
+        return True
+
+    dark_state = getattr(conn, "_last_uvvis_dark_current_state", None)
+    if _dark_current_state_has_artifact(dark_state):
+        return True
+
+    return False
+
+
+def _uvvis_shared_dark_air_cache_ready(conn, payload=None) -> bool:
+    return _uvvis_dark_current_exists(conn, payload) and _uvvis_blank_baseline_exists(
+        conn, payload
+    )
 
 
 def _uvvis_shared_liquid_blank_exists(conn, payload=None) -> bool:
@@ -5663,21 +6397,21 @@ def _looks_like_uvvis_status_query(
         return False
 
     query_tokens = (
-        "状态",
-        "在工作",
-        "正在工作",
-        "工作吗",
-        "忙吗",
-        "空闲吗",
-        "测完",
-        "结束了吗",
-        "完成了吗",
-        "完成了吧",
+        "鐘舵€?,
+        "鍦ㄥ伐浣?,
+        "姝ｅ湪宸ヤ綔",
+        "宸ヤ綔鍚?,
+        "蹇欏悧",
+        "绌洪棽鍚?,
+        "娴嬪畬",
+        "缁撴潫浜嗗悧",
+        "瀹屾垚浜嗗悧",
+        "瀹屾垚浜嗗惂",
     )
     if not any(token in normalized for token in query_tokens):
         return False
 
-    if any(token in normalized for token in ("uvvis", "紫外可见", "光谱仪")):
+    if any(token in normalized for token in ("uvvis", "绱鍙", "鍏夎氨浠?)):
         return True
     if _is_uvvis_step(inferred_step_id):
         return True
@@ -5693,33 +6427,34 @@ def _compose_uvvis_status_reply(conn, status: dict, *, inferred_step_id: str = "
         return str((status or {}).get("message", "") or _UVVIS_NOT_READY_REPLY).strip()
 
     if status.get("active_measurement") is True:
-        return "UV-Vis 现在正在工作。"
+        return "UV-Vis 鐜板湪姝ｅ湪宸ヤ綔銆?
     if status.get("occupied") is True and not status.get("lease_owner_is_caller"):
-        return "UV-Vis 现在被别的会话占用，还没空出来。"
+        return "UV-Vis 鐜板湪琚埆鐨勪細璇濆崰鐢紝杩樻病绌哄嚭鏉ャ€?
 
     state = _get_uvvis_direct_state(conn, inferred_step_id if _is_uvvis_step(inferred_step_id) else "")
     phase = str(state.get("phase", "") or "").strip()
     if phase == "blank_reusable":
-        return "UV-Vis 现在没有在工作。这一步已经确认当前批次纯水空白可复用，继续下一步时记得保留或重新放好参比位纯水比色皿。"
+        return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣溿€傝繖涓€姝ュ凡缁忕‘璁ゅ綋鍓嶆壒娆＄函姘寸┖鐧藉彲澶嶇敤锛岀户缁笅涓€姝ユ椂璁板緱淇濈暀鎴栭噸鏂版斁濂藉弬姣斾綅绾按姣旇壊鐨裤€?
     if phase == "await_empty_positions":
-        return "UV-Vis 现在没有在工作。这一步在等你确认1到5号样品位和参比位都已留空。"
+        return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣溿€傝繖涓€姝ュ湪绛変綘纭1鍒?鍙锋牱鍝佷綅鍜屽弬姣斾綅閮藉凡鐣欑┖銆?
     if phase == "await_scan_start":
-        return "UV-Vis 现在没有在工作。这一步在等你确认可以开始扫描。"
-    if phase == "await_pure_water_blank":
-        return "UV-Vis 现在没有在工作。暗电流校正已经完成，这一步在等你把一到五号样品位和参比位各放一个纯水比色皿。"
+        return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣溿€傝繖涓€姝ュ湪绛変綘纭鍙互寮€濮嬫壂鎻忋€?
+    if phase == "await_pure_water_blank" and _uvvis_shared_blank_step_enabled(conn):
+        return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣溿€傛殫鐢垫祦鏍℃宸茬粡瀹屾垚锛岃繖涓€姝ュ湪绛変綘鎶婁竴鍒颁簲鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁涓€涓函姘存瘮鑹茬毧銆?
     if phase == "await_shared_prep_reset":
-        return "UV-Vis 现在没有在工作。这一步在等你把一到五号样品位和参比位都清空，我先补做共享前置校正。"
+        return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣溿€傝繖涓€姝ュ湪绛変綘鎶婁竴鍒颁簲鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥竻绌猴紝鎴戝厛琛ュ仛鍏变韩鍓嶇疆鏍℃銆?
     if phase == "await_reaction_sample":
-        return "UV-Vis 现在没有在工作，这一步在等你把样品和参比液放好。"
+        return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣滐紝杩欎竴姝ュ湪绛変綘鎶婃牱鍝佸拰鍙傛瘮娑叉斁濂姐€?
     if phase == "await_liquid_blank":
-        return "UV-Vis 现在没有在工作，这一步在等你把指定的空白液放好。"
+        return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣滐紝杩欎竴姝ュ湪绛変綘鎶婃寚瀹氱殑绌虹櫧娑叉斁濂姐€?
 
     if (
         inferred_step_id == _UVVIS_SHARED_BLANK_STEP_ID
+        and _uvvis_shared_blank_step_enabled(conn)
         and _uvvis_shared_liquid_blank_exists(conn)
     ):
-        return "UV-Vis 现在没有在工作。暗电流校正已经完成。"
-    return "UV-Vis 现在没有在工作。"
+        return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣溿€傛殫鐢垫祦鏍℃宸茬粡瀹屾垚銆?
+    return "UV-Vis 鐜板湪娌℃湁鍦ㄥ伐浣溿€?
 
 
 async def _ensure_uvvis_session_key(conn) -> tuple[str, str]:
@@ -5822,15 +6557,15 @@ def _extract_uvvis_sample_position_from_text(text: str) -> int | None:
         r"sample[_\-\s]*([1-5])",
         r"\u653e\u5728\s*([1-5])\s*\u53f7\u4f4d",
         r"\u6837\u54c1\u4f4d\s*([1-5])",
-        r"([一二三四五])\s*\u53f7\u4f4d",
-        r"\u653e\u5728\s*([一二三四五])\s*\u53f7\u4f4d",
+        r"([涓€浜屼笁鍥涗簲])\s*\u53f7\u4f4d",
+        r"\u653e\u5728\s*([涓€浜屼笁鍥涗簲])\s*\u53f7\u4f4d",
     )
     chinese_map = {
-        "一": 1,
-        "二": 2,
-        "三": 3,
-        "四": 4,
-        "五": 5,
+        "涓€": 1,
+        "浜?: 2,
+        "涓?: 3,
+        "鍥?: 4,
+        "浜?: 5,
     }
     for pattern in patterns:
         match = re.search(pattern, source, flags=re.IGNORECASE)
@@ -5855,7 +6590,7 @@ def _extract_uvvis_sample_position_from_path(path_text: str) -> int | None:
     if not match:
         match = re.search(r"sample([1-5])", source)
     if not match:
-        match = re.search(r"(^|[\\/ _-])([1-5])号", source)
+        match = re.search(r"(^|[\\/ _-])([1-5])鍙?, source)
         if match:
             return int(match.group(2))
         return None
@@ -6142,16 +6877,6 @@ def _resolve_uvvis_primary_device_dir(conn) -> Path:
     return target_dir
 
 
-def _resolve_uvvis_primary_group_dir(conn) -> Path:
-    device_dir = _resolve_uvvis_primary_device_dir(conn)
-    group_number = _get_current_uvvis_group_number(conn)
-    if group_number is None:
-        return device_dir
-    target_dir = (device_dir / str(group_number)).resolve()
-    target_dir.mkdir(parents=True, exist_ok=True)
-    return target_dir
-
-
 def _write_uvvis_csv_rows(path: Path, fieldnames: list[str], rows: list[dict]) -> bool:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -6385,9 +7110,7 @@ def _extract_uvvis_measure_spectra_curve_sources(payload, conn) -> dict[int, str
     for sample_position in _UVVIS_SAMPLE_POSITIONS:
         if sample_position in sources:
             continue
-        candidate_dirs = [_resolve_uvvis_primary_group_dir(conn)]
-        candidate_dirs.extend(_resolve_uvvis_runtime_device_dirs(conn))
-        for device_dir in candidate_dirs:
+        for device_dir in _resolve_uvvis_runtime_device_dirs(conn):
             candidate_paths = [
                 device_dir / f"sample{sample_position}_latest_absorbance.csv",
                 device_dir / f"sample_run_sample{sample_position}_latest_absorbance.csv",
@@ -6404,7 +7127,7 @@ def _extract_uvvis_measure_spectra_curve_sources(payload, conn) -> dict[int, str
 
 
 def _persist_uvvis_measure_spectra_artifacts(conn, payload, rows: dict[int, dict]) -> dict:
-    artifact_dir = _resolve_uvvis_primary_group_dir(conn) / "uvvis_measure_spectra"
+    artifact_dir = _resolve_uvvis_primary_device_dir(conn) / "uvvis_measure_spectra"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     curve_sources = _extract_uvvis_measure_spectra_curve_sources(payload, conn)
     sample_curves = {}
@@ -6503,7 +7226,7 @@ def _persist_uvvis_measure_spectra_artifacts(conn, payload, rows: dict[int, dict
     manifest = {
         "tool_name": "uvvis_measure_spectra",
         "generated_at_epoch": int(time.time()),
-        "device_dir": str(_resolve_uvvis_primary_group_dir(conn)),
+        "device_dir": str(_resolve_uvvis_primary_device_dir(conn)),
         "value_semantics": "corrected absorbance after dark-current and blank/reference subtraction",
         "expected_wavelength_grid_nm": list(_UVVIS_SPECTRA_WAVELENGTH_GRID),
         "summary_csv": str(summary_csv_path.resolve()) if summary_ok else "",
@@ -6679,10 +7402,43 @@ async def _complete_experiment_step_with_fields(
     fields: dict,
     auto_advance: bool,
     fallback_reply: str = "",
+    group_number: int | None = None,
 ) -> tuple[bool, str]:
     session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     if not session_id:
         return False, fallback_reply or ""
+
+    normalized_group_number = None
+    try:
+        if group_number is not None:
+            normalized_group_number = int(group_number)
+            if normalized_group_number < 1:
+                normalized_group_number = None
+    except (TypeError, ValueError):
+        normalized_group_number = None
+
+    if normalized_group_number is not None:
+        setattr(conn, "experiment_current_group_number", normalized_group_number)
+        current_step_id_hint = _get_current_experiment_step_id(conn)
+        if current_step_id_hint:
+            try:
+                await _call_experiment_graph_tool_fast(
+                    conn,
+                    "redirect_to_step",
+                    {
+                        "session_id": session_id,
+                        "step_id": current_step_id_hint,
+                        "force": True,
+                        "group_number": normalized_group_number,
+                    },
+                    priority="foreground",
+                )
+            except Exception as exc:
+                conn.logger.bind(tag=TAG).warning(
+                    "failed to sync explicit experiment group before writeback: "
+                    f"session_id={session_id}, step_id={current_step_id_hint}, "
+                    f"group_number={normalized_group_number}, error={exc}"
+                )
 
     step_payload, progress_payload, schema_payload = await asyncio.gather(
         _call_experiment_graph_tool_fast(
@@ -6718,17 +7474,34 @@ async def _complete_experiment_step_with_fields(
     schema_by_name = _extract_experiment_schema_view(schema_payload)
     current_progress = _extract_experiment_current_progress(progress_payload)
     if current_progress is None:
-        start_args = {"session_id": session_id}
-        group_number = _get_current_uvvis_group_number(conn)
-        if group_number is not None:
-            start_args["group_number"] = group_number
         start_payload = await _call_experiment_graph_tool_fast(
             conn,
             "start_trial",
-            start_args,
+            {
+                "session_id": session_id,
+                **(
+                    {"group_number": normalized_group_number}
+                    if normalized_group_number is not None
+                    else {}
+                ),
+            },
             priority="foreground",
         )
         current_progress = _extract_experiment_current_progress(start_payload)
+    elif normalized_group_number is not None:
+        current_progress_group = _extract_current_progress_group_number(progress_payload)
+        if current_progress_group != normalized_group_number:
+            start_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "start_trial",
+                {
+                    "session_id": session_id,
+                    "force": True,
+                    "group_number": normalized_group_number,
+                },
+                priority="foreground",
+            )
+            current_progress = _extract_experiment_current_progress(start_payload)
 
     write_fields = _filter_fields_for_schema(fields, schema_by_name)
     if write_fields:
@@ -6866,6 +7639,22 @@ async def _release_uvvis_session_for_analysis(conn) -> None:
 
 
 async def _run_uvvis_shared_dark_air_scan(conn) -> tuple[bool, str]:
+    if _uvvis_shared_dark_air_cache_ready(conn):
+        completed, reply = await _complete_experiment_step_with_fields(
+            conn,
+            fields={
+                "empty_positions_confirmed": True,
+                "shared_dark_current_ready": True,
+                "shared_air_baseline_ready": True,
+                "observations": "澶嶇敤宸插瓨鍦ㄧ殑鍏变韩鏆楃數娴佸拰绌烘皵鑳介噺鏍℃缂撳瓨銆?,
+            },
+            auto_advance=True,
+            fallback_reply="宸插鐢ㄥ叡浜殫鐢垫祦鍜岀┖姘旇兘閲忔牎姝ｏ紝鐩存帴杩涘叆涓嬩竴姝ャ€?,
+        )
+        if completed:
+            _clear_uvvis_direct_state(conn)
+        return True, reply
+
     session_key, busy_reply = await _ensure_uvvis_session_key(conn)
     if not session_key:
         return False, busy_reply
@@ -6873,7 +7662,11 @@ async def _run_uvvis_shared_dark_air_scan(conn) -> tuple[bool, str]:
     prepare_payload = await _execute_uvvis_tool_payload(
         conn,
         "uvvis_prepare_dark_current",
-        {"session_key": session_key},
+        {
+            "session_key": session_key,
+            "output_dir": str(_resolve_uvvis_group_output_dir(conn, None)),
+            "shared_output_dir": str(_resolve_uvvis_native_output_root(conn)),
+        },
     )
     if _payload_looks_busy_or_inaccessible(prepare_payload):
         return True, _UVVIS_BUSY_REPLY
@@ -6884,10 +7677,10 @@ async def _run_uvvis_shared_dark_air_scan(conn) -> tuple[bool, str]:
             "empty_positions_confirmed": True,
             "shared_dark_current_ready": True,
             "shared_air_baseline_ready": True,
-            "observations": "共享暗电流和空气能量校正已完成。",
+            "observations": "鍏变韩鏆楃數娴佸拰绌烘皵鑳介噺鏍℃宸插畬鎴愩€?,
         },
         auto_advance=True,
-        fallback_reply="共享暗电流和空气能量校正已经完成。",
+        fallback_reply="鍏变韩鏆楃數娴佸拰绌烘皵鑳介噺鏍℃宸茬粡瀹屾垚銆?,
     )
     if completed:
         _clear_uvvis_direct_state(conn)
@@ -6897,7 +7690,52 @@ async def _run_uvvis_shared_dark_air_scan(conn) -> tuple[bool, str]:
 async def _handle_uvvis_shared_dark_air_prep(
     conn, original_text: str, filtered_text: str
 ) -> bool:
+    control_action = _classify_short_experiment_control(conn, filtered_text)
+    if _uvvis_shared_dark_air_cache_ready(conn):
+        if control_action in {"advance", "guide", "repeat"} and _is_current_graph_step_completed(
+            getattr(conn, "experiment_progress_summary", None)
+        ):
+            await _start_direct_intent_turn(conn, original_text)
+            advanced, reply = await _advance_finished_experiment_step(
+                conn,
+                fallback_reply="宸插鐢ㄥ叡浜殫鐢垫祦鍜岀┖姘旇兘閲忔牎姝ｏ紝鐩存帴杩涘叆涓嬩竴姝ャ€?,
+            )
+            if advanced:
+                _clear_uvvis_direct_state(conn)
+                if reply:
+                    speak_txt(conn, reply)
+                return True
+            if reply:
+                speak_txt(conn, reply)
+                return True
+
+        state = _get_uvvis_direct_state(conn, _UVVIS_SHARED_DARK_AIR_STEP_ID)
+        phase = str(state.get("phase", "") or "").strip()
+        if phase in {"await_empty_positions", "await_scan_start"} or _contains_any(
+            _normalize_text_for_match(filtered_text),
+            (
+                "缁х画鍒氭墠",
+                "缁х画瀹為獙",
+                "寮€濮嬫壂鎻?,
+                "鍙互寮€濮?,
+                "閮界┖浜?,
+            ),
+        ):
+            await _start_direct_intent_turn(conn, original_text)
+            handled, reply = await _run_uvvis_shared_dark_air_scan(conn)
+            if handled:
+                if reply:
+                    speak_txt(conn, reply)
+                return True
+            return False
+
     if _is_explicit_experiment_start_request(filtered_text):
+        try:
+            await _reset_experiment_fresh_start_context(conn)
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"uvvis shared prep explicit start reset failed: {exc}"
+            )
         experiment_title = await _load_experiment_overview_title(conn)
         reply = _prepare_fastpath_spoken_reply(
             _compose_experiment_start_reply(experiment_title, "")
@@ -6919,7 +7757,7 @@ async def _handle_uvvis_shared_dark_air_prep(
         )
         speak_txt(
             conn,
-            "先检查1到5号样品位都为空，参比位也不要放任何液体。都空了就告诉我。可以开始时直接说“开始扫描”。",
+            "鍏堟鏌?鍒?鍙锋牱鍝佷綅閮戒负绌猴紝鍙傛瘮浣嶄篃涓嶈鏀句换浣曟恫浣撱€傞兘绌轰簡灏卞憡璇夋垜銆傚彲浠ュ紑濮嬫椂鐩存帴璇粹€滃紑濮嬫壂鎻忊€濄€?,
         )
         return True
 
@@ -6929,7 +7767,7 @@ async def _handle_uvvis_shared_dark_air_prep(
     if phase == "await_empty_positions":
         if _is_negative_short_reply_fixed(filtered_text):
             await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "好，等你确认样品位和参比位都留空后再告诉我。")
+            speak_txt(conn, "濂斤紝绛変綘纭鏍峰搧浣嶅拰鍙傛瘮浣嶉兘鐣欑┖鍚庡啀鍛婅瘔鎴戙€?)
             return True
         if (
             _looks_like_uvvis_empty_then_start_reply(filtered_text)
@@ -6945,7 +7783,7 @@ async def _handle_uvvis_shared_dark_air_prep(
         if not _looks_like_uvvis_empty_positions_reply(filtered_text):
             if _looks_like_uvvis_ready_reply(filtered_text):
                 await _start_direct_intent_turn(conn, original_text)
-                speak_txt(conn, "先确认1到5号样品位都为空，参比位也不要放任何液体。都空了就告诉我。可以开始时直接说“开始扫描”。")
+                speak_txt(conn, "鍏堢‘璁?鍒?鍙锋牱鍝佷綅閮戒负绌猴紝鍙傛瘮浣嶄篃涓嶈鏀句换浣曟恫浣撱€傞兘绌轰簡灏卞憡璇夋垜銆傚彲浠ュ紑濮嬫椂鐩存帴璇粹€滃紑濮嬫壂鎻忊€濄€?)
                 return True
             return False
         await _start_direct_intent_turn(conn, original_text)
@@ -6954,13 +7792,13 @@ async def _handle_uvvis_shared_dark_air_prep(
             step_id=_UVVIS_SHARED_DARK_AIR_STEP_ID,
             phase="await_scan_start",
         )
-        speak_txt(conn, "可以开始时告诉我“开始扫描”。")
+        speak_txt(conn, "鍙互寮€濮嬫椂鍛婅瘔鎴戔€滃紑濮嬫壂鎻忊€濄€?)
         return True
 
     if phase == "await_scan_start":
         if _is_negative_short_reply_fixed(filtered_text):
             await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "好，等你可以开始扫描时再告诉我。")
+            speak_txt(conn, "濂斤紝绛変綘鍙互寮€濮嬫壂鎻忔椂鍐嶅憡璇夋垜銆?)
             return True
         if not (
             _looks_like_uvvis_empty_then_start_reply(filtered_text)
@@ -6968,7 +7806,7 @@ async def _handle_uvvis_shared_dark_air_prep(
         ):
             if _looks_like_uvvis_empty_positions_reply(filtered_text):
                 await _start_direct_intent_turn(conn, original_text)
-                speak_txt(conn, "可以开始时告诉我“开始扫描”。")
+                speak_txt(conn, "鍙互寮€濮嬫椂鍛婅瘔鎴戔€滃紑濮嬫壂鎻忊€濄€?)
                 return True
             return False
 
@@ -6980,24 +7818,23 @@ async def _handle_uvvis_shared_dark_air_prep(
             speak_txt(conn, reply)
         return True
 
-    control_action = _classify_short_experiment_control(conn, filtered_text)
     norm = _normalize_text_for_match(filtered_text)
     if not (
         (_assistant_recently_prompted_uvvis_action(conn) and control_action in {"guide", "advance", "repeat"})
         or _contains_any(
             norm,
             (
-                "暗电流校正",
-                "暗电流",
-                "空气基线",
-                "空气能量",
-                "共享暗电流",
-                "开始uvvis",
-                "开始紫外可见",
-                "开始测量",
-                "开始扫描",
-                "可以开始扫描",
-                "空架扫描",
+                "鏆楃數娴佹牎姝?,
+                "鏆楃數娴?,
+                "绌烘皵鍩虹嚎",
+                "绌烘皵鑳介噺",
+                "鍏变韩鏆楃數娴?,
+                "寮€濮媢vvis",
+                "寮€濮嬬传澶栧彲瑙?,
+                "寮€濮嬫祴閲?,
+                "寮€濮嬫壂鎻?,
+                "鍙互寮€濮嬫壂鎻?,
+                "绌烘灦鎵弿",
             ),
         )
     ):
@@ -7011,7 +7848,7 @@ async def _handle_uvvis_shared_dark_air_prep(
     )
     speak_txt(
         conn,
-        "先检查1到5号样品位都为空，参比位也不要放任何液体。都空了就告诉我。可以开始时直接说“开始扫描”。",
+        "鍏堟鏌?鍒?鍙锋牱鍝佷綅閮戒负绌猴紝鍙傛瘮浣嶄篃涓嶈鏀句换浣曟恫浣撱€傞兘绌轰簡灏卞憡璇夋垜銆傚彲浠ュ紑濮嬫椂鐩存帴璇粹€滃紑濮嬫壂鎻忊€濄€?,
     )
     return True
 
@@ -7030,7 +7867,7 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
     if state.get("phase") == "await_pure_water_blank":
         if _is_negative_short_reply_fixed(filtered_text):
             await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "好，等你把纯水比色皿放好再告诉我。")
+            speak_txt(conn, "濂斤紝绛変綘鎶婄函姘存瘮鑹茬毧鏀惧ソ鍐嶅憡璇夋垜銆?)
             return True
 
         if not _looks_like_uvvis_ready_reply(filtered_text):
@@ -7056,7 +7893,7 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
                 phase="await_pure_water_blank",
                 session_key=session_key,
             )
-            speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿，放好后告诉我可以开始扫描。")
+            speak_txt(conn, "杩欎竴姝ヨ繕缂虹函姘寸┖鐧斤紝璇峰厛鎶?1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥斁鍏ョ函姘存瘮鑹茬毧锛屾斁濂藉悗鍛婅瘔鎴戝彲浠ュ紑濮嬫壂鎻忋€?)
             return True
 
         fields = {
@@ -7064,13 +7901,13 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
             "shared_air_baseline_ready": True,
             "pure_water_blank_ready": True,
             "reference_cuvette_ready": True,
-            "observations": "共享前置校正和纯水空白已准备完成",
+            "observations": "鍏变韩鍓嶇疆鏍℃鍜岀函姘寸┖鐧藉凡鍑嗗瀹屾垚",
         }
         auto_advanced, reply = await _complete_experiment_step_with_fields(
             conn,
             fields=fields,
             auto_advance=True,
-            fallback_reply="共享前置校正和纯水空白都准备好了。",
+            fallback_reply="鍏变韩鍓嶇疆鏍℃鍜岀函姘寸┖鐧介兘鍑嗗濂戒簡銆?,
         )
         if auto_advanced and reply:
             speak_txt(conn, reply)
@@ -7084,24 +7921,24 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
         or _contains_any(
             _normalize_text_for_match(filtered_text),
             (
-                "暗电流",
-                "空气基线",
-                "空气能量",
-                "纯水空白",
-                "空白校正",
-                "开始uvvis",
-                "开始紫外可见",
-                "开始测量",
-                "开始扫描",
-                "可以开始扫描",
-                "空架扫描",
+                "鏆楃數娴?,
+                "绌烘皵鍩虹嚎",
+                "绌烘皵鑳介噺",
+                "绾按绌虹櫧",
+                "绌虹櫧鏍℃",
+                "寮€濮媢vvis",
+                "寮€濮嬬传澶栧彲瑙?,
+                "寮€濮嬫祴閲?,
+                "寮€濮嬫壂鎻?,
+                "鍙互寮€濮嬫壂鎻?,
+                "绌烘灦鎵弿",
             ),
         )
     ):
         return False
 
     await _start_direct_intent_turn(conn, original_text)
-    speak_txt(conn, "先不要放任何液体，我先进行共享前置校正。")
+    speak_txt(conn, "鍏堜笉瑕佹斁浠讳綍娑蹭綋锛屾垜鍏堣繘琛屽叡浜墠缃牎姝ｃ€?)
     payload = await _execute_uvvis_tool_payload(
         conn,
         "uvvis_measure_spectra",
@@ -7115,7 +7952,7 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
         speak_txt(conn, _UVVIS_BUSY_REPLY)
         return True
     if _payload_mentions_missing_blank(payload):
-        speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿，放好后告诉我可以开始扫描。")
+        speak_txt(conn, "杩欎竴姝ヨ繕缂虹函姘寸┖鐧斤紝璇峰厛鎶?1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥斁鍏ョ函姘存瘮鑹茬毧锛屾斁濂藉悗鍛婅瘔鎴戝彲浠ュ紑濮嬫壂鎻忋€?)
         _set_uvvis_direct_state(
             conn,
             step_id=_UVVIS_SHARED_BLANK_STEP_ID,
@@ -7129,13 +7966,13 @@ async def _legacy_handle_uvvis_shared_blank_prep_pre_split(
         "shared_air_baseline_ready": True,
         "pure_water_blank_ready": True,
         "reference_cuvette_ready": True,
-        "observations": "共享前置校正和纯水空白已完成或可复用",
+        "observations": "鍏变韩鍓嶇疆鏍℃鍜岀函姘寸┖鐧藉凡瀹屾垚鎴栧彲澶嶇敤",
     }
     auto_advanced, reply = await _complete_experiment_step_with_fields(
         conn,
         fields=fields,
         auto_advance=True,
-        fallback_reply="共享前置校正和纯水空白都准备好了。",
+        fallback_reply="鍏变韩鍓嶇疆鏍℃鍜岀函姘寸┖鐧介兘鍑嗗濂戒簡銆?,
     )
     if auto_advanced and reply:
         speak_txt(conn, reply)
@@ -7176,7 +8013,7 @@ async def _handle_uvvis_shared_blank_prep(
     if state.get("phase") == "await_pure_water_blank":
         if _is_negative_short_reply_fixed(filtered_text):
             await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "好，等你把纯水比色皿放好再告诉我。")
+            speak_txt(conn, "濂斤紝绛変綘鎶婄函姘存瘮鑹茬毧鏀惧ソ鍐嶅憡璇夋垜銆?)
             return True
 
         if not _looks_like_uvvis_ready_reply(filtered_text):
@@ -7202,7 +8039,7 @@ async def _handle_uvvis_shared_blank_prep(
                 phase="await_pure_water_blank",
                 session_key=session_key,
             )
-            speak_txt(conn, "这一步还缺纯水空白，请先把 1-5 号样品位和参比位都放入纯水比色皿，放好后告诉我可以开始扫描。")
+            speak_txt(conn, "杩欎竴姝ヨ繕缂虹函姘寸┖鐧斤紝璇峰厛鎶?1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥斁鍏ョ函姘存瘮鑹茬毧锛屾斁濂藉悗鍛婅瘔鎴戝彲浠ュ紑濮嬫壂鎻忋€?)
             return True
 
         auto_advanced, reply = await _complete_experiment_step_with_fields(
@@ -7210,10 +8047,10 @@ async def _handle_uvvis_shared_blank_prep(
             fields={
                 "pure_water_blank_ready": True,
                 "reference_cuvette_ready": True,
-                "observations": "当前批次纯水空白已记录完成，参比位纯水比色皿可继续用于后续测量。",
+                "observations": "褰撳墠鎵规绾按绌虹櫧宸茶褰曞畬鎴愶紝鍙傛瘮浣嶇函姘存瘮鑹茬毧鍙户缁敤浜庡悗缁祴閲忋€?,
             },
             auto_advance=True,
-            fallback_reply="纯水空白已经准备好了。",
+            fallback_reply="绾按绌虹櫧宸茬粡鍑嗗濂戒簡銆?,
         )
         if auto_advanced:
             _clear_uvvis_direct_state(conn)
@@ -7227,15 +8064,15 @@ async def _handle_uvvis_shared_blank_prep(
         or _contains_any(
             _normalize_text_for_match(filtered_text),
             (
-                "纯水空白",
-                "纯水比色皿",
-                "空白校正",
-                "开始uvvis",
-                "开始紫外可见",
-                "开始测量",
-                "开始扫描",
-                "可以开始扫描",
-                "空白",
+                "绾按绌虹櫧",
+                "绾按姣旇壊鐨?,
+                "绌虹櫧鏍℃",
+                "寮€濮媢vvis",
+                "寮€濮嬬传澶栧彲瑙?,
+                "寮€濮嬫祴閲?,
+                "寮€濮嬫壂鎻?,
+                "鍙互寮€濮嬫壂鎻?,
+                "绌虹櫧",
             ),
         )
     ):
@@ -7249,10 +8086,10 @@ async def _handle_uvvis_shared_blank_prep(
             fields={
                 "pure_water_blank_ready": True,
                 "reference_cuvette_ready": True,
-                "observations": "当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
+                "observations": "褰撳墠鎵规绾按绌虹櫧宸茬‘璁ゅ彲澶嶇敤锛屽悗缁祴閲忓皢淇濈暀鎴栭噸鏂版斁濂藉弬姣斾綅绾按姣旇壊鐨裤€?,
             },
             auto_advance=True,
-            fallback_reply="当前批次纯水空白可复用，接下来装入样品比色皿。",
+            fallback_reply="褰撳墠鎵规绾按绌虹櫧鍙鐢紝鎺ヤ笅鏉ヨ鍏ユ牱鍝佹瘮鑹茬毧銆?,
         )
         _clear_uvvis_direct_state(conn)
         if reply:
@@ -7267,7 +8104,7 @@ async def _handle_uvvis_shared_blank_prep(
     )
     speak_txt(
         conn,
-        "暗电流校正已经完成。请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。",
+        "鏆楃數娴佹牎姝ｅ凡缁忓畬鎴愩€傝鍦?1-5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁鍏ョ函姘存瘮鑹茬毧锛屽叡 6 涓紝鏀惧ソ鍚庡憡璇夋垜鍙互寮€濮嬫壂鎻忋€?,
     )
     return True
 
@@ -7294,7 +8131,7 @@ async def _handle_uvvis_shared_blank_prep_v2(
     if phase == "await_shared_prep_reset":
         if _is_negative_short_reply_fixed(filtered_text):
             await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "好，等你把样品位和参比位都清空后再告诉我。")
+            speak_txt(conn, "濂斤紝绛変綘鎶婃牱鍝佷綅鍜屽弬姣斾綅閮芥竻绌哄悗鍐嶅憡璇夋垜銆?)
             return True
 
         if not _looks_like_uvvis_ready_reply(filtered_text):
@@ -7320,13 +8157,13 @@ async def _handle_uvvis_shared_blank_prep_v2(
                 phase="await_shared_prep_reset",
                 session_key=session_key,
             )
-            speak_txt(conn, "请先把 1 到 5 号样品位和参比位都清空，我先补做共享前置校正。清空后告诉我可以开始。")
+            speak_txt(conn, "璇峰厛鎶?1 鍒?5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥竻绌猴紝鎴戝厛琛ュ仛鍏变韩鍓嶇疆鏍℃銆傛竻绌哄悗鍛婅瘔鎴戝彲浠ュ紑濮嬨€?)
             return True
         if _uvvis_shared_liquid_blank_exists(conn, payload) or _payload_indicates_liquid_blank_ready(payload):
             auto_advanced, reply = await _complete_uvvis_shared_blank_step(
                 conn,
-                observations="当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
-                fallback_reply="当前批次纯水空白可复用，接下来装入样品比色皿。",
+                observations="褰撳墠鎵规绾按绌虹櫧宸茬‘璁ゅ彲澶嶇敤锛屽悗缁祴閲忓皢淇濈暀鎴栭噸鏂版斁濂藉弬姣斾綅绾按姣旇壊鐨裤€?,
+                fallback_reply="褰撳墠鎵规绾按绌虹櫧鍙鐢紝鎺ヤ笅鏉ヨ鍏ユ牱鍝佹瘮鑹茬毧銆?,
             )
             _clear_uvvis_direct_state(conn)
             if reply:
@@ -7341,14 +8178,14 @@ async def _handle_uvvis_shared_blank_prep_v2(
         )
         speak_txt(
             conn,
-            "共享前置校正已经准备好。请在 1 到 5 号样品位和参比位各放 1 支纯水比色皿，共 6 支，放好了告诉我可以开始扫描。",
+            "鍏变韩鍓嶇疆鏍℃宸茬粡鍑嗗濂姐€傝鍦?1 鍒?5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁 1 鏀函姘存瘮鑹茬毧锛屽叡 6 鏀紝鏀惧ソ浜嗗憡璇夋垜鍙互寮€濮嬫壂鎻忋€?,
         )
         return True
 
     if phase == "await_pure_water_blank":
         if _is_negative_short_reply_fixed(filtered_text):
             await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "好，等你把纯水比色皿放好后再告诉我。")
+            speak_txt(conn, "濂斤紝绛変綘鎶婄函姘存瘮鑹茬毧鏀惧ソ鍚庡啀鍛婅瘔鎴戙€?)
             return True
 
         if not _looks_like_uvvis_ready_reply(filtered_text):
@@ -7374,7 +8211,7 @@ async def _handle_uvvis_shared_blank_prep_v2(
                 phase="await_shared_prep_reset",
                 session_key=session_key,
             )
-            speak_txt(conn, "共享前置校正还没准备好，请先把 1 到 5 号样品位和参比位都清空，我先补做前置校正。清空后告诉我可以开始。")
+            speak_txt(conn, "鍏变韩鍓嶇疆鏍℃杩樻病鍑嗗濂斤紝璇峰厛鎶?1 鍒?5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥竻绌猴紝鎴戝厛琛ュ仛鍓嶇疆鏍℃銆傛竻绌哄悗鍛婅瘔鎴戝彲浠ュ紑濮嬨€?)
             return True
         if _payload_mentions_missing_blank(payload):
             _set_uvvis_direct_state(
@@ -7383,13 +8220,13 @@ async def _handle_uvvis_shared_blank_prep_v2(
                 phase="await_pure_water_blank",
                 session_key=session_key,
             )
-            speak_txt(conn, "这一步还缺纯水空白，请先把 1 到 5 号样品位和参比位都放入纯水比色皿，放好后告诉我可以开始扫描。")
+            speak_txt(conn, "杩欎竴姝ヨ繕缂虹函姘寸┖鐧斤紝璇峰厛鎶?1 鍒?5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮芥斁鍏ョ函姘存瘮鑹茬毧锛屾斁濂藉悗鍛婅瘔鎴戝彲浠ュ紑濮嬫壂鎻忋€?)
             return True
 
         auto_advanced, reply = await _complete_uvvis_shared_blank_step(
             conn,
-            observations="当前批次纯水空白已记录完成，参比位纯水比色皿可继续用于后续测量。",
-            fallback_reply="纯水空白已经准备好了。",
+            observations="褰撳墠鎵规绾按绌虹櫧宸茶褰曞畬鎴愶紝鍙傛瘮浣嶇函姘存瘮鑹茬毧鍙户缁敤浜庡悗缁祴閲忋€?,
+            fallback_reply="绾按绌虹櫧宸茬粡鍑嗗濂戒簡銆?,
         )
         if auto_advanced:
             _clear_uvvis_direct_state(conn)
@@ -7403,15 +8240,15 @@ async def _handle_uvvis_shared_blank_prep_v2(
         or _contains_any(
             _normalize_text_for_match(filtered_text),
             (
-                "纯水空白",
-                "纯水比色皿",
-                "空白校正",
-                "开始uvvis",
-                "开始紫外可见",
-                "开始测量",
-                "开始扫描",
-                "可以开始扫描",
-                "空白",
+                "绾按绌虹櫧",
+                "绾按姣旇壊鐨?,
+                "绌虹櫧鏍℃",
+                "寮€濮媢vvis",
+                "寮€濮嬬传澶栧彲瑙?,
+                "寮€濮嬫祴閲?,
+                "寮€濮嬫壂鎻?,
+                "鍙互寮€濮嬫壂鎻?,
+                "绌虹櫧",
             ),
         )
     ):
@@ -7422,8 +8259,8 @@ async def _handle_uvvis_shared_blank_prep_v2(
     if _uvvis_shared_liquid_blank_exists(conn):
         auto_advanced, reply = await _complete_uvvis_shared_blank_step(
             conn,
-            observations="当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
-            fallback_reply="当前批次纯水空白可复用，接下来装入样品比色皿。",
+            observations="褰撳墠鎵规绾按绌虹櫧宸茬‘璁ゅ彲澶嶇敤锛屽悗缁祴閲忓皢淇濈暀鎴栭噸鏂版斁濂藉弬姣斾綅绾按姣旇壊鐨裤€?,
+            fallback_reply="褰撳墠鎵规绾按绌虹櫧鍙鐢紝鎺ヤ笅鏉ヨ鍏ユ牱鍝佹瘮鑹茬毧銆?,
         )
         _clear_uvvis_direct_state(conn)
         if reply:
@@ -7445,8 +8282,8 @@ async def _handle_uvvis_shared_blank_prep_v2(
     if _uvvis_shared_liquid_blank_exists(conn, payload) or _payload_indicates_liquid_blank_ready(payload):
         auto_advanced, reply = await _complete_uvvis_shared_blank_step(
             conn,
-            observations="当前批次纯水空白已确认可复用，后续测量将保留或重新放好参比位纯水比色皿。",
-            fallback_reply="当前批次纯水空白可复用，接下来装入样品比色皿。",
+            observations="褰撳墠鎵规绾按绌虹櫧宸茬‘璁ゅ彲澶嶇敤锛屽悗缁祴閲忓皢淇濈暀鎴栭噸鏂版斁濂藉弬姣斾綅绾按姣旇壊鐨裤€?,
+            fallback_reply="褰撳墠鎵规绾按绌虹櫧鍙鐢紝鎺ヤ笅鏉ヨ鍏ユ牱鍝佹瘮鑹茬毧銆?,
         )
         _clear_uvvis_direct_state(conn)
         if reply:
@@ -7460,7 +8297,7 @@ async def _handle_uvvis_shared_blank_prep_v2(
             phase="await_shared_prep_reset",
             session_key=session_key,
         )
-        speak_txt(conn, "请先保持 1 到 5 号样品位和参比位都为空，我先补做共享前置校正。清空后告诉我可以开始。")
+        speak_txt(conn, "璇峰厛淇濇寔 1 鍒?5 鍙锋牱鍝佷綅鍜屽弬姣斾綅閮戒负绌猴紝鎴戝厛琛ュ仛鍏变韩鍓嶇疆鏍℃銆傛竻绌哄悗鍛婅瘔鎴戝彲浠ュ紑濮嬨€?)
         return True
 
     _set_uvvis_direct_state(
@@ -7471,7 +8308,7 @@ async def _handle_uvvis_shared_blank_prep_v2(
     )
     speak_txt(
         conn,
-        "共享前置校正已经准备好。请在 1 到 5 号样品位和参比位各放 1 支纯水比色皿，共 6 支，放好了告诉我可以开始扫描。",
+        "鍏变韩鍓嶇疆鏍℃宸茬粡鍑嗗濂姐€傝鍦?1 鍒?5 鍙锋牱鍝佷綅鍜屽弬姣斾綅鍚勬斁 1 鏀函姘存瘮鑹茬毧锛屽叡 6 鏀紝鏀惧ソ浜嗗憡璇夋垜鍙互寮€濮嬫壂鎻忋€?,
     )
     return True
 
@@ -7479,53 +8316,8 @@ async def _handle_uvvis_shared_blank_prep_v2(
 _handle_uvvis_shared_blank_prep = _handle_uvvis_shared_blank_prep_v2
 
 
-async def _handle_uvvis_sample_load_completion(
-    conn, original_text: str, filtered_text: str
-) -> bool:
-    if not _looks_like_uvvis_ready_reply(filtered_text):
-        return False
-
-    explicit_group_number = _extract_uvvis_group_number_from_text(
-        f"{original_text} {filtered_text}"
-    )
-    group_number = _remember_uvvis_group_number(conn, explicit_group_number)
-    if group_number is None:
-        await _start_direct_intent_turn(conn, original_text)
-        speak_txt(conn, "这是第几组的样品？")
-        return True
-
-    await _start_direct_intent_turn(conn, original_text)
-    fields = {
-        "group_number": group_number,
-        "all_samples_loaded_into_cuvettes": True,
-        "all_cuvettes_ready_for_measurement": True,
-        "reference_cuvette_ready": True,
-        "observations": f"第{group_number}组1-5号样品已装入比色皿并放入样品位，参比位为纯水。",
-    }
-    advanced, reply = await _complete_experiment_step_with_fields(
-        conn,
-        fields=fields,
-        auto_advance=True,
-        fallback_reply=f"好，已经记成第{group_number}组。现在可以直接说开始扫描。",
-    )
-    if not advanced:
-        speak_txt(conn, reply or f"这是第{group_number}组。请确认1到5号样品都已经放好。")
-        return True
-
-    if _looks_like_uvvis_start_scan_reply(filtered_text):
-        return await _handle_uvvis_spectra_measurement(
-            conn,
-            original_text,
-            filtered_text,
-            start_turn=False,
-        )
-
-    speak_txt(conn, f"好，已经记成第{group_number}组。现在可以直接说开始扫描。")
-    return True
-
-
 async def _handle_uvvis_spectra_measurement(
-    conn, original_text: str, filtered_text: str, *, start_turn: bool = True
+    conn, original_text: str, filtered_text: str
 ) -> bool:
     if not (
         _looks_like_uvvis_ready_reply(filtered_text)
@@ -7533,30 +8325,39 @@ async def _handle_uvvis_spectra_measurement(
     ):
         return False
 
-    explicit_group_number = _extract_uvvis_group_number_from_text(
-        f"{original_text} {filtered_text}"
-    )
-    group_number = _remember_uvvis_group_number(
-        conn,
-        explicit_group_number if explicit_group_number is not None else None,
-    )
-    if group_number is None:
-        if start_turn:
-            await _start_direct_intent_turn(conn, original_text)
-        speak_txt(conn, "这是第几组的样品扫描？")
-        return True
+    group_number = None
+    if _is_exp2_uvvis_experiment(conn):
+        explicit_group_number = _extract_explicit_group_number_from_text(
+            original_text,
+            filtered_text,
+        )
+        current_group_number = _extract_int_value(
+            getattr(conn, "experiment_current_group_number", None)
+        )
+        if explicit_group_number is None:
+            if isinstance(current_group_number, int) and current_group_number >= 1:
+                group_number = current_group_number
+            else:
+                await _start_direct_intent_turn(conn, original_text)
+                speak_txt(conn, "???????????")
+                return True
+        else:
+            group_number = await _sync_exp2_group_number_from_turn(
+                conn,
+                original_text,
+                filtered_text,
+                preferred_step_id=_UVVIS_SAMPLE_RECORD_STEP_ID,
+            )
 
     session_key, busy_reply = await _ensure_uvvis_session_key(conn)
     if not session_key:
         if busy_reply:
-            if start_turn:
-                await _start_direct_intent_turn(conn, original_text)
+            await _start_direct_intent_turn(conn, original_text)
             speak_txt(conn, busy_reply)
             return True
         return False
 
-    if start_turn:
-        await _start_direct_intent_turn(conn, original_text)
+    await _start_direct_intent_turn(conn, original_text)
     payload = await _execute_uvvis_tool_payload(
         conn,
         "uvvis_measure_spectra",
@@ -7564,6 +8365,7 @@ async def _handle_uvvis_spectra_measurement(
             "session_key": session_key,
             "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
             "ready_for_samples": True,
+            "output_dir": str(_resolve_uvvis_group_output_dir(conn, group_number)),
         },
     )
     if _payload_looks_busy_or_inaccessible(payload):
@@ -7586,63 +8388,217 @@ async def _handle_uvvis_spectra_measurement(
             priority="foreground",
         )
         if fallback_step_id == _UVVIS_SHARED_BLANK_STEP_ID:
-            speak_txt(conn, "这一步缺少纯水空白，我先退回前置校正。请先把样品位和参比位都清空，再告诉我开始。")
+            speak_txt(
+                conn,
+                "????????????????????????????????????????",
+            )
         else:
-            speak_txt(conn, "这一步缺少共享前置校正，我先退回共享暗电流和空气能量校正。请先把样品位和参比位都清空，再告诉我开始扫描。")
+            speak_txt(
+                conn,
+                "????????????????????????????????????????????????????",
+            )
         return True
 
     rows = _extract_uvvis_measure_spectra_rows(payload, conn)
     spectra_artifacts = _persist_uvvis_measure_spectra_artifacts(conn, payload, rows)
     setattr(conn, "_last_uvvis_spectra_artifacts", spectra_artifacts)
-    if len(rows) < 5 or any(sample_position not in rows for sample_position in _UVVIS_SAMPLE_POSITIONS):
-        speak_txt(conn, "这次光谱结果还不完整，我还没拿到 1 到 5 号样品的完整结果，请稍后再试。")
+    if len(rows) < 5 or any(
+        sample_position not in rows for sample_position in _UVVIS_SAMPLE_POSITIONS
+    ):
+        speak_txt(
+            conn,
+            "???????????????? 1 ? 5 ???????????????",
+        )
         return True
     if not spectra_artifacts.get("all_expected_outputs_exist", False):
         speak_txt(
             conn,
-            "这次光谱峰位我已经拿到了，但 400 到 700 纳米每隔 10 纳米的完整校正吸光度结果或绘图还没保存成功，请稍后重试。",
+            "?????????????? 400 ? 700 ????? 10 ????????????????????????????",
         )
         return True
 
     fields = {
-        f"sample_{sample_position}_lambda_max": rows[sample_position]["lambda_max_nm"]
+        f"sample{sample_position}_lambda_max_nm": rows[sample_position]["lambda_max_nm"]
         for sample_position in _UVVIS_SAMPLE_POSITIONS
     }
     for sample_position in _UVVIS_SAMPLE_POSITIONS:
         max_absorbance = rows[sample_position].get("max_absorbance")
-        # The experiment schema only accepts non-negative absorbance maxima.
-        # Slightly negative values can appear after baseline correction, so we
-        # skip recording that optional field rather than failing the whole step.
-        if max_absorbance is not None and max_absorbance >= 0:
-            fields[f"sample_{sample_position}_absorbance_max"] = max_absorbance
+        if max_absorbance is not None and math.isfinite(max_absorbance):
+            fields[f"sample{sample_position}_max_absorbance"] = max_absorbance
     fields["spectrum_saved"] = True
     fields["observations"] = (
-        "1-5号样品批量扫描完成，"
-        + "；".join(
-            f"{sample_position}号样品λmax={rows[sample_position]['lambda_max_nm']}nm"
+        "1-5??????????"
+        + "?".join(
+            f"{sample_position}????max={rows[sample_position]['lambda_max_nm']}nm"
             for sample_position in _UVVIS_SAMPLE_POSITIONS
         )
-        + "；400-700nm（10nm步长）的校正吸光度结果和光谱图已保存"
+        + "?400-700nm?10nm??????????????????"
     )
 
     auto_advanced, reply = await _complete_experiment_step_with_fields(
         conn,
         fields=fields,
         auto_advance=True,
-        fallback_reply="1-5号样品的光谱都测好了。",
+        fallback_reply="1-5???????????",
+        group_number=group_number,
     )
-    summary = "，".join(
-        f"{sample_position}号{rows[sample_position]['lambda_max_nm']}纳米"
+    summary = "?".join(
+        f"{sample_position}?{rows[sample_position]['lambda_max_nm']}??"
         for sample_position in _UVVIS_SAMPLE_POSITIONS
     )
-    spoken_reply = f"{summary}。400到700纳米每隔10纳米的校正吸光度结果和光谱图已保存。"
+    spoken_reply = (
+        f"{summary}?400?700?????10???????????????????"
+    )
     if reply:
-        if reply.startswith("接下来"):
-            spoken_reply = f"{spoken_reply}{reply}"
-        else:
-            spoken_reply = f"{spoken_reply}{reply}"
+        spoken_reply = f"{spoken_reply}{reply}"
     if auto_advanced or reply:
         speak_txt(conn, spoken_reply)
+    return True
+
+
+async def _handle_uvvis_sample_load_start_scan(
+    conn, original_text: str, filtered_text: str
+) -> bool:
+    control_action = _classify_short_experiment_control(conn, filtered_text)
+    is_ready_reply = _looks_like_uvvis_ready_reply(filtered_text) or control_action in {
+        "guide",
+        "advance",
+        "repeat",
+    }
+    if not is_ready_reply:
+        return False
+
+    immediate_start_scan = _looks_like_uvvis_start_scan_reply(filtered_text)
+    group_number = None
+    explicit_group_number = None
+    if _is_exp2_uvvis_experiment(conn):
+        explicit_group_number = _extract_explicit_group_number_from_text(
+            original_text,
+            filtered_text,
+        )
+        if explicit_group_number is None:
+            current_group_number = _extract_int_value(
+                getattr(conn, "experiment_current_group_number", None)
+            )
+            if isinstance(current_group_number, int) and current_group_number >= 1:
+                group_number = current_group_number
+        else:
+            group_number = await _sync_exp2_group_number_from_turn(
+                conn,
+                original_text,
+                filtered_text,
+                preferred_step_id=_UVVIS_SAMPLE_LOAD_STEP_ID,
+            )
+
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return False
+
+    try:
+        step_payload, progress_payload, schema_payload = await asyncio.gather(
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_step",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_current_progress",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_schema",
+                {"session_id": session_id},
+                priority="foreground",
+            ),
+        )
+    except Exception:
+        return False
+
+    if _is_current_graph_step_completed(progress_payload):
+        if immediate_start_scan:
+            return await _handle_uvvis_spectra_measurement(
+                conn,
+                original_text,
+                filtered_text,
+            )
+        await _start_direct_intent_turn(conn, original_text)
+        if isinstance(group_number, int) and group_number >= 1:
+            speak_txt(conn, f"???????{group_number}??????????????")
+        else:
+            speak_txt(conn, "??????????????????????????")
+        return True
+
+    current_progress = _extract_experiment_current_progress(progress_payload)
+    if current_progress is None:
+        try:
+            start_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "start_trial",
+                {
+                    "session_id": session_id,
+                    **(
+                        {"group_number": group_number}
+                        if isinstance(group_number, int) and group_number >= 1
+                        else {}
+                    ),
+                },
+                priority="foreground",
+            )
+            current_progress = _extract_experiment_current_progress(start_payload)
+            progress_payload = start_payload
+        except Exception:
+            current_progress = None
+
+    schema_by_name = _extract_experiment_schema_view(schema_payload)
+    missing_fields = list((current_progress or {}).get("missing_fields") or [])
+    write_fields = {}
+    for field_name in missing_fields:
+        field_meta = schema_by_name.get(field_name, {})
+        field_type = str(field_meta.get("type", "")).strip().lower()
+        if field_type in {"bool", "boolean"}:
+            write_fields[field_name] = True
+
+    if missing_fields and not write_fields:
+        block_reply = _compose_confirmation_step_writeback_block_reply(
+            conn,
+            step_payload,
+            progress_payload,
+            schema_payload,
+        )
+        if block_reply:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, block_reply)
+            return True
+        return False
+
+    completed, reply = await _complete_experiment_step_with_fields(
+        conn,
+        fields=write_fields,
+        auto_advance=True,
+        fallback_reply="",
+        group_number=group_number,
+    )
+    if not completed:
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, reply or "???????????????????????")
+        return True
+
+    if immediate_start_scan:
+        return await _handle_uvvis_spectra_measurement(
+            conn,
+            original_text,
+            filtered_text,
+        )
+
+    await _start_direct_intent_turn(conn, original_text)
+    if isinstance(group_number, int) and group_number >= 1:
+        speak_txt(conn, f"???????{group_number}??????????????")
+    else:
+        speak_txt(conn, "??????????????????????????")
     return True
 
 
@@ -7658,7 +8614,28 @@ async def _handle_uvvis_kinetics_measurement(
         "advance",
         "repeat",
     }
-    output_dir = str(_resolve_uvvis_native_output_root(conn))
+    explicit_group_number = _extract_explicit_group_number_from_text(
+        original_text,
+        filtered_text,
+    )
+    if explicit_group_number is not None:
+        await _sync_exp2_group_number_from_turn(
+            conn,
+            original_text,
+            filtered_text,
+            preferred_step_id=step_id,
+        )
+    group_number = explicit_group_number
+    if group_number is None:
+        current_group_number = _extract_int_value(
+            getattr(conn, "experiment_current_group_number", None)
+        )
+        if isinstance(current_group_number, int) and current_group_number >= 1:
+            group_number = current_group_number
+    if group_number is None and _is_exp2_uvvis_experiment(conn):
+        group_number = 1
+        setattr(conn, "experiment_current_group_number", group_number)
+    output_dir = str(_resolve_uvvis_group_output_dir(conn, group_number))
 
     session_key, busy_reply = await _ensure_uvvis_session_key(conn)
     if not session_key:
@@ -7679,7 +8656,7 @@ async def _handle_uvvis_kinetics_measurement(
             )
             speak_txt(
                 conn,
-                "请重新装好动力学样品。参比位放纯水，1号位留空，2和3号位放2号样品的反应液和参比液，4和5号位放4号样品的反应液和参比液。放好后告诉我开始。",
+                "璇烽噸鏂拌濂藉姩鍔涘鏍峰搧銆傚弬姣斾綅鏀剧函姘达紝1鍙蜂綅鐣欑┖锛?鍜?鍙蜂綅鏀?鍙锋牱鍝佺殑鍙嶅簲娑插拰鍙傛瘮娑诧紝4鍜?鍙蜂綅鏀?鍙锋牱鍝佺殑鍙嶅簲娑插拰鍙傛瘮娑层€傛斁濂藉悗鍛婅瘔鎴戝紑濮嬨€?,
             )
             return True
         if control_action not in {"guide", "advance"}:
@@ -7687,7 +8664,7 @@ async def _handle_uvvis_kinetics_measurement(
                 await _start_direct_intent_turn(conn, original_text)
                 speak_txt(
                     conn,
-                    "如果还要继续重测这一轮，请说再测一轮；如果这个动力学步骤已经全部完成，请说当前步骤完成了。",
+                    "濡傛灉杩樿缁х画閲嶆祴杩欎竴杞紝璇疯鍐嶆祴涓€杞紱濡傛灉杩欎釜鍔ㄥ姏瀛︽楠ゅ凡缁忓叏閮ㄥ畬鎴愶紝璇疯褰撳墠姝ラ瀹屾垚浜嗐€?,
                 )
                 return True
             return False
@@ -7707,7 +8684,7 @@ async def _handle_uvvis_kinetics_measurement(
     if phase == "await_grouped_samples":
         if is_negative:
             await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "好，等你把2到5号位按要求放好之后再告诉我。")
+            speak_txt(conn, "濂斤紝绛変綘鎶?鍒?鍙蜂綅鎸夎姹傛斁濂戒箣鍚庡啀鍛婅瘔鎴戙€?)
             return True
         if not is_affirmative:
             return False
@@ -7742,7 +8719,7 @@ async def _handle_uvvis_kinetics_measurement(
             if re.fullmatch(r"sample4_t\d+_absorbance", str(key or ""))
         }
         if len(sample2_fields) < 35 or len(sample4_fields) < 35:
-            speak_txt(conn, "这次动力学结果还不完整，我还没有拿到2号和4号样品各自完整的35个时间点，请稍后再试。")
+            speak_txt(conn, "杩欐鍔ㄥ姏瀛︾粨鏋滆繕涓嶅畬鏁达紝鎴戣繕娌℃湁鎷垮埌2鍙峰拰4鍙锋牱鍝佸悇鑷畬鏁寸殑35涓椂闂寸偣锛岃绋嶅悗鍐嶈瘯銆?)
             return True
 
         payload_data = _to_plain_data(payload)
@@ -7768,7 +8745,7 @@ async def _handle_uvvis_kinetics_measurement(
                 break
         setattr(conn, "_last_uvvis_kinetics_artifacts", payload_data)
         if not artifacts_ok:
-            speak_txt(conn, "这次动力学的数据文件还没有完整落盘，请稍后再试。")
+            speak_txt(conn, "杩欐鍔ㄥ姏瀛︾殑鏁版嵁鏂囦欢杩樻病鏈夊畬鏁磋惤鐩橈紝璇风◢鍚庡啀璇曘€?)
             return True
 
         fields = dict(sample2_fields)
@@ -7778,16 +8755,16 @@ async def _handle_uvvis_kinetics_measurement(
         fields["kinetics_round_saved"] = True
         fields["step_finished_confirmed"] = False
         fields["observations"] = (
-            f"2号和4号样品 400 nm 联合动力学测量完成，"
-            f"2号样品使用2/3号位，4号样品使用4/5号位；"
-            f"本轮共记录35个时间点，数据已写入 uvvis_measure_kinetic/{round_index or '?'}。"
+            f"2鍙峰拰4鍙锋牱鍝?400 nm 鑱斿悎鍔ㄥ姏瀛︽祴閲忓畬鎴愶紝"
+            f"2鍙锋牱鍝佷娇鐢?/3鍙蜂綅锛?鍙锋牱鍝佷娇鐢?/5鍙蜂綅锛?
+            f"鏈疆鍏辫褰?5涓椂闂寸偣锛屾暟鎹凡鍐欏叆 uvvis_measure_kinetic/{round_index or '?'}銆?
         )
 
         completed, reply = await _complete_experiment_step_with_fields(
             conn,
             fields=fields,
             auto_advance=False,
-            fallback_reply="我记录好了。如果还要继续重测，请说再测一轮；如果当前步骤已经全部完成，请直接告诉我。",
+            fallback_reply="鎴戣褰曞ソ浜嗐€傚鏋滆繕瑕佺户缁噸娴嬶紝璇疯鍐嶆祴涓€杞紱濡傛灉褰撳墠姝ラ宸茬粡鍏ㄩ儴瀹屾垚锛岃鐩存帴鍛婅瘔鎴戙€?,
         )
         if completed:
             _set_uvvis_direct_state(
@@ -7798,31 +8775,31 @@ async def _handle_uvvis_kinetics_measurement(
             )
             speak_txt(
                 conn,
-                "我记录好了。这一轮2号和4号样品的动力学数据都已经保存。如果还要继续重测，请说再测一轮；如果这个步骤已经全部完成，请直接告诉我。",
+                "鎴戣褰曞ソ浜嗐€傝繖涓€杞?鍙峰拰4鍙锋牱鍝佺殑鍔ㄥ姏瀛︽暟鎹兘宸茬粡淇濆瓨銆傚鏋滆繕瑕佺户缁噸娴嬶紝璇疯鍐嶆祴涓€杞紱濡傛灉杩欎釜姝ラ宸茬粡鍏ㄩ儴瀹屾垚锛岃鐩存帴鍛婅瘔鎴戙€?,
             )
         elif reply:
             speak_txt(conn, reply)
         else:
-            speak_txt(conn, "这次动力学结果还没有完整写回当前步骤，请稍后再试。")
+            speak_txt(conn, "杩欐鍔ㄥ姏瀛︾粨鏋滆繕娌℃湁瀹屾暣鍐欏洖褰撳墠姝ラ锛岃绋嶅悗鍐嶈瘯銆?)
         return True
 
     if phase in {"start_pending", ""}:
         if is_negative:
             await _start_direct_intent_turn(conn, original_text)
-            speak_txt(conn, "好，等你准备好再告诉我。")
+            speak_txt(conn, "濂斤紝绛変綘鍑嗗濂藉啀鍛婅瘔鎴戙€?)
             return True
 
         if not (
             is_affirmative
             or _contains_any(
                 _normalize_text_for_match(filtered_text),
-                ("暗电流", "空气", "空白", "动力学", "开始", "测量", "调用mcp", "扫谱"),
+                ("鏆楃數娴?, "绌烘皵", "绌虹櫧", "鍔ㄥ姏瀛?, "寮€濮?, "娴嬮噺", "璋冪敤mcp", "鎵氨"),
             )
         ):
             return False
 
         await _start_direct_intent_turn(conn, original_text)
-        speak_txt(conn, "先保持2到5号样品位为空，我先做400纳米动力学测量需要的共享前置准备。")
+        speak_txt(conn, "鍏堜繚鎸?鍒?鍙锋牱鍝佷綅涓虹┖锛屾垜鍏堝仛400绾崇背鍔ㄥ姏瀛︽祴閲忛渶瑕佺殑鍏变韩鍓嶇疆鍑嗗銆?)
         payload = await _execute_uvvis_tool_payload(
             conn,
             "uvvis_measure_kinetics",
@@ -7848,7 +8825,7 @@ async def _handle_uvvis_kinetics_measurement(
         )
         speak_txt(
             conn,
-            "共享前置准备好了。请保持参比位是纯水，1号位留空，2和3号位放2号样品的反应液和参比液，4和5号位放4号样品的反应液和参比液。全部放好后告诉我开始。",
+            "鍏变韩鍓嶇疆鍑嗗濂戒簡銆傝淇濇寔鍙傛瘮浣嶆槸绾按锛?鍙蜂綅鐣欑┖锛?鍜?鍙蜂綅鏀?鍙锋牱鍝佺殑鍙嶅簲娑插拰鍙傛瘮娑诧紝4鍜?鍙蜂綅鏀?鍙锋牱鍝佺殑鍙嶅簲娑插拰鍙傛瘮娑层€傚叏閮ㄦ斁濂藉悗鍛婅瘔鎴戝紑濮嬨€?,
         )
         return True
 
@@ -7857,16 +8834,16 @@ async def _handle_uvvis_kinetics_measurement(
 def _compose_uvvis_step_rejection_reply(step_id: str) -> str:
     step_id = str(step_id or "").strip()
     if step_id == _UVVIS_SHARED_DARK_AIR_STEP_ID:
-        return "当前实验图谱还没推进到 UV-Vis 的暗电流校正，先完成丁达尔现象观察。"
+        return "褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒?UV-Vis 鐨勬殫鐢垫祦鏍℃锛屽厛瀹屾垚涓佽揪灏旂幇璞¤瀵熴€?
     if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
-        return "当前实验图谱还没推进到 UV-Vis 的纯水空白校正，先完成暗电流校正。"
-    if step_id in _UVVIS_SAMPLE_RECORD_STEP_IDS:
-        return "当前实验图谱还没推进到 1-5 号样品的批量光谱测量，先完成前面的装样准备。"
+        return "褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒?UV-Vis 鐨勭函姘寸┖鐧芥牎姝ｏ紝鍏堝畬鎴愭殫鐢垫祦鏍℃銆?
+    if step_id == _UVVIS_SAMPLE_RECORD_STEP_ID:
+        return "褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒?1-5 鍙锋牱鍝佺殑鎵归噺鍏夎氨娴嬮噺锛屽厛瀹屾垚鍓嶉潰鐨勮鏍峰噯澶囥€?
     if step_id in {
         _UVVIS_KINETICS_SAMPLE2_STEP_ID,
         _UVVIS_KINETICS_SAMPLE4_STEP_ID,
     }:
-        return "当前实验图谱还没推进到对应的 400 纳米动力学测量，先完成前面的动力学配液准备。"
+        return "褰撳墠瀹為獙鍥捐氨杩樻病鎺ㄨ繘鍒板搴旂殑 400 绾崇背鍔ㄥ姏瀛︽祴閲忥紝鍏堝畬鎴愬墠闈㈢殑鍔ㄥ姏瀛﹂厤娑插噯澶囥€?
     return _UVVIS_NOT_READY_REPLY
 
 
@@ -7901,6 +8878,35 @@ async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: st
         original_text,
         filtered_text,
     )
+    actual_current_step_id = _get_current_experiment_step_id(conn)
+    if (
+        inferred_step_id == _UVVIS_SHARED_BLANK_STEP_ID
+        and not _uvvis_shared_blank_step_enabled(conn)
+    ):
+        replacement_step_id = (
+            actual_current_step_id
+            if _is_uvvis_step(actual_current_step_id)
+            and actual_current_step_id != _UVVIS_SHARED_BLANK_STEP_ID
+            else _UVVIS_SHARED_DARK_AIR_STEP_ID
+        )
+        conn.logger.bind(tag=TAG).info(
+            "ignoring legacy uvvis shared blank branch for current experiment: "
+            f"inferred_step_id={inferred_step_id}, replacement_step_id={replacement_step_id}"
+        )
+        inferred_step_id = replacement_step_id
+    if _is_uvvis_step(actual_current_step_id) and _is_uvvis_step(inferred_step_id):
+        step_cmp = _compare_experiment_step_order(
+            conn,
+            inferred_step_id,
+            actual_current_step_id,
+        )
+        if step_cmp is not None and step_cmp < 0:
+            conn.logger.bind(tag=TAG).info(
+                "ignoring stale inferred uvvis step behind current graph step: "
+                f"inferred_step_id={inferred_step_id}, current_step_id={actual_current_step_id}"
+            )
+            inferred_step_id = actual_current_step_id
+            step_id = actual_current_step_id
 
     if _looks_like_uvvis_status_query(
         conn,
@@ -7943,10 +8949,10 @@ async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: st
     if step_id == _UVVIS_SHARED_DARK_AIR_STEP_ID:
         return await _handle_uvvis_shared_dark_air_prep(conn, original_text, filtered_text)
 
-    if step_id == _UVVIS_SHARED_BLANK_STEP_ID:
+    if step_id == _UVVIS_SHARED_BLANK_STEP_ID and _uvvis_shared_blank_step_enabled(conn):
         return await _handle_uvvis_shared_blank_prep(conn, original_text, filtered_text, state)
 
-    if step_id in _UVVIS_SAMPLE_RECORD_STEP_IDS:
+    if step_id in {_UVVIS_SAMPLE_RECORD_STEP_ID, _UVVIS_SAMPLE_RECORD_STEP_ID_LEGACY}:
         return await _handle_uvvis_spectra_measurement(conn, original_text, filtered_text)
 
     if step_id in {
@@ -7961,10 +8967,14 @@ async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: st
             step_id,
         )
 
-    if step_id in _UVVIS_SAMPLE_LOAD_STEP_IDS:
-        return await _handle_uvvis_sample_load_completion(conn, original_text, filtered_text)
+    if step_id in {_UVVIS_SAMPLE_LOAD_STEP_ID, _UVVIS_SAMPLE_LOAD_STEP_ID_LEGACY}:
+        return await _handle_uvvis_sample_load_start_scan(
+            conn,
+            original_text,
+            filtered_text,
+        )
 
-    if step_id in _UVVIS_SAMPLE_CLEAN_STEP_IDS:
+    if step_id in {_UVVIS_SAMPLE_CLEAN_STEP_ID, _UVVIS_SAMPLE_CLEAN_STEP_ID_LEGACY}:
         return False
 
     return False
@@ -8188,7 +9198,16 @@ async def handle_experiment_control_fast_intent(
         try:
             reply = await _try_apply_current_confirmation_report(conn, filtered_text)
             if not reply:
-                reply = await _advance_experiment_step_fast(conn, session_id)
+                block_reply = await _load_confirmation_step_writeback_block_reply(
+                    conn, session_id
+                )
+                if block_reply:
+                    conn.logger.bind(tag=TAG).info(
+                        "experiment control fast advance blocked until graph writeback completes"
+                    )
+                    reply = block_reply
+                else:
+                    reply = await _advance_experiment_step_fast(conn, session_id)
         except Exception as exc:
             conn.logger.bind(tag=TAG).warning(
                 f"experiment control fast advance failed: {exc}"
@@ -8261,7 +9280,16 @@ async def handle_experiment_control_strict_graph_intent(
     try:
         reply = await _try_apply_current_confirmation_report(conn, filtered_text)
         if not reply:
-            reply = await _advance_experiment_step_fast(conn, session_id)
+            block_reply = await _load_confirmation_step_writeback_block_reply(
+                conn, session_id
+            )
+            if block_reply:
+                conn.logger.bind(tag=TAG).info(
+                    "experiment control strict graph advance blocked until graph writeback completes"
+                )
+                reply = block_reply
+            else:
+                reply = await _advance_experiment_step_fast(conn, session_id)
     except Exception as exc:
         conn.logger.bind(tag=TAG).warning(
             f"experiment control strict graph advance failed: {exc}"
@@ -8543,8 +9571,23 @@ def _extract_photo_result_meta(payload) -> dict:
     photo_path = str(
         photo_meta.get("mirrored_path")
         or photo_meta.get("local_path")
+        or data.get("saved_photo_path")
         or ""
     ).strip()
+    if not photo_path:
+        nested = _to_plain_data(data.get("result"))
+        if isinstance(nested, dict):
+            photo_path = str(
+                nested.get("saved_photo_path")
+                or nested.get("photo_path")
+                or nested.get("local_path")
+                or ""
+            ).strip()
+    if not file_name and photo_path:
+        try:
+            file_name = Path(photo_path).name
+        except Exception:
+            file_name = str(photo_path).replace("\\", "/").rsplit("/", 1)[-1].strip()
     requested_photo_name = str(
         photo_meta.get("requested_photo_name") or data.get("requested_photo_name") or ""
     ).strip()
@@ -8598,41 +9641,41 @@ def _is_affirmative_short_reply(filtered_text: str) -> bool:
         return False
 
     negative_tokens = (
-        "不可以",
-        "不要",
-        "别拍",
-        "不拍",
-        "先别",
-        "不能拍",
-        "不让拍",
-        "别现在拍",
+        "涓嶅彲浠?,
+        "涓嶈",
+        "鍒媿",
+        "涓嶆媿",
+        "鍏堝埆",
+        "涓嶈兘鎷?,
+        "涓嶈鎷?,
+        "鍒幇鍦ㄦ媿",
     )
     if _contains_any(norm, negative_tokens):
         return False
 
     if norm in {
-        "好",
-        "好的",
-        "好啊",
-        "好呀",
-        "可以",
-        "可以的",
-        "可以拍",
-        "拍吧",
-        "拍",
-        "开始拍",
-        "行",
-        "行的",
-        "行啊",
-        "嗯",
-        "嗯嗯",
-        "是",
-        "对",
-        "没问题",
-        "同意",
-        "允许",
-        "准备好了",
-        "我准备好了",
+        "濂?,
+        "濂界殑",
+        "濂藉晩",
+        "濂藉憖",
+        "鍙互",
+        "鍙互鐨?,
+        "鍙互鎷?,
+        "鎷嶅惂",
+        "鎷?,
+        "寮€濮嬫媿",
+        "琛?,
+        "琛岀殑",
+        "琛屽晩",
+        "鍡?,
+        "鍡棷",
+        "鏄?,
+        "瀵?,
+        "娌￠棶棰?,
+        "鍚屾剰",
+        "鍏佽",
+        "鍑嗗濂戒簡",
+        "鎴戝噯澶囧ソ浜?,
     }:
         return True
 
@@ -8640,46 +9683,46 @@ def _is_affirmative_short_reply(filtered_text: str) -> bool:
         return False
 
     affirmative_tokens = (
-        "可以拍照",
-        "现在可以拍照",
-        "可以拍",
-        "可以拍了",
-        "现在可以拍",
-        "现在可以了",
-        "可以了",
-        "拍照吧",
-        "拍一张吧",
-        "拍一下吧",
-        "直接拍吧",
-        "没问题拍",
-        "同意拍",
+        "鍙互鎷嶇収",
+        "鐜板湪鍙互鎷嶇収",
+        "鍙互鎷?,
+        "鍙互鎷嶄簡",
+        "鐜板湪鍙互鎷?,
+        "鐜板湪鍙互浜?,
+        "鍙互浜?,
+        "鎷嶇収鍚?,
+        "鎷嶄竴寮犲惂",
+        "鎷嶄竴涓嬪惂",
+        "鐩存帴鎷嶅惂",
+        "娌￠棶棰樻媿",
+        "鍚屾剰鎷?,
     )
     if _contains_any(norm, affirmative_tokens):
         return True
 
     affirmative_prefixes = (
-        "好",
-        "好的",
-        "好啊",
-        "好呀",
-        "可以",
-        "可以的",
-        "可以啊",
-        "可以呀",
-        "行",
-        "行的",
-        "行啊",
-        "行呀",
-        "嗯",
-        "嗯嗯",
-        "对",
-        "是",
-        "没问题",
-        "当然可以",
-        "同意",
-        "允许",
-        "准备好了",
-        "我准备好了",
+        "濂?,
+        "濂界殑",
+        "濂藉晩",
+        "濂藉憖",
+        "鍙互",
+        "鍙互鐨?,
+        "鍙互鍟?,
+        "鍙互鍛€",
+        "琛?,
+        "琛岀殑",
+        "琛屽晩",
+        "琛屽憖",
+        "鍡?,
+        "鍡棷",
+        "瀵?,
+        "鏄?,
+        "娌￠棶棰?,
+        "褰撶劧鍙互",
+        "鍚屾剰",
+        "鍏佽",
+        "鍑嗗濂戒簡",
+        "鎴戝噯澶囧ソ浜?,
     )
     return _starts_with_any(norm, affirmative_prefixes)
 
@@ -8687,17 +9730,17 @@ def _is_affirmative_short_reply(filtered_text: str) -> bool:
 def _is_negative_short_reply(filtered_text: str) -> bool:
     norm = _normalize_text_for_match(filtered_text)
     if norm in {
-        "不要",
-        "先别",
-        "别拍",
-        "不拍",
-        "还没准备好",
-        "没准备好",
-        "等等",
-        "等一下",
-        "暂时不要",
-        "不可以",
-        "取消",
+        "涓嶈",
+        "鍏堝埆",
+        "鍒媿",
+        "涓嶆媿",
+        "杩樻病鍑嗗濂?,
+        "娌″噯澶囧ソ",
+        "绛夌瓑",
+        "绛変竴涓?,
+        "鏆傛椂涓嶈",
+        "涓嶅彲浠?,
+        "鍙栨秷",
     }:
         return True
 
@@ -8705,11 +9748,11 @@ def _is_negative_short_reply(filtered_text: str) -> bool:
         return False
 
     negative_tokens = (
-        "不可以拍照",
-        "现在不可以拍照",
-        "还不可以拍照",
-        "还不能拍照",
-        "先别拍照",
+        "涓嶅彲浠ユ媿鐓?,
+        "鐜板湪涓嶅彲浠ユ媿鐓?,
+        "杩樹笉鍙互鎷嶇収",
+        "杩樹笉鑳芥媿鐓?,
+        "鍏堝埆鎷嶇収",
     )
     return _contains_any(norm, negative_tokens)
 
@@ -8731,9 +9774,9 @@ def _extract_sample_photo_name(text: str) -> str:
         return ""
 
     patterns = (
-        r"([0-9]+号样品)",
-        r"(样品[0-9]+)",
-        r"([一二三四五六七八九十]+号样品)",
+        r"([0-9]+鍙锋牱鍝?",
+        r"(鏍峰搧[0-9]+)",
+        r"([涓€浜屼笁鍥涗簲鍏竷鍏節鍗乚+鍙锋牱鍝?",
     )
     for pattern in patterns:
         match = re.search(pattern, src)
@@ -8747,45 +9790,45 @@ def _assistant_is_waiting_for_photo_permission(conn) -> bool:
     if not last_text:
         return False
     photo_tokens = (
-        "拍照",
-        "拍一张",
-        "拍一下",
-        "照一下",
-        "照片",
+        "鎷嶇収",
+        "鎷嶄竴寮?,
+        "鎷嶄竴涓?,
+        "鐓т竴涓?,
+        "鐓х墖",
     )
     if not _contains_any(last_text, photo_tokens):
         return False
 
     explicit_wait_tokens = (
-        "得到肯定答复后再拍",
-        "确认后再拍",
-        "同意后再拍",
-        "回复可以再拍",
+        "寰楀埌鑲畾绛斿鍚庡啀鎷?,
+        "纭鍚庡啀鎷?,
+        "鍚屾剰鍚庡啀鎷?,
+        "鍥炲鍙互鍐嶆媿",
     )
     if _contains_any(last_text, explicit_wait_tokens):
         return True
 
     prompt_tokens = (
-        "可以",
-        "能",
-        "要不要",
-        "要不",
-        "要我",
-        "帮你",
-        "给你",
-        "让我",
-        "是否",
-        "确认",
-        "同意",
+        "鍙互",
+        "鑳?,
+        "瑕佷笉瑕?,
+        "瑕佷笉",
+        "瑕佹垜",
+        "甯綘",
+        "缁欎綘",
+        "璁╂垜",
+        "鏄惁",
+        "纭",
+        "鍚屾剰",
     )
     question_tokens = (
-        "吗",
-        "么",
-        "嘛",
-        "是否",
-        "可不可以",
-        "能不能",
-        "要不要",
+        "鍚?,
+        "涔?,
+        "鍢?,
+        "鏄惁",
+        "鍙笉鍙互",
+        "鑳戒笉鑳?,
+        "瑕佷笉瑕?,
     )
     return _contains_any(last_text, prompt_tokens) and _contains_any(
         last_text, question_tokens
@@ -8798,9 +9841,9 @@ def _build_pending_server_photo_request(conn) -> dict:
     safe_device_id = str(getattr(conn, "device_id", "") or "").strip()
 
     if sample_name:
-        question = f"请拍摄{sample_name}当前状态的照片。"
+        question = f"璇锋媿鎽剓sample_name}褰撳墠鐘舵€佺殑鐓х墖銆?
     else:
-        question = "请拍摄当前样品的照片。"
+        question = "璇锋媿鎽勫綋鍓嶆牱鍝佺殑鐓х墖銆?
 
     request = {
         "device_id": safe_device_id,
@@ -8867,9 +9910,9 @@ def _extract_sample_photo_name_fixed(text: str) -> str:
         return ""
 
     patterns = (
-        r"([0-9]+号样品)",
-        r"(样品[0-9]+)",
-        r"([一二三四五六七八九十百两]+号样品)",
+        r"([0-9]+鍙锋牱鍝?",
+        r"(鏍峰搧[0-9]+)",
+        r"([涓€浜屼笁鍥涗簲鍏竷鍏節鍗佺櫨涓+鍙锋牱鍝?",
     )
     for pattern in patterns:
         match = re.search(pattern, src)
@@ -8881,17 +9924,17 @@ def _extract_sample_photo_name_fixed(text: str) -> str:
 def _looks_like_question_reply_fixed(text: str) -> bool:
     if not text:
         return False
-    if text.endswith(("吗", "么", "呢", "嘛")):
+    if text.endswith(("鍚?, "涔?, "鍛?, "鍢?)):
         return True
     question_tokens = (
-        "可不可以",
-        "能不能",
-        "行不行",
-        "要不要",
-        "是不是",
-        "为什么",
-        "怎么",
-        "如何",
+        "鍙笉鍙互",
+        "鑳戒笉鑳?,
+        "琛屼笉琛?,
+        "瑕佷笉瑕?,
+        "鏄笉鏄?,
+        "涓轰粈涔?,
+        "鎬庝箞",
+        "濡備綍",
     )
     return _contains_any(text, question_tokens)
 
@@ -8902,41 +9945,41 @@ def _is_affirmative_short_reply_fixed(filtered_text: str) -> bool:
         return False
 
     negative_tokens = (
-        "不可以",
-        "不要",
-        "别拍",
-        "不拍",
-        "先别",
-        "不能拍",
-        "不让拍",
-        "别现在拍",
+        "涓嶅彲浠?,
+        "涓嶈",
+        "鍒媿",
+        "涓嶆媿",
+        "鍏堝埆",
+        "涓嶈兘鎷?,
+        "涓嶈鎷?,
+        "鍒幇鍦ㄦ媿",
     )
     if _contains_any(norm, negative_tokens):
         return False
 
     if norm in {
-        "好",
-        "好的",
-        "好啊",
-        "好呀",
-        "可以",
-        "可以的",
-        "可以拍",
-        "拍吧",
-        "拍",
-        "开始拍",
-        "行",
-        "行的",
-        "行啊",
-        "嗯",
-        "嗯嗯",
-        "是",
-        "对",
-        "没问题",
-        "同意",
-        "允许",
-        "准备好了",
-        "我准备好了",
+        "濂?,
+        "濂界殑",
+        "濂藉晩",
+        "濂藉憖",
+        "鍙互",
+        "鍙互鐨?,
+        "鍙互鎷?,
+        "鎷嶅惂",
+        "鎷?,
+        "寮€濮嬫媿",
+        "琛?,
+        "琛岀殑",
+        "琛屽晩",
+        "鍡?,
+        "鍡棷",
+        "鏄?,
+        "瀵?,
+        "娌￠棶棰?,
+        "鍚屾剰",
+        "鍏佽",
+        "鍑嗗濂戒簡",
+        "鎴戝噯澶囧ソ浜?,
     }:
         return True
 
@@ -8944,45 +9987,45 @@ def _is_affirmative_short_reply_fixed(filtered_text: str) -> bool:
         return False
 
     affirmative_tokens = (
-        "可以拍照",
-        "现在可以拍照",
-        "可以拍了",
-        "现在可以拍",
-        "现在可以了",
-        "可以了",
-        "拍照吧",
-        "拍一张吧",
-        "拍一下吧",
-        "直接拍吧",
-        "没问题拍",
-        "同意拍",
+        "鍙互鎷嶇収",
+        "鐜板湪鍙互鎷嶇収",
+        "鍙互鎷嶄簡",
+        "鐜板湪鍙互鎷?,
+        "鐜板湪鍙互浜?,
+        "鍙互浜?,
+        "鎷嶇収鍚?,
+        "鎷嶄竴寮犲惂",
+        "鎷嶄竴涓嬪惂",
+        "鐩存帴鎷嶅惂",
+        "娌￠棶棰樻媿",
+        "鍚屾剰鎷?,
     )
     if _contains_any(norm, affirmative_tokens):
         return True
 
     affirmative_prefixes = (
-        "好",
-        "好的",
-        "好啊",
-        "好呀",
-        "可以",
-        "可以的",
-        "可以呀",
-        "可以喔",
-        "行",
-        "行的",
-        "行啊",
-        "行呀",
-        "嗯",
-        "嗯嗯",
-        "对",
-        "是",
-        "没问题",
-        "当然可以",
-        "同意",
-        "允许",
-        "准备好了",
-        "我准备好了",
+        "濂?,
+        "濂界殑",
+        "濂藉晩",
+        "濂藉憖",
+        "鍙互",
+        "鍙互鐨?,
+        "鍙互鍛€",
+        "鍙互鍠?,
+        "琛?,
+        "琛岀殑",
+        "琛屽晩",
+        "琛屽憖",
+        "鍡?,
+        "鍡棷",
+        "瀵?,
+        "鏄?,
+        "娌￠棶棰?,
+        "褰撶劧鍙互",
+        "鍚屾剰",
+        "鍏佽",
+        "鍑嗗濂戒簡",
+        "鎴戝噯澶囧ソ浜?,
     )
     return _starts_with_any(norm, affirmative_prefixes)
 
@@ -8990,17 +10033,17 @@ def _is_affirmative_short_reply_fixed(filtered_text: str) -> bool:
 def _is_negative_short_reply_fixed(filtered_text: str) -> bool:
     norm = _normalize_text_for_match(filtered_text)
     if norm in {
-        "不要",
-        "先别",
-        "别拍",
-        "不拍",
-        "还没准备好",
-        "没准备好",
-        "等等",
-        "等一下",
-        "暂时不要",
-        "不可以",
-        "取消",
+        "涓嶈",
+        "鍏堝埆",
+        "鍒媿",
+        "涓嶆媿",
+        "杩樻病鍑嗗濂?,
+        "娌″噯澶囧ソ",
+        "绛夌瓑",
+        "绛変竴涓?,
+        "鏆傛椂涓嶈",
+        "涓嶅彲浠?,
+        "鍙栨秷",
     }:
         return True
 
@@ -9008,11 +10051,11 @@ def _is_negative_short_reply_fixed(filtered_text: str) -> bool:
         return False
 
     negative_tokens = (
-        "不可以拍照",
-        "现在不可以拍照",
-        "还不可以拍照",
-        "还不能拍照",
-        "先别拍照",
+        "涓嶅彲浠ユ媿鐓?,
+        "鐜板湪涓嶅彲浠ユ媿鐓?,
+        "杩樹笉鍙互鎷嶇収",
+        "杩樹笉鑳芥媿鐓?,
+        "鍏堝埆鎷嶇収",
     )
     return _contains_any(norm, negative_tokens)
 
@@ -9022,70 +10065,70 @@ def _assistant_is_waiting_for_photo_permission_fixed(conn) -> bool:
     if not last_text:
         return False
 
-    photo_tokens = ("拍照", "拍一张", "拍一下", "照一下", "拍摄", "照片", "拍吧")
+    photo_tokens = ("鎷嶇収", "鎷嶄竴寮?, "鎷嶄竴涓?, "鐓т竴涓?, "鎷嶆憚", "鐓х墖", "鎷嶅惂")
     if not _contains_any(last_text, photo_tokens):
         return False
 
     negative_prompt_tokens = (
-        "不要拍",
-        "别拍",
-        "先别拍",
-        "不可以拍",
-        "不能拍",
-        "还不能拍",
-        "不要拍照",
-        "别拍照",
-        "先别拍照",
-        "不可以拍照",
-        "不能拍照",
-        "还不能拍照",
+        "涓嶈鎷?,
+        "鍒媿",
+        "鍏堝埆鎷?,
+        "涓嶅彲浠ユ媿",
+        "涓嶈兘鎷?,
+        "杩樹笉鑳芥媿",
+        "涓嶈鎷嶇収",
+        "鍒媿鐓?,
+        "鍏堝埆鎷嶇収",
+        "涓嶅彲浠ユ媿鐓?,
+        "涓嶈兘鎷嶇収",
+        "杩樹笉鑳芥媿鐓?,
     )
     if _contains_any(last_text, negative_prompt_tokens):
         return False
 
     explicit_wait_tokens = (
-        "得到肯定答复后再拍",
-        "确认后再拍",
-        "同意后再拍",
-        "回复可以再拍",
-        "允许拍照后再告诉我",
-        "告诉我可以拍照",
-        "等你允许后我再拍",
-        "再说一声拍吧",
-        "说一声拍吧",
-        "再说一遍拍吧",
-        "说一遍拍吧",
-        "再说一声拍照",
-        "说一声拍照",
-        "再说一遍拍照",
-        "说一遍拍照",
-        "拍吧",
-        "拍照吧",
-        "拍一张吧",
-        "拍一下吧",
-        "直接拍吧",
-        "开始拍吧",
+        "寰楀埌鑲畾绛斿鍚庡啀鎷?,
+        "纭鍚庡啀鎷?,
+        "鍚屾剰鍚庡啀鎷?,
+        "鍥炲鍙互鍐嶆媿",
+        "鍏佽鎷嶇収鍚庡啀鍛婅瘔鎴?,
+        "鍛婅瘔鎴戝彲浠ユ媿鐓?,
+        "绛変綘鍏佽鍚庢垜鍐嶆媿",
+        "鍐嶈涓€澹版媿鍚?,
+        "璇翠竴澹版媿鍚?,
+        "鍐嶈涓€閬嶆媿鍚?,
+        "璇翠竴閬嶆媿鍚?,
+        "鍐嶈涓€澹版媿鐓?,
+        "璇翠竴澹版媿鐓?,
+        "鍐嶈涓€閬嶆媿鐓?,
+        "璇翠竴閬嶆媿鐓?,
+        "鎷嶅惂",
+        "鎷嶇収鍚?,
+        "鎷嶄竴寮犲惂",
+        "鎷嶄竴涓嬪惂",
+        "鐩存帴鎷嶅惂",
+        "寮€濮嬫媿鍚?,
     )
     if _contains_any(last_text, explicit_wait_tokens):
         return True
 
-    if "告诉我" in last_text and ("可以拍照" in last_text or "拍吧" in last_text):
+    if "鍛婅瘔鎴? in last_text and ("鍙互鎷嶇収" in last_text or "鎷嶅惂" in last_text):
         return True
 
     prompt_tokens = (
-        "可以",
-        "能",
-        "要不要",
-        "要不",
-        "要我",
-        "帮你",
-        "给你",
-        "让我",
-        "是否",
-        "确认",
-        "同意",
+        "鍙互",
+        "鑳?,
+        "瑕佷笉瑕?,
+        "瑕佷笉",
+        "瑕佹垜",
+        "甯綘",
+        "缁欎綘",
+        "璁╂垜",
+        "鏄惁",
+        "纭",
+        "鍚屾剰",
     )
-    question_tokens = ("吗", "么", "呢", "是否", "可不可以", "能不能", "要不要")
+    question_tokens = ("鍚?, "涔?, "鍛?, "鏄惁", "鍙笉鍙互", "鑳戒笉鑳?, "瑕佷笉瑕?)
     return _contains_any(last_text, prompt_tokens) and _contains_any(
         last_text, question_tokens
     )
@@ -9108,9 +10151,9 @@ def _build_pending_server_photo_request_fixed(conn) -> dict:
     safe_device_id = str(getattr(conn, "device_id", "") or "").strip()
 
     if sample_name:
-        question = f"请拍摄{sample_name}当前状态的照片。"
+        question = f"璇锋媿鎽剓sample_name}褰撳墠鐘舵€佺殑鐓х墖銆?
     else:
-        question = "请拍摄当前样品的照片。"
+        question = "璇锋媿鎽勫綋鍓嶆牱鍝佺殑鐓х墖銆?
 
     request = {
         "device_id": safe_device_id,
@@ -9221,11 +10264,123 @@ async def _fetch_latest_server_photo_meta(conn, device_id: str) -> dict:
     return photo_meta
 
 
+async def _update_completed_photo_record_after_retake(
+    conn,
+    payload,
+    *,
+    requested_arguments: dict | None = None,
+) -> bool:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return False
+
+    inferred_step_id = _infer_photo_confirmation_step_id_from_context(
+        conn,
+        payload,
+        requested_arguments=requested_arguments,
+    )
+    if not inferred_step_id:
+        return False
+
+    try:
+        modifiable_payload, schema_payload = await asyncio.gather(
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_modifiable_records",
+                {"session_id": session_id, "step_id": inferred_step_id},
+                priority="foreground",
+            ),
+            _call_experiment_graph_tool_fast(
+                conn,
+                "get_schema",
+                {"session_id": session_id, "step_id": inferred_step_id},
+                priority="foreground",
+            ),
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"photo retake record lookup failed: step_id={inferred_step_id}, error={exc}"
+        )
+        return False
+
+    modifiable_records = []
+    body = _experiment_result_body(modifiable_payload)
+    if isinstance(body, dict):
+        modifiable_records = list(body.get("records") or [])
+    completed_records = [
+        item
+        for item in modifiable_records
+        if isinstance(item, dict) and str(item.get("source", "") or "").strip() == "completed"
+    ]
+    if not completed_records:
+        conn.logger.bind(tag=TAG).info(
+            f"photo retake record update skipped: no completed record for step_id={inferred_step_id}"
+        )
+        return False
+
+    target_record = completed_records[-1]
+    target_trial_number = target_record.get("trial_number")
+    if not isinstance(target_trial_number, int) or target_trial_number < 1:
+        target_trial_number = None
+
+    schema_by_name = _extract_experiment_schema_view(schema_payload)
+    photo_meta = _extract_photo_result_meta(payload)
+    photo_fields = _build_experiment_photo_writeback_fields(
+        schema_by_name,
+        photo_meta,
+        step_meta={},
+        missing_fields=[],
+    )
+    if not photo_fields:
+        return False
+
+    updated_any = False
+    for field_name, field_value in photo_fields.items():
+        try:
+            result = await _call_experiment_graph_tool_fast(
+                conn,
+                "modify_record",
+                {
+                    "session_id": session_id,
+                    "step_id": inferred_step_id,
+                    "field_name": field_name,
+                    "value": field_value,
+                    "trial_number": target_trial_number,
+                    "target": "completed",
+                    "validate": True,
+                },
+                priority="foreground",
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"photo retake modify_record failed: step_id={inferred_step_id}, field={field_name}, error={exc}"
+            )
+            continue
+
+        if bool(_experiment_result_body(result).get("ok")):
+            updated_any = True
+            continue
+
+        conn.logger.bind(tag=TAG).warning(
+            "photo retake modify_record rejected: "
+            f"step_id={inferred_step_id}, field={field_name}, "
+            f"message={_extract_experiment_result_message(result)}"
+        )
+
+    if updated_any:
+        conn.logger.bind(tag=TAG).info(
+            "photo retake updated completed record to latest photo: "
+            f"step_id={inferred_step_id}, trial_number={target_trial_number or 1}, "
+            f"file_name={photo_meta.get('file_name', '')}"
+        )
+    return updated_any
+
+
 def _is_timeout_like_message(message: str) -> bool:
     normalized = str(message or "").strip().lower()
     if not normalized:
         return False
-    return "timeout" in normalized or "超时" in normalized
+    return "timeout" in normalized or "瓒呮椂" in normalized
 
 
 def _photo_meta_is_new_since_baseline(
@@ -9300,7 +10455,7 @@ async def _recover_server_photo_after_timeout(
 
 
 def _compose_server_photo_timeout_reply() -> str:
-    return "拍照这边超时了，我还没拿到结果。你可以稍后再说一次拍照，或者让我打开最近一张照片。"
+    return "鎷嶇収杩欒竟瓒呮椂浜嗭紝鎴戣繕娌℃嬁鍒扮粨鏋溿€備綘鍙互绋嶅悗鍐嶈涓€娆℃媿鐓э紝鎴栬€呰鎴戞墦寮€鏈€杩戜竴寮犵収鐗囥€?
 
 
 def _update_server_photo_confirmation_state(conn, filtered_text: str) -> None:
@@ -9362,6 +10517,7 @@ async def _execute_server_photo_intent(
     arguments: dict,
     *,
     update_experiment_graph: bool = True,
+    update_completed_photo_record_on_success: bool = False,
 ) -> bool:
     safe_device_id = str((arguments or {}).get("device_id", "") or "").strip()
     if not safe_device_id:
@@ -9461,6 +10617,17 @@ async def _execute_server_photo_intent(
             )
     else:
         local_reply = reply
+        if update_completed_photo_record_on_success:
+            try:
+                await _update_completed_photo_record_after_retake(
+                    conn,
+                    payload,
+                    requested_arguments=call_arguments,
+                )
+            except Exception as exc:
+                conn.logger.bind(tag=TAG).warning(
+                    f"photo retake completed-record update failed: {exc}"
+                )
 
     if hasattr(conn, "enrich_latest_clean_user_utterance_snapshot"):
         try:
@@ -9665,10 +10832,11 @@ async def handle_direct_photo_intent(conn, original_text: str, filtered_text: st
             "device_id": safe_device_id,
             "question": question,
         }
+        is_sample_retake = _is_sample_photo_retake_command(filtered_text)
         if sample_photo_name:
             request["photo_name"] = sample_photo_name
             request["append_timestamp"] = True
-        if _is_sample_photo_retake_command(filtered_text):
+        if is_sample_retake:
             conn.logger.bind(tag=TAG).info(
                 "sample photo retake requested; taking a new timestamped photo without graph rollback"
             )
@@ -9677,6 +10845,9 @@ async def handle_direct_photo_intent(conn, original_text: str, filtered_text: st
             conn,
             request,
             update_experiment_graph=False,
+            update_completed_photo_record_on_success=bool(
+                is_sample_retake and sample_photo_name
+            ),
         )
 
     raw_tool_name = str(
@@ -9693,16 +10864,16 @@ async def handle_direct_photo_intent(conn, original_text: str, filtered_text: st
 
 
 async def process_intent_result(conn, intent_result, original_text):
-    """处理意图识别结果"""
+    """????????"""
     try:
-        # 尝试将结果解析为JSON
+        # ????????JSON
         intent_data = json.loads(intent_result)
 
-        # 检查是否有function_call
+        # ?????function_call
         if "function_call" in intent_data:
-            # 直接从意图识别获取了function_call
+            # ??????????function_call
             conn.logger.bind(tag=TAG).debug(
-                f"检测到function_call格式的意图结果: {intent_data['function_call']['name']}"
+                f"???function_call???????: {intent_data['function_call']['name']}"
             )
             function_name = intent_data["function_call"]["name"]
             if function_name == "continue_chat":
@@ -9711,24 +10882,30 @@ async def process_intent_result(conn, intent_result, original_text):
             if function_name == "result_for_context":
                 await send_stt_message(conn, original_text)
                 conn.client_abort = False
-                
+
                 def process_context_result():
                     conn.dialogue.put(Message(role="user", content=original_text))
-                    
+
                     from core.utils.current_time import get_current_time_info
 
-                    current_time, today_date, today_weekday, lunar_date = get_current_time_info()
-                    
-                    # 构建带上下文的基础提示
-                    context_prompt = f"""当前时间：{current_time}
-                                        今天日期：{today_date} ({today_weekday})
-                                        今天农历：{lunar_date}
+                    (
+                        current_time,
+                        today_date,
+                        today_weekday,
+                        lunar_date,
+                    ) = get_current_time_info()
 
-                                        请根据以上信息回答用户的问题：{original_text}"""
-                    
+                    # ???????????
+                    context_prompt = (
+                        f"?????{current_time}\n"
+                        f"?????{today_date} ({today_weekday})\n"
+                        f"?????{lunar_date}\n\n"
+                        f"???????????????{original_text}"
+                    )
+
                     response = conn.intent.replyResult(context_prompt, original_text)
                     speak_txt(conn, response)
-                
+
                 conn.executor.submit(process_context_result)
                 return True
 
@@ -9737,7 +10914,7 @@ async def process_intent_result(conn, intent_result, original_text):
                 function_args = intent_data["function_call"]["arguments"]
                 if function_args is None:
                     function_args = {}
-            # 确保参数是字符串格式的JSON
+            # ???????????JSON
             if isinstance(function_args, dict):
                 function_args = json.dumps(function_args)
 
@@ -9750,11 +10927,11 @@ async def process_intent_result(conn, intent_result, original_text):
             await send_stt_message(conn, original_text)
             conn.client_abort = False
 
-            # 使用executor执行函数调用和结果处理
+            # ??executor???????????
             def process_function_call():
                 conn.dialogue.put(Message(role="user", content=original_text))
 
-                # 使用统一工具处理器处理所有工具调用
+                # ?????????????????
                 try:
                     result = asyncio.run_coroutine_threadsafe(
                         conn.func_handler.handle_llm_function_call(
@@ -9763,17 +10940,17 @@ async def process_intent_result(conn, intent_result, original_text):
                         conn.loop,
                     ).result()
                 except Exception as e:
-                    conn.logger.bind(tag=TAG).error(f"工具调用失败: {e}")
+                    conn.logger.bind(tag=TAG).error(f"??????: {e}")
                     result = ActionResponse(
                         action=Action.ERROR, result=str(e), response=str(e)
                     )
 
                 if result:
-                    if result.action == Action.RESPONSE:  # 直接回复前端
+                    if result.action == Action.RESPONSE:  # ??????
                         text = result.response
                         if text is not None:
                             speak_txt(conn, text)
-                    elif result.action == Action.REQLLM:  # 调用函数后再请求llm生成回复
+                    elif result.action == Action.REQLLM:  # ????????llm????
                         text = result.result
                         conn.dialogue.put(Message(role="tool", content=text))
                         llm_result = conn.intent.replyResult(text, original_text)
@@ -9789,19 +10966,19 @@ async def process_intent_result(conn, intent_result, original_text):
                             speak_txt(conn, text)
                     elif function_name != "play_music":
                         # For backward compatibility with original code
-                        # 获取当前最新的文本索引
+                        # ???????????
                         text = result.response
                         if text is None:
                             text = result.result
                         if text is not None:
                             speak_txt(conn, text)
 
-            # 将函数执行放在线程池中
+            # ???????????
             conn.executor.submit(process_function_call)
             return True
         return False
     except json.JSONDecodeError as e:
-        conn.logger.bind(tag=TAG).error(f"处理意图结果时出错: {e}")
+        conn.logger.bind(tag=TAG).error(f"?????????: {e}")
         return False
 
 
@@ -9810,7 +10987,7 @@ def speak_txt(conn, text):
     if not text:
         return
 
-    # 记录文本
+    # ????
     conn.tts_MessageText = text
 
     conn.tts.tts_text_queue.put(

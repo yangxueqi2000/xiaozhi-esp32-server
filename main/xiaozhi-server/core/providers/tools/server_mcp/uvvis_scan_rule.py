@@ -235,6 +235,7 @@ class UVVisScanRule:
 
     def prepare_arguments(self, actual_tool_name: str, arguments: Dict[str, Any]) -> None:
         self._inject_uvvis_native_output_dir(actual_tool_name, arguments)
+        self._inject_uvvis_shared_output_dir(actual_tool_name, arguments)
         self._inject_uvvis_scan_output_paths(actual_tool_name, arguments)
         self._inject_saved_uvvis_task_id(actual_tool_name, arguments)
 
@@ -480,12 +481,18 @@ class UVVisScanRule:
         actual_tool_name: str,
         arguments: Dict[str, Any],
     ) -> None:
-        if actual_tool_name not in {"uvvis_measure_spectra", "uvvis_measure_kinetics"}:
+        if actual_tool_name not in {
+            "uvvis_measure_spectra",
+            "uvvis_measure_kinetics",
+            "uvvis_prepare_dark_current",
+        }:
             return
         if pick_text(arguments.get("output_dir")):
             return
 
-        if self._should_use_shared_uvvis_output_dir(actual_tool_name, arguments):
+        if actual_tool_name == "uvvis_prepare_dark_current":
+            target_dir = self._resolve_runtime_device_dir(include_group=False)
+        elif self._should_use_shared_uvvis_output_dir(actual_tool_name, arguments):
             target_dir = self._resolve_uvvis_shared_output_dir()
         else:
             target_dir = self._resolve_runtime_device_dir(include_group=True)
@@ -496,6 +503,25 @@ class UVVisScanRule:
                 f"failed to create uvvis native output dir {target_dir}: {exc}"
             )
         arguments["output_dir"] = str(target_dir)
+
+    def _inject_uvvis_shared_output_dir(
+        self,
+        actual_tool_name: str,
+        arguments: Dict[str, Any],
+    ) -> None:
+        if actual_tool_name != "uvvis_prepare_dark_current":
+            return
+        if pick_text(arguments.get("shared_output_dir")):
+            return
+
+        target_dir = self._resolve_uvvis_shared_output_dir()
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self.conn.logger.warning(
+                f"failed to create uvvis shared output dir {target_dir}: {exc}"
+            )
+        arguments["shared_output_dir"] = str(target_dir)
 
     def _inject_uvvis_scan_output_paths(
         self,

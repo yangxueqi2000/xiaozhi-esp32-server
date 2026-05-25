@@ -713,10 +713,30 @@ def check_emoji(text):
 
 
 def normalize_spoken_text(text):
-    """Deterministic spoken-text normalization: collapse whitespace only."""
+    """Deterministic spoken-text normalization for ASR/TTS shared parsing."""
     if text is None:
         return ""
-    return re.sub(r"\s+", " ", str(text)).strip()
+    normalized = re.sub(r"\s+", " ", str(text)).strip()
+    if not normalized:
+        return ""
+
+    # Lab-term corrections for high-frequency ASR confusions.
+    # Keep this list narrow and domain-specific so we do not over-correct
+    # unrelated user utterances.
+    replacements = {
+        "shen比位": "参比位",
+        "深比位": "参比位",
+        "生比位": "参比位",
+        "申比位": "参比位",
+        "身比位": "参比位",
+        "伸比位": "参比位",
+        "深笔位": "参比位",
+        "参笔位": "参比位",
+        "参北位": "参比位",
+    }
+    for src, dst in replacements.items():
+        normalized = normalized.replace(src, dst)
+    return normalized
 
 
 def _strip_markdown_layout_for_tts(text: str) -> str:
@@ -2253,6 +2273,17 @@ def _looks_like_student_facing_scan_ready_sentence(text: str) -> bool:
     normalized = normalize_spoken_text(text)
     if not normalized:
         return False
+
+    explicit_prompt_tokens = (
+        "等你说“开始扫描”",
+        "等你说开始扫描",
+        "确认后再说“都空了，开始扫描”",
+        "确认后再说都空了，开始扫描",
+        "确认后再说都空了开始扫描",
+        "都空了，开始扫描",
+    )
+    if any(token in normalized for token in explicit_prompt_tokens):
+        return True
 
     direct_ready_tokens = (
         "放好后告诉我可以开始扫描",

@@ -86,7 +86,8 @@
                                                                    "--log-level",
                                                                    "INFO",
                                                                    "--startup-timeout",
-                                                                   "120"
+                                                                   "120",
+                                                                   "--force-restart"
                                                                ],
                                                       "timeout":  120
                                                   },

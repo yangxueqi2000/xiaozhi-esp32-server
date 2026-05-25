@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import yaml
 
 from mcp.types import LoggingMessageNotificationParams
 
@@ -50,6 +51,7 @@ class ServerMCPManager:
                 "MCP config file is missing: data/.mcp_server_settings.json"
             )
         self._acquired = False
+        self._group_storage_support_cache: Optional[tuple[str, bool]] = None
 
     @classmethod
     def _take_shared_clients_snapshot(
@@ -131,6 +133,40 @@ class ServerMCPManager:
             return str(Path(yaml_path).expanduser().resolve())
         except Exception:
             return yaml_path
+
+    def _experiment_supports_group_storage(self) -> bool:
+        yaml_path = self._resolve_experiment_yaml_path()
+        if not yaml_path:
+            return True
+
+        cached = self._group_storage_support_cache
+        if cached and cached[0] == yaml_path:
+            return bool(cached[1])
+
+        supports_group_storage = True
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as handle:
+                config = yaml.safe_load(handle) or {}
+            if isinstance(config, dict) and isinstance(config.get("experiment"), dict):
+                config = config["experiment"]
+            workflow = config.get("workflow") or {}
+            supports_group_storage = bool(workflow.get("group_start_steps"))
+            if not supports_group_storage:
+                for step in config.get("steps") or []:
+                    if not isinstance(step, dict):
+                        continue
+                    record_schema = step.get("record_schema") or {}
+                    if isinstance(record_schema, dict) and "group_number" in record_schema:
+                        supports_group_storage = True
+                        break
+        except Exception as exc:
+            logger.bind(tag=TAG).warning(
+                f"Failed to inspect experiment YAML for group storage support: {exc}"
+            )
+            supports_group_storage = True
+
+        self._group_storage_support_cache = (yaml_path, supports_group_storage)
+        return supports_group_storage
 
     def _inject_runtime_server_overrides(self, mcp_servers: Dict[str, Any]) -> None:
         if not isinstance(mcp_servers, dict):
@@ -400,7 +436,11 @@ class ServerMCPManager:
                 group_number = int(group_number)
             except (TypeError, ValueError):
                 group_number = None
-        if isinstance(group_number, int) and group_number >= 1:
+        if (
+            isinstance(group_number, int)
+            and group_number >= 1
+            and self._experiment_supports_group_storage()
+        ):
             meta["group_number"] = group_number
             meta["current_group_number"] = group_number
             meta["experiment_group_number"] = group_number

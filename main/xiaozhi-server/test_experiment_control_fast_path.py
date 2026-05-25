@@ -4673,6 +4673,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "uvvis_prepare_dark_current",
                     {
                         "session_key": "lease-1",
+                        "output_dir": str(Path("data").resolve() / "uv_data_common" / "94_a9_90_28_ea_58"),
+                        "shared_output_dir": str((Path("data") / "uv_data_common").resolve()),
                     },
                 )
             ],
@@ -4740,6 +4742,8 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     "uvvis_prepare_dark_current",
                     {
                         "session_key": "lease-1",
+                        "output_dir": str(Path("data").resolve() / "uv_data_common" / "94_a9_90_28_ea_58"),
+                        "shared_output_dir": str((Path("data") / "uv_data_common").resolve()),
                     },
                 ),
             ],
@@ -4806,7 +4810,14 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(
             [
-                ("uvvis_prepare_dark_current", {"session_key": "lease-1"}),
+                (
+                    "uvvis_prepare_dark_current",
+                    {
+                        "session_key": "lease-1",
+                        "output_dir": str(Path("data").resolve() / "uv_data_common" / "94_a9_90_28_ea_58"),
+                        "shared_output_dir": str((Path("data") / "uv_data_common").resolve()),
+                    },
+                ),
             ],
             executed,
         )

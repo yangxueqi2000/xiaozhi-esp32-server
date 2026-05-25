@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -13,6 +14,8 @@ from aioconsole import ainput
 from config.logger import setup_logging
 from config.settings import load_config
 from core.http_server import SimpleHttpServer
+from core.providers.tools.server_mcp.mcp_manager import ServerMCPManager
+from core.providers.tools.server_mcp.payload_utils import finalize_server_mcp_payload
 from core.utils.gc_manager import get_gc_manager
 from core.utils.util import (
     check_ffmpeg_installed,
@@ -25,6 +28,8 @@ TAG = __name__
 logger = setup_logging()
 _voiceprint_process = None
 _voiceprint_log_handle = None
+_startup_server_mcp_manager = None
+_startup_uvvis_session_key = ""
 
 
 def _looks_like_placeholder(value: str) -> bool:
@@ -88,6 +93,234 @@ def _voiceprint_health_ok(url: str, timeout: float = 3.0) -> bool:
 def _default_voiceprint_root() -> str:
     github_root = Path(__file__).resolve().parents[2].parent
     return str(github_root / "voiceprint-api")
+
+
+def _resolve_experiment_yaml_path_from_config(config: dict) -> str:
+    llm_map = config.get("LLM", {}) or {}
+    if not isinstance(llm_map, dict):
+        return ""
+
+    selected_name = str(config.get("selected_module", {}).get("LLM", "") or "").strip()
+    llm_cfg = llm_map.get(selected_name)
+    if not isinstance(llm_cfg, dict):
+        for candidate in llm_map.values():
+            if isinstance(candidate, dict) and str(candidate.get("type", "")).strip() == "codex":
+                llm_cfg = candidate
+                break
+    if not isinstance(llm_cfg, dict):
+        return ""
+
+    workspace = str(llm_cfg.get("workspace", "") or "").strip()
+    yaml_path = str(llm_cfg.get("yaml_path", "") or "").strip()
+    if not yaml_path:
+        return ""
+    if os.path.isabs(yaml_path):
+        return str(Path(yaml_path))
+    if workspace:
+        return str(Path(workspace) / yaml_path)
+    return str(Path(yaml_path).resolve())
+
+
+def _should_startup_prewarm_uvvis(config: dict) -> bool:
+    yaml_path = _resolve_experiment_yaml_path_from_config(config).replace("\\", "/").lower()
+    return "exp2_uv_vis_analysis" in yaml_path
+
+
+def _startup_uvvis_log_path() -> Path:
+    return Path(__file__).resolve().parent / "run_logs" / "startup_uvvis_prewarm.log"
+
+
+def _append_startup_uvvis_log(event: str, **fields) -> None:
+    payload = {
+        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "event": str(event or "").strip(),
+    }
+    for key, value in fields.items():
+        if value is None:
+            continue
+        payload[str(key)] = value
+
+    log_path = _startup_uvvis_log_path()
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.bind(tag=TAG).warning(f"failed to append startup uvvis log: {exc}")
+
+
+def _shutdown_uvvis_http_mcp_processes(*, reason: str = "") -> None:
+    script_path = Path(__file__).resolve().parent / "scripts" / "ensure_uvvis_http_mcp.py"
+    if not script_path.exists():
+        return
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--shutdown-only",
+            ],
+            cwd=str(script_path.parent.parent),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        _append_startup_uvvis_log(
+            "shutdown_uvvis_chain",
+            reason=reason or None,
+        )
+    except Exception as exc:
+        _append_startup_uvvis_log(
+            "shutdown_uvvis_chain_failed",
+            reason=reason or None,
+            error=str(exc),
+        )
+        logger.bind(tag=TAG).warning(f"shutdown uvvis chain failed: {exc}")
+
+
+class _StartupMCPContext:
+    def __init__(self, config: dict):
+        self.config = config
+        self.logger = logger
+        self.device_id = ""
+        self.headers = {}
+        self.experiment_yaml_path = _resolve_experiment_yaml_path_from_config(config)
+
+
+async def ensure_startup_uvvis_session(config: dict):
+    global _startup_server_mcp_manager, _startup_uvvis_session_key
+
+    yaml_path = _resolve_experiment_yaml_path_from_config(config)
+    if not _should_startup_prewarm_uvvis(config):
+        _shutdown_uvvis_http_mcp_processes(reason="non_exp2_startup")
+        _append_startup_uvvis_log(
+            "startup_skip_non_exp2",
+            yaml_path=yaml_path,
+        )
+        return None
+    if _startup_server_mcp_manager is not None and _startup_uvvis_session_key:
+        _append_startup_uvvis_log(
+            "startup_already_active",
+            yaml_path=yaml_path,
+            session_key=_startup_uvvis_session_key,
+        )
+        logger.bind(tag=TAG).info(
+            f"startup uvvis prewarm already active, session_key={_startup_uvvis_session_key}"
+        )
+        return _startup_server_mcp_manager
+
+    _append_startup_uvvis_log(
+        "startup_begin",
+        yaml_path=yaml_path,
+    )
+    _shutdown_uvvis_http_mcp_processes(reason="exp2_startup_force_reconnect")
+    ctx = _StartupMCPContext(config)
+    manager = ServerMCPManager(ctx)
+    try:
+        await manager.initialize_servers()
+    except Exception as exc:
+        _append_startup_uvvis_log(
+            "startup_initialize_servers_failed",
+            yaml_path=yaml_path,
+            error=str(exc),
+        )
+        raise
+
+    ready = await manager.ensure_client_initialized("uvvis")
+    if not ready or not manager.is_mcp_tool("uvvis_session"):
+        _append_startup_uvvis_log(
+            "startup_tool_not_ready",
+            yaml_path=yaml_path,
+            ready=ready,
+            has_uvvis_session_tool=manager.is_mcp_tool("uvvis_session"),
+        )
+        logger.bind(tag=TAG).warning("startup uvvis prewarm skipped: uvvis_session tool not ready")
+        await manager.cleanup_all()
+        return None
+
+    _append_startup_uvvis_log(
+        "startup_acquire_begin",
+        yaml_path=yaml_path,
+    )
+    raw_result = await manager.execute_tool(
+        "uvvis_session",
+        {"action": "acquire"},
+        priority="startup",
+    )
+    payload = finalize_server_mcp_payload(
+        raw_result,
+        tool_name="uvvis_session",
+        arguments={"action": "acquire"},
+    )
+    body = payload.get("result") if isinstance(payload, dict) and isinstance(payload.get("result"), dict) else payload
+    session_key = ""
+    if isinstance(body, dict):
+        session_key = str(body.get("session_key", "") or payload.get("session_key", "") or "").strip()
+    if not session_key:
+        message = ""
+        if isinstance(body, dict):
+            message = str(body.get("message", "") or payload.get("message", "") or "").strip()
+        _append_startup_uvvis_log(
+            "startup_acquire_no_session_key",
+            yaml_path=yaml_path,
+            message=message or "unknown",
+            payload=payload,
+        )
+        logger.bind(tag=TAG).warning(
+            f"startup uvvis prewarm acquire returned no session_key: {message or 'unknown'}"
+        )
+        await manager.cleanup_all()
+        return None
+
+    _startup_server_mcp_manager = manager
+    _startup_uvvis_session_key = session_key
+    _append_startup_uvvis_log(
+        "startup_acquire_ok",
+        yaml_path=yaml_path,
+        session_key=session_key,
+        payload=payload,
+    )
+    logger.bind(tag=TAG).info(
+        f"startup uvvis prewarm acquired session_key={session_key}"
+    )
+    return manager
+
+
+async def stop_startup_uvvis_session():
+    global _startup_server_mcp_manager, _startup_uvvis_session_key
+
+    manager = _startup_server_mcp_manager
+    session_key = str(_startup_uvvis_session_key or "").strip()
+    _startup_server_mcp_manager = None
+    _startup_uvvis_session_key = ""
+    if manager is None:
+        return
+
+    try:
+        if session_key and manager.is_mcp_tool("uvvis_session"):
+            _append_startup_uvvis_log(
+                "shutdown_release_begin",
+                session_key=session_key,
+            )
+            await manager.execute_tool(
+                "uvvis_session",
+                {"action": "release", "session_key": session_key},
+                priority="background_common",
+            )
+            _append_startup_uvvis_log(
+                "shutdown_release_ok",
+                session_key=session_key,
+            )
+    except Exception as exc:
+        _append_startup_uvvis_log(
+            "shutdown_release_failed",
+            session_key=session_key,
+            error=str(exc),
+        )
+        logger.bind(tag=TAG).warning(f"startup uvvis prewarm release failed: {exc}")
+    finally:
+        await manager.cleanup_all()
 
 
 async def ensure_voiceprint_service(config: dict):
@@ -201,6 +434,7 @@ async def main():
     check_ffmpeg_installed()
     config = load_config()
     await ensure_voiceprint_service(config)
+    await ensure_startup_uvvis_session(config)
 
     auth_key = config["server"].get("auth_key", "")
     if _looks_like_placeholder(auth_key):
@@ -285,6 +519,7 @@ async def main():
     except asyncio.CancelledError:
         print("任务被取消，正在清理资源...")
     finally:
+        await stop_startup_uvvis_session()
         await stop_managed_voiceprint_service()
         await gc_manager.stop()
 

@@ -158,6 +158,23 @@ class UVVisScanRuleTest(unittest.IsolatedAsyncioTestCase):
         expected = str((Path(tmp_dir).resolve() / "94_a9_90_28_ea_58").resolve())
         self.assertEqual(expected, arguments["output_dir"])
 
+    def test_prepare_arguments_injects_dark_current_shared_and_device_dirs(self):
+        conn = _FakeConn()
+        rule = UVVisScanRule(conn, lambda: None)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conn.config = {"uvvis_scan_output_root": tmp_dir}
+            arguments = {"session_key": "lease-1"}
+
+            rule.prepare_arguments("uvvis_prepare_dark_current", arguments)
+
+        root = Path(tmp_dir).resolve()
+        self.assertEqual(str(root), arguments["shared_output_dir"])
+        self.assertEqual(
+            str((root / "94_a9_90_28_ea_58").resolve()),
+            arguments["output_dir"],
+        )
+
     def test_before_execute_requires_scan_task_context(self):
         conn = _FakeConn()
         rule = UVVisScanRule(conn, lambda: None)

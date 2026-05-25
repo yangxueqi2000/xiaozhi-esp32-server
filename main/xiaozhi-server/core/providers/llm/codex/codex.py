@@ -240,6 +240,17 @@ _EXP2_KINETICS_ACTION_PHRASES = (
     "\u653e\u597d\u4e86",
     "\u505a\u597d\u4e86",
 )
+_EXP2_KINETICS_STALE_HISTORY_TRIGGER_PHRASES = (
+    "\u5f00\u59cb",
+    "\u5f00\u59cb\u626b\u63cf",
+    "\u626b\u63cf",
+    "\u5f00\u59cb\u6d4b\u91cf",
+    "\u6d4b\u91cf",
+    "\u8fdb\u884c",
+    "\u52a8\u529b\u5b66",
+    "\u52a8\u529b\u5b66\u6d4b\u91cf",
+    "\u52a8\u529b\u5b66\u626b\u63cf",
+)
 _EXP2_NEXT_GROUP_PHRASES = (
     "\u4e0b\u4e00\u7ec4",
     "\u7ee7\u7eed\u4e0b\u4e00\u7ec4",
@@ -958,6 +969,8 @@ def _exp2_spectra_scan_prompt_block(
         "High priority exp2 UV-Vis spectra hot path:\n"
         "- The latest student message authorizes the batch UV-Vis spectra scan for real samples.\n"
         "- This is a max-absorbance / UV-Vis spectra scan, not a kinetics measurement. Do not mention kinetics placement and do not call uvvis_grouped_kinetics_start or uvvis_measure_kinetics.\n"
+        "- Exp2 is the only experiment in this system that uses student group numbers. Never ask for or use group numbers in exp1 or other non-group experiments.\n"
+        "- Before starting a repeatable exp2 spectra step for a student group, the student must explicitly report their group number in the current turn, such as '第一组开始扫描' or '这是第二组'. If the latest message does not make the group number explicit, ask only: '这是第几组的样品扫描？' Do not start the scan yet.\n"
         "- If the trusted current_step_id is step_3_uv_vis_sample1-4_load_cuvette, first write the load confirmation to experiment-graph: start_trial if needed, add all_samples_loaded_into_cuvettes=true, all_cuvettes_ready_for_measurement=true, native_reference_water_loaded=true, finish_trial(validate=true), then proceed_to_next_step. Only after proceed_to_next_step returns the record-data step may you start the spectra scan.\n"
         "- If the trusted current_step_id is already step_3_uv_vis_sample1-4_record_data, do not ask the student to report peaks manually; start the spectra scan now.\n"
         "- Do not answer a sample's lambda_max or max absorbance from older group records while the current group has not just completed uvvis_measure_spectra. If the student asks for a peak before the current scan result exists, say the current group has not been scanned yet and ask them to say '开始扫描'.\n"
@@ -1015,8 +1028,9 @@ def _exp2_recent_kinetics_scan_prompt_block(
             "High priority exp2 local context:\n"
             "- The latest student message explicitly declares that the current real-world step is the kinetics measurement.\n"
             "- Trust this explicit recovery cue over stale conversation history or missing graph state.\n"
+            "- Exp2 is the only experiment in this system that uses student group numbers. Never ask for or use group numbers in exp1 or other non-group experiments.\n"
             "- Do not route back to shared dark-current/air-baseline prep and do not ask for all 1-5 positions to be empty.\n"
-            "- Before asking placement or starting uvvis_grouped_kinetics_start, make sure the current student group number is explicit. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
+            "- Before asking placement or starting uvvis_grouped_kinetics_start, the student must explicitly report the group number for this kinetics run in the current turn. If the latest/recent student message does not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
             "- If the student has not just confirmed placement, ask only for the kinetics placement confirmation: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
             "- If the student says start/ready after that confirmation, call uvvis_grouped_kinetics_start, tell the student the long kinetics measurement has started and data are being recorded, then use uvvis_grouped_kinetics_status/result on later turns instead of calling the blocking uvvis_measure_kinetics tool."
         )
@@ -1054,7 +1068,7 @@ def _exp2_recent_kinetics_scan_prompt_block(
         "- The recent conversation was about the kinetics measurement setup, not the shared dark-current/air-baseline prep.\n"
         "- Interpret the latest start/ready message as authorization to continue the current kinetics measurement flow.\n"
         "- Do not ask for 1-5 sample positions to be empty, do not call shared dark-current prep, and do not say shared dark current or air baseline is complete.\n"
-        "- Before starting uvvis_grouped_kinetics_start, make sure the current student group number is explicit. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
+        "- Before starting uvvis_grouped_kinetics_start, the student must explicitly report the group number for this kinetics run in the current turn. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
         "- Use the current kinetics placement: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
         "- If all placements were just confirmed, call uvvis_grouped_kinetics_start and do not call the blocking uvvis_measure_kinetics tool."
     )
@@ -1302,7 +1316,7 @@ def _is_exp2_kinetics_guard_turn(
 
     if (
         _text_contains_any(user_text, _EXP2_UVVIS_PREP_START_PHRASES)
-        or _text_contains_any(user_text, _EXP2_KINETICS_ACTION_PHRASES)
+        or _text_contains_any(user_text, _EXP2_KINETICS_STALE_HISTORY_TRIGGER_PHRASES)
     ) and _recent_history_mentions_exp2_kinetics_placement(history):
         return True
 
@@ -2073,6 +2087,180 @@ def _looks_like_experiment_record_or_flow_turn(user_text: str) -> bool:
     return any(marker in compact for marker in markers)
 
 
+_GRAPH_PROGRESSION_TOOLS = frozenset(
+    {
+        "proceed_to_next_step",
+        "redirect_to_step",
+        "redo_trial",
+    }
+)
+
+
+def _safe_json_load_dict(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if not isinstance(raw, str):
+        return {}
+    text = raw.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _normalize_guard_text(text: str) -> str:
+    value = _normalize_whitespace(text).lower()
+    value = re.sub(r"[，。；：、,.!?！？()\[\]{}\"'“”‘’]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _collect_step_guard_phrases(*texts: str) -> List[str]:
+    phrases: List[str] = []
+    seen = set()
+    for raw_text in texts:
+        normalized = _normalize_guard_text(raw_text)
+        if not normalized:
+            continue
+        candidates = [normalized]
+        candidates.extend(
+            segment.strip()
+            for segment in re.split(r"[，。；：、\n]+", raw_text)
+            if segment and segment.strip()
+        )
+        candidates.extend(re.findall(r"[A-Za-z0-9+\-]+", raw_text))
+        candidates.extend(re.findall(r"[\u4e00-\u9fff]{2,12}", raw_text))
+        for item in candidates:
+            phrase = _normalize_guard_text(item)
+            if len(phrase) < 2 or phrase in seen:
+                continue
+            seen.add(phrase)
+            phrases.append(phrase)
+    phrases.sort(key=len, reverse=True)
+    return phrases
+
+
+def _step_guard_match_score(text: str, phrases: List[str]) -> int:
+    normalized = _normalize_guard_text(text)
+    if not normalized:
+        return 0
+    score = 0
+    for phrase in phrases:
+        if phrase and phrase in normalized:
+            score += 1
+    return score
+
+
+def _extract_experiment_guard_step_texts(
+    experiment_context: Dict[str, str],
+) -> Tuple[str, str, str, str]:
+    current_payload = _safe_json_load_dict(
+        experiment_context.get("experiment_current_step_summary", "")
+    )
+    list_payload = _safe_json_load_dict(
+        experiment_context.get("experiment_list_steps_summary", "")
+    )
+
+    step_payload = current_payload.get("step") if isinstance(current_payload, dict) else {}
+    if not isinstance(step_payload, dict):
+        step_payload = {}
+    current_details = (
+        current_payload.get("current_step_details")
+        if isinstance(current_payload, dict)
+        else {}
+    )
+    if not isinstance(current_details, dict):
+        current_details = {}
+
+    current_step_id = _norm_str(
+        experiment_context.get("experiment_current_step_id", "")
+        or step_payload.get("id", "")
+        or step_payload.get("step_id", "")
+    )
+    current_title = _norm_str(
+        current_details.get("title", "")
+        or step_payload.get("title", "")
+    )
+    current_instruction = _norm_str(
+        current_details.get("instruction", "")
+        or current_details.get("description", "")
+        or step_payload.get("description", "")
+    )
+
+    next_step_id = ""
+    next_steps = step_payload.get("next_steps")
+    if isinstance(next_steps, list) and next_steps:
+        next_step_id = _norm_str(next_steps[0])
+
+    next_title = ""
+    next_instruction = ""
+    for item in list_payload.get("steps", []) if isinstance(list_payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        if _norm_str(item.get("id", "")) != next_step_id:
+            continue
+        next_title = _norm_str(item.get("title", ""))
+        next_instruction = _norm_str(item.get("description", ""))
+        break
+
+    return current_step_id, current_title, current_instruction, " ".join(
+        part for part in (next_title, next_instruction) if part
+    ).strip()
+
+
+def _is_generic_experiment_graph_guard_turn(
+    user_text: str,
+    experiment_context: Dict[str, str],
+) -> bool:
+    if not experiment_context:
+        return False
+    if not _looks_like_experiment_record_or_flow_turn(user_text):
+        return False
+    current_step_id = _norm_str(experiment_context.get("experiment_current_step_id", ""))
+    return bool(current_step_id)
+
+
+def _finalize_generic_experiment_graph_guard_text(
+    *,
+    user_text: str,
+    assistant_text: str,
+    called_tools: List[str],
+    experiment_context: Dict[str, str],
+) -> str:
+    if not assistant_text:
+        return assistant_text
+    if not _looks_like_experiment_record_or_flow_turn(user_text):
+        return assistant_text
+    if any(tool in _GRAPH_PROGRESSION_TOOLS for tool in called_tools):
+        return assistant_text
+
+    current_step_id, current_title, current_instruction, next_step_text = (
+        _extract_experiment_guard_step_texts(experiment_context)
+    )
+    if not current_step_id or not next_step_text:
+        return assistant_text
+
+    next_score = _step_guard_match_score(
+        assistant_text,
+        _collect_step_guard_phrases(next_step_text),
+    )
+    current_score = _step_guard_match_score(
+        assistant_text,
+        _collect_step_guard_phrases(current_title, current_instruction, current_step_id),
+    )
+    if next_score < 2 or next_score <= current_score:
+        return assistant_text
+
+    current_label = current_title or current_step_id or "当前步骤"
+    return (
+        f"我这边还没有把实验图谱从“{current_label}”推进成功，先停在当前步骤。"
+        "请再说一次这一步已经完成，我补上记录后继续下一步。"
+    )
+
+
 def _classify_timeout_first_turn_template(user_text: str) -> str:
     text = _normalize_whitespace(user_text)
     if not text:
@@ -2631,7 +2819,7 @@ def _experiment_prompt_block(
             "Experiment graph alignment guard:\n"
             f"- Treat trusted current_step_id={current_step_id} as the only safe step anchor until this turn's tool calls prove a change.\n"
             "- Do not verbally move the student to a later experiment step unless the current turn actually called experiment_graph state/flow tools and their results support that move.\n"
-            "- When the student reports completion, observations, colors, timings, photos, or scan results for the current step, update experiment_graph records first, then narrate the next step.\n"
+            "- When the student reports completion, observations, colors, timings, photos, or scan results for the current step, make this same turn's experiment_graph writes and step transition truthful before the final student-facing reply finishes. You may internally draft the next step while tools run, but the final spoken answer must match the graph state reached on this turn.\n"
             "- Do not narrate backend bookkeeping such as '我先记下…', '我接着确认记录项…', or '我把这一步写回图谱…'; either give the next student-facing instruction or ask only for the still-missing field.\n"
             "- If you have not called get_step, get_state, get_progress_summary, get_current_progress, start_trial, add_field, add_fields, finish_trial, can_proceed, proceed_to_next_step, redirect_to_step, redo_trial, or modify_record on this turn, stay anchored to the trusted current step instead of improvising later steps from old dialogue, prefetched summaries, or memory."
         )
@@ -2648,10 +2836,10 @@ def _experiment_prompt_block(
             parts.append(
                 "Current-turn experiment_graph write barrier:\n"
                 "- The latest user message looks like a completion report, observation, measurement result, correction, or flow-control request for the active experiment.\n"
-                "- Do not decide, draft, or announce the next physical action from memory or YAML order alone. First make experiment-graph the source of truth for the transition.\n"
-                "- Before your final student-facing answer, call the connected experiment-graph MCP tools needed to make the graph truthful: get_state/get_current_progress if the active step may be stale, start_trial if no active trial exists, add_field/add_fields for the confirmed facts, finish_trial(validate=true) when required fields are complete, and proceed_to_next_step when you are about to give the next step. You may call can_proceed first, but proceed_to_next_step itself is the required transition gate and must return ok=true before you speak the next step.\n"
+                "- Do not decide or announce the next physical action from memory or YAML order alone. Make experiment-graph the source of truth for the transition on this same turn.\n"
+                "- Before your final student-facing answer finishes, call the connected experiment-graph MCP tools needed to make the graph truthful: get_state/get_current_progress if the active step may be stale, start_trial if no active trial exists, add_field/add_fields for the confirmed facts, finish_trial(validate=true) when required fields are complete, and proceed_to_next_step when you are about to give the next step. You may call can_proceed first, but proceed_to_next_step itself is the required transition gate and must return ok=true before the final answer mentions the next physical action.\n"
                 "- Hot path: when add_field/add_fields returns ok=true and missing_fields is empty, immediately call finish_trial(validate=true). When finish_trial returns ok=true and you plan to give the next physical action, immediately call proceed_to_next_step. Do not insert extra schema/reference reads or long reasoning between these calls.\n"
-                "- Confirmation-step completion rule: when the active step's interaction.fast_path_mode is confirmation_step, or its capabilities/tags include step_confirmation/confirmation_step, and the student says a short completion report such as '做好了', '完成了', '做完了', '已经做好了', '已经加好了', '已经混匀了', or '已经混匀好了', treat that as confirmation of the current step's required boolean action fields unless the message contains a negative/uncertain phrase. For this case, call start_trial if needed, add_fields with all required boolean fields set to true, finish_trial(validate=true), and proceed_to_next_step before speaking. Do not ask the student to repeat the same step using more specific wording.\n"
+                "- Confirmation-step completion rule: when the active step's interaction.fast_path_mode is confirmation_step, or its capabilities/tags include step_confirmation/confirmation_step, and the student says a short completion report such as '做好了', '完成了', '做完了', '已经做好了', '已经加好了', '已经混匀了', or '已经混匀好了', treat that as confirmation of the current step's required boolean action fields unless the message contains a negative/uncertain phrase. For this case, call start_trial if needed, add_fields with all required boolean fields set to true, finish_trial(validate=true), and proceed_to_next_step within this same turn before the final answer names the next step. Do not ask the student to repeat the same step using more specific wording.\n"
                 "- Always copy the full exact experiment_session_id into experiment-graph calls. A session_id containing '...' or '…' is invalid; replace it with the latest full session id before retrying.\n"
                 "- If a graph write, finish, proceed, redirect, or export tool returns ok=false or a session_id-not-found error, retry once with the latest full exact session id. If it still fails, do not claim the record, photo, step transition, group transition, or export succeeded.\n"
                 "- Only pass group_number to photo/export/UV tools when the experiment YAML explicitly has group_number fields or workflow.group_start_steps. In non-group experiments, current_group_number=1 is bookkeeping only and must not be used for storage.\n"
@@ -2662,7 +2850,7 @@ def _experiment_prompt_block(
                 "- If the latest student message explicitly authorizes taking a photo and the current graph step is a required photo-confirmation step, you must call xiaozhi_take_photo on this turn. Do not ask the student to take the photo manually, do not say '拍完告诉我', and do not move on until the tool succeeds and the graph record is updated.\n"
                 "- If the current step requires a photo and the student has granted permission, call the connected xiaozhi_take_photo tool before claiming the photo exists; then write the returned photo result into the graph before moving on.\n"
                 "- Prefer add_fields with native JSON booleans/numbers for obvious current-step confirmations; do not write boolean facts as strings such as \"true\" unless the schema requires a string.\n"
-                "- Only after proceed_to_next_step returns ok=true may you use its returned current_step_id/current step message to decide and speak the next physical action.\n"
+                "- Only after proceed_to_next_step returns ok=true may the final student-facing answer include the next physical action. Within the same turn, your final spoken reply and the graph state must agree.\n"
                 "- If proceed_to_next_step fails, or if no proceed_to_next_step result was obtained on this turn, do not give the next step; remain on the current graph step and ask only for the missing action-level detail.\n"
                 "- A final answer that says the step is complete, gives the next physical action, enters the next group, or ends/exports the experiment without those successful MCP calls and returned graph state is invalid.\n"
                 "- If a required field is missing or a graph tool rejects the write/advance, do not give the next step; ask only for the missing action-level detail."
@@ -3613,6 +3801,14 @@ class _CodexSession:
             exp2_uvvis_prep_guard_active or exp2_uvvis_spectra_guard_active
         )
         exp2_guard_active = exp2_uvvis_guard_active or exp2_kinetics_guard_active
+        generic_experiment_graph_guard_active = (
+            not exp2_guard_active
+            and _is_generic_experiment_graph_guard_turn(
+                user_text,
+                kwargs.get("experiment_context", {}) or {},
+            )
+        )
+        assistant_guard_active = exp2_guard_active or generic_experiment_graph_guard_active
         exp2_guard_started_at = time.time()
         agent_pending_text = ""
         agent_internal_leak_suppressed = False
@@ -3630,7 +3826,7 @@ class _CodexSession:
             nonlocal out_buffer, guarded_text_buffer
             if not text:
                 return []
-            if exp2_guard_active:
+            if assistant_guard_active:
                 guarded_text_buffer += text
                 return []
             out_buffer += text
@@ -3834,6 +4030,20 @@ class _CodexSession:
                 if guarded_reply != guarded_text_buffer and self.log_stream:
                     file_append(
                         f"\n[{_ts()}] [FILTERED_EXP2_KINETICS_STEP_REGRESSION] "
+                        f"tools={','.join(mcp_tools_called) or '-'}\n"
+                    )
+                for visible_delta in emit_final_agent_text(guarded_reply):
+                    yield visible_delta
+            elif generic_experiment_graph_guard_active:
+                guarded_reply = _finalize_generic_experiment_graph_guard_text(
+                    user_text=user_text or "",
+                    assistant_text=guarded_text_buffer,
+                    called_tools=mcp_tools_called,
+                    experiment_context=kwargs.get("experiment_context", {}) or {},
+                )
+                if guarded_reply != guarded_text_buffer and self.log_stream:
+                    file_append(
+                        f"\n[{_ts()}] [FILTERED_UNVERIFIED_EXPERIMENT_STEP_ADVANCE] "
                         f"tools={','.join(mcp_tools_called) or '-'}\n"
                     )
                 for visible_delta in emit_final_agent_text(guarded_reply):

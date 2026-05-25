@@ -36,6 +36,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--startup-timeout", type=float, default=DEFAULT_STARTUP_TIMEOUT)
     parser.add_argument(
+        "--force-restart",
+        action="store_true",
+        help="Kill the existing UV-Vis HTTP/MCP processes before readiness checks.",
+    )
+    parser.add_argument(
+        "--shutdown-only",
+        action="store_true",
+        help="Stop the existing UV-Vis HTTP/MCP processes and exit without starting a new one.",
+    )
+    parser.add_argument(
         "--log-file",
         default="",
         help="Optional wrapper log file. Defaults to <uvvis-root>/data/uvvis_http_mcp.log",
@@ -191,12 +201,20 @@ def _normalized_command_line(command_line: str) -> str:
     return " ".join(str(command_line or "").lower().split())
 
 
-def _is_conflicting_uvvis_process(row: dict[str, Any], *, desired_mcp_port: int) -> bool:
+def _is_conflicting_uvvis_process(
+    row: dict[str, Any], *, desired_mcp_port: int, force_restart: bool = False
+) -> bool:
     command_line = _normalized_command_line(row.get("command_line", ""))
+    if "spectrometer_server.py" in command_line:
+        return force_restart
     if "uvvis_http_wrapper.py" in command_line:
+        if force_restart:
+            return True
         return "--transport stdio" in command_line
     if "uvvis_mcp_server.py" not in command_line:
         return False
+    if force_restart:
+        return True
     if "--transport stdio" in command_line:
         return True
     if "--transport streamable-http" in command_line:
@@ -222,7 +240,7 @@ def _terminate_process_tree(pid: int) -> None:
         return
 
 
-def _cleanup_conflicting_uvvis_processes(*, desired_mcp_port: int) -> None:
+def _cleanup_conflicting_uvvis_processes(*, desired_mcp_port: int, force_restart: bool = False) -> None:
     for row in _load_process_rows():
         try:
             pid = int(row.get("pid", 0))
@@ -230,7 +248,11 @@ def _cleanup_conflicting_uvvis_processes(*, desired_mcp_port: int) -> None:
             continue
         if pid == os.getpid():
             continue
-        if not _is_conflicting_uvvis_process(row, desired_mcp_port=desired_mcp_port):
+        if not _is_conflicting_uvvis_process(
+            row,
+            desired_mcp_port=desired_mcp_port,
+            force_restart=force_restart,
+        ):
             continue
         _terminate_process_tree(pid)
 
@@ -302,13 +324,29 @@ def main() -> int:
         else (uvvis_root / "data" / "uvvis_http_mcp.log").resolve()
     )
 
-    if _http_endpoint_ready(args.mcp_url):
+    if args.shutdown_only:
+        _cleanup_conflicting_uvvis_processes(
+            desired_mcp_port=args.mcp_port,
+            force_restart=True,
+        )
         return 0
 
-    _cleanup_conflicting_uvvis_processes(desired_mcp_port=args.mcp_port)
+    if _http_endpoint_ready(args.mcp_url):
+        if not args.force_restart:
+            return 0
+
+    _cleanup_conflicting_uvvis_processes(
+        desired_mcp_port=args.mcp_port,
+        force_restart=args.force_restart,
+    )
 
     if _http_endpoint_ready(args.mcp_url):
-        return 0
+        if not args.force_restart:
+            return 0
+        _cleanup_conflicting_uvvis_processes(
+            desired_mcp_port=args.mcp_port,
+            force_restart=True,
+        )
 
     _start_http_wrapper(
         python_executable=args.python,

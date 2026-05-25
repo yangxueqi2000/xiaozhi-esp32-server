@@ -6,6 +6,7 @@ import subprocess
 import uuid
 import asyncio
 import time
+import yaml
 from aiohttp import web
 
 from core.api.base_handler import BaseHandler
@@ -30,6 +31,7 @@ class DeviceMCPHandler(BaseHandler):
         os.makedirs(self.preview_dir, exist_ok=True)
         self._mcp_refresh_lock = asyncio.Lock()
         self._recent_take_photo_by_utterance = {}
+        self._group_storage_support_cache = None
 
     def _project_root(self) -> str:
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -176,6 +178,86 @@ class DeviceMCPHandler(BaseHandler):
             if exp_root:
                 return os.path.abspath(os.path.join(exp_root, "data"))
         return ""
+
+    def _resolve_experiment_yaml_path(self) -> str:
+        cfg = self.config or {}
+        llm_map = cfg.get("LLM") or {}
+        selected = str((cfg.get("selected_module") or {}).get("LLM", "")).strip()
+        candidates = []
+
+        if isinstance(llm_map, dict):
+            if selected:
+                selected_cfg = llm_map.get(selected) or {}
+                if isinstance(selected_cfg, dict):
+                    candidates.append(
+                        (
+                            str(selected_cfg.get("workspace", "")).strip(),
+                            str(selected_cfg.get("yaml_path", "")).strip(),
+                        )
+                    )
+            for llm_cfg in llm_map.values():
+                if not isinstance(llm_cfg, dict):
+                    continue
+                candidates.append(
+                    (
+                        str(llm_cfg.get("workspace", "")).strip(),
+                        str(llm_cfg.get("yaml_path", "")).strip(),
+                    )
+                )
+
+        server_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
+        for workspace, path_text in candidates:
+            if not path_text:
+                continue
+            if os.path.isabs(path_text):
+                return os.path.abspath(path_text)
+            base = workspace if workspace else server_root
+            return os.path.abspath(os.path.join(base, path_text))
+        return ""
+
+    def _experiment_supports_group_storage(self) -> bool:
+        yaml_path = self._resolve_experiment_yaml_path()
+        if not yaml_path:
+            return True
+
+        cached = self._group_storage_support_cache
+        if cached and cached[0] == yaml_path:
+            return bool(cached[1])
+
+        supports_group_storage = True
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as handle:
+                config = yaml.safe_load(handle) or {}
+            if isinstance(config, dict) and isinstance(config.get("experiment"), dict):
+                config = config["experiment"]
+            workflow = config.get("workflow") or {}
+            supports_group_storage = bool(workflow.get("group_start_steps"))
+            if not supports_group_storage:
+                for step in config.get("steps") or []:
+                    if not isinstance(step, dict):
+                        continue
+                    record_schema = step.get("record_schema") or {}
+                    if isinstance(record_schema, dict) and "group_number" in record_schema:
+                        supports_group_storage = True
+                        break
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"failed to inspect experiment YAML for group storage support: {exc}"
+            )
+            supports_group_storage = True
+
+        self._group_storage_support_cache = (yaml_path, supports_group_storage)
+        return supports_group_storage
+
+    def _effective_group_number(self, value):
+        group_number = self._normalize_group_number(value)
+        if group_number is None:
+            return None
+        if not self._experiment_supports_group_storage():
+            return None
+        return group_number
 
     def _resolve_take_photo_recovery_timeout_seconds(self) -> float:
         shortcut_cfg = self.config.get("device_mcp_shortcuts", {}) or {}
@@ -330,7 +412,7 @@ class DeviceMCPHandler(BaseHandler):
 
         safe_device = self._sanitize_device_for_path(device_id)
         device_dir = os.path.join(data_root, safe_device)
-        normalized_group = self._normalize_group_number(group_number)
+        normalized_group = self._effective_group_number(group_number)
         if normalized_group is not None:
             device_dir = os.path.join(device_dir, self._format_group_dir_name(normalized_group))
         if not os.path.isdir(device_dir):
@@ -702,7 +784,7 @@ class DeviceMCPHandler(BaseHandler):
             session_id, device_id = self._resolve_target_params(body)
             question = str(body.get("question", "Please take a photo.")).strip()
             photo_name = str(body.get("photo_name", "")).strip()
-            group_number = self._normalize_group_number(body.get("group_number"))
+            group_number = self._effective_group_number(body.get("group_number"))
             tool_name_raw = str(
                 body.get("tool_name", "self.camera.take_photo")
             ).strip()
