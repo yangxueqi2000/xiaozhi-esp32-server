@@ -81,7 +81,7 @@ def build_question_with_photo_name(
             normalized_group = 0
         if normalized_group >= 1:
             meta_payload["group_number"] = normalized_group
-            meta_payload["group_dir_name"] = f"group_{normalized_group:02d}"
+            meta_payload["group_dir_name"] = str(normalized_group)
     if not meta_payload:
         return q
     meta = json.dumps(meta_payload, ensure_ascii=False, separators=(",", ":"))

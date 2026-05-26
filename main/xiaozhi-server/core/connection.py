@@ -1113,6 +1113,22 @@ class ConnectionHandler:
         )
         return str(log_path or "")
 
+    def log_assistant_transcript(self, text: Any, *, source: str = "llm") -> str:
+        text = str(text or "").strip()
+        if not text:
+            return ""
+        try:
+            return self.append_experiment_interaction_log(
+                "ASSISTANT",
+                text,
+                source=source or "llm",
+            )
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(
+                f"assistant transcript log failed: source={source}, error={exc}"
+            )
+            return ""
+
     def enrich_latest_clean_user_utterance_snapshot(self) -> str:
         if not self.device_id:
             return ""
@@ -2134,7 +2150,12 @@ class ConnectionHandler:
             f"{self._experiment_prewarm_timing_log_suffix()}"
         )
 
-    async def prewarm_experiment_session(self, trigger: str = "", force: bool = False) -> bool:
+    async def prewarm_experiment_session(
+        self,
+        trigger: str = "",
+        force: bool = False,
+        allow_device_resume: bool = True,
+    ) -> bool:
         if not self.device_id:
             return False
 
@@ -2328,20 +2349,28 @@ class ConnectionHandler:
                         f"yaml_path={yaml_path}"
                     )
                     device_resume_candidates = []
-                    try:
-                        device_resume_candidates = (
-                            await load_experiment_session_bindings_for_device(
-                                self.config,
-                                device_id=self.device_id or "",
-                                user_id=self.user_id or "",
-                                yaml_path=yaml_path,
+                    if allow_device_resume:
+                        try:
+                            device_resume_candidates = (
+                                await load_experiment_session_bindings_for_device(
+                                    self.config,
+                                    device_id=self.device_id or "",
+                                    user_id=self.user_id or "",
+                                    yaml_path=yaml_path,
+                                )
                             )
-                        )
-                    except Exception as exc:
-                        self.logger.bind(tag=TAG).warning(
-                            "experiment device resume lookup failed: "
-                            f"device_id={self.device_id}, yaml_path={yaml_path}, "
-                            f"error={exc}"
+                        except Exception as exc:
+                            self.logger.bind(tag=TAG).warning(
+                                "experiment device resume lookup failed: "
+                                f"device_id={self.device_id}, yaml_path={yaml_path}, "
+                                f"error={exc}"
+                            )
+                    else:
+                        self.logger.bind(tag=TAG).info(
+                            "experiment device resume bypassed for fresh start: "
+                            f"device_id={self.device_id}, "
+                            f"chat_session_id={self.chat_session_id}, "
+                            f"yaml_path={yaml_path}, trigger={self.experiment_prewarm_trigger}"
                         )
 
                     best_device_resume = None
@@ -2491,12 +2520,30 @@ class ConnectionHandler:
                 self.experiment_progress_summary = progress_summary_payload
                 if self.experiment_session_id and self.device_id:
                     try:
+                        auto_export_args = {
+                            "session_id": self.experiment_session_id,
+                            "device_id": self.device_id or "",
+                            "split_groups": False,
+                        }
+                        experiment_data_root = str(
+                            self.config.get("experiment_data_root", "") or ""
+                        ).strip()
+                        if experiment_data_root:
+                            output_root = Path(experiment_data_root).expanduser().resolve()
+                            safe_device_id = str(self.device_id or "").strip().lower()
+                            safe_device_id = "".join(
+                                ch if ch.isalnum() or ch in "._-" else "_"
+                                for ch in safe_device_id
+                            ).strip("._-") or "unknown_device"
+                            auto_export_args["output_root"] = str(output_root)
+                            auto_export_args["output_path"] = str(
+                                output_root
+                                / safe_device_id
+                                / "experimental_graph_records.yaml"
+                            )
                         await self._call_experiment_graph_tool(
                             "configure_auto_export",
-                            {
-                                "session_id": self.experiment_session_id,
-                                "device_id": self.device_id or "",
-                            },
+                            auto_export_args,
                             priority="prewarm_minimal",
                         )
                     except Exception as exc:
@@ -4211,6 +4258,7 @@ class ConnectionHandler:
             self.tts_MessageText = text_buff
             if text_buff:
                 self.dialogue.put(Message(role="assistant", content=text_buff))
+                self.log_assistant_transcript(text_buff, source="llm")
                 if not stream_tts_from_llm:
                     self.tts.tts_one_sentence(
                         self, ContentType.TEXT, content_detail=text_buff
@@ -4249,6 +4297,7 @@ class ConnectionHandler:
                         self, ContentType.TEXT, content_detail=text
                     )
                     self.dialogue.put(Message(role="assistant", content=text))
+                    self.log_assistant_transcript(text, source="tool_result")
             elif result.action == Action.REQLLM:
                 # 收集需要 LLM 处理的工具
                 need_llm_tools.append((result, tool_call_data))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 import re
 from pathlib import Path
@@ -215,6 +216,27 @@ class UVVisScanRule:
             )
             return None
 
+        if actual_tool_name == "uvvis_prepare_dark_current":
+            cache_ready, cache_details = self._shared_dark_air_cache_ready()
+            if cache_ready:
+                self.conn.logger.info(
+                    "uvvis_prepare_dark_current skipped because shared cache is ready: %s",
+                    cache_details,
+                )
+                return ActionResponse(
+                    action=Action.REQLLM,
+                    result=json.dumps(
+                        {
+                            "success": True,
+                            "cache_reused": True,
+                            "skipped_real_scan": True,
+                            "message": "shared dark current and air baseline artifacts already exist; reuse them and do not rescan",
+                            "artifacts": cache_details,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+
         if actual_tool_name != "uvvis_scan_batch":
             if actual_tool_name in {"uvvis_scan_status", "uvvis_scan_result"}:
                 if not pick_text(arguments.get("task_id")):
@@ -406,7 +428,7 @@ class UVVisScanRule:
 
     @staticmethod
     def _format_group_dir_name(group_number: int) -> str:
-        return f"group_{int(group_number):02d}"
+        return str(int(group_number))
 
     def _resolve_uvvis_output_root_dir(self) -> Path:
         override_root = str(self.conn.config.get("uvvis_scan_output_root", "")).strip()
@@ -446,6 +468,109 @@ class UVVisScanRule:
     def _resolve_uvvis_shared_output_dir(self) -> Path:
         return self._resolve_uvvis_output_root_dir()
 
+    @staticmethod
+    def _dark_json_artifact_ready(path: Path) -> bool:
+        try:
+            if not path.exists() or path.stat().st_size <= 2:
+                return False
+            with path.open("r", encoding="utf-8-sig") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                return False
+            return (
+                payload.get("sample_dark_signal") is not None
+                and payload.get("reference_dark_signal") is not None
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _csv_artifact_ready(path: Path) -> bool:
+        try:
+            if not path.exists() or path.stat().st_size <= 0:
+                return False
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = set(reader.fieldnames or [])
+                required_columns = {"wavelength_nm"}
+                for sample_position in range(1, 6):
+                    required_columns.add(f"sample{sample_position}_blank_signal")
+                    required_columns.add(f"sample{sample_position}_reference_blank_signal")
+                if not required_columns.issubset(fieldnames):
+                    return False
+                wavelengths = set()
+                for row in reader:
+                    try:
+                        wavelengths.add(round(float(row.get("wavelength_nm", ""))))
+                    except Exception:
+                        continue
+            return set(range(400, 701, 10)).issubset(wavelengths)
+        except Exception:
+            return False
+
+    @classmethod
+    def _air_manifest_artifact_ready(cls, path: Path, shared_dir: Path) -> bool:
+        try:
+            if not path.exists() or path.stat().st_size <= 2:
+                return False
+            with path.open("r", encoding="utf-8-sig") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                return False
+            positions = {int(value) for value in payload.get("sample_positions", [])}
+            if not set(range(1, 6)).issubset(positions):
+                return False
+            wavelengths = {round(float(value)) for value in payload.get("wavelengths_nm", [])}
+            if not set(range(400, 701, 10)).issubset(wavelengths):
+                return False
+            raw_csv = str(payload.get("raw_csv", "") or "").strip()
+            if raw_csv:
+                raw_path = Path(raw_csv)
+                if not raw_path.is_absolute():
+                    raw_path = shared_dir / raw_path
+                return cls._csv_artifact_ready(raw_path)
+            return True
+        except Exception:
+            return False
+
+    def _shared_dark_air_cache_ready(self) -> tuple[bool, dict[str, str]]:
+        shared_dir = self._resolve_uvvis_shared_output_dir()
+        dark_candidates = [
+            shared_dir / "latest_dark_current.json",
+            *sorted(shared_dir.glob("dark_current_*.json")),
+        ]
+        air_manifest_candidates = [
+            shared_dir / "latest_air_blank_manifest.json",
+            *sorted(shared_dir.glob("air_baseline_*_manifest.json")),
+        ]
+        air_csv_candidates = [
+            shared_dir / "air_blank_latest.csv",
+            *sorted(shared_dir.glob("air_baseline_*_raw.csv")),
+        ]
+
+        dark_path = next((path for path in dark_candidates if self._dark_json_artifact_ready(path)), None)
+        air_manifest_path = next(
+            (
+                path
+                for path in air_manifest_candidates
+                if self._air_manifest_artifact_ready(path, shared_dir)
+            ),
+            None,
+        )
+        air_csv_path = next(
+            (path for path in air_csv_candidates if self._csv_artifact_ready(path)),
+            None,
+        )
+
+        if dark_path is not None and (air_manifest_path is not None or air_csv_path is not None):
+            return True, {
+                "shared_dir": str(shared_dir),
+                "dark_current": str(dark_path),
+                "air_manifest": str(air_manifest_path or ""),
+                "air_csv": str(air_csv_path or ""),
+            }
+        return False, {}
+
     def _should_use_shared_uvvis_output_dir(
         self,
         actual_tool_name: str,
@@ -484,6 +609,7 @@ class UVVisScanRule:
         if actual_tool_name not in {
             "uvvis_measure_spectra",
             "uvvis_measure_kinetics",
+            "uvvis_grouped_kinetics_start",
             "uvvis_prepare_dark_current",
         }:
             return

@@ -169,8 +169,8 @@ class PhotoPathTrackerTest(unittest.TestCase):
 
             mirrored = Path(photo_meta["mirrored_path"])
             self.assertEqual(2, photo_meta["group_number"])
-            self.assertEqual("group_02", photo_meta["group_dir_name"])
-            self.assertEqual("group_02", mirrored.parent.name)
+            self.assertEqual("2", photo_meta["group_dir_name"])
+            self.assertEqual("2", mirrored.parent.name)
             self.assertEqual("94_a9_90_27_3c_84", mirrored.parent.parent.name)
 
             latest_group_2 = tracker.find_latest(device_id, group_number=2)

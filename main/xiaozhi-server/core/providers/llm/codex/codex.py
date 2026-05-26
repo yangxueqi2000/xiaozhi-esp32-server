@@ -1032,6 +1032,8 @@ def _exp2_recent_kinetics_scan_prompt_block(
             "- Do not route back to shared dark-current/air-baseline prep and do not ask for all 1-5 positions to be empty.\n"
             "- Before asking placement or starting uvvis_grouped_kinetics_start, the student must explicitly report the group number for this kinetics run in the current turn. If the latest/recent student message does not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
             "- If the student has not just confirmed placement, ask only for the kinetics placement confirmation: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
+            "- Before starting or restarting kinetics for an explicitly named group, inspect that group's real uv_data_common/<device_id>/<group_number>/uvvis_measure_kinetic directory. Only if actual CSV/progress data exists may you ask whether to overwrite; if no data exists, do not say data exists and start normally.\n"
+            "- If existing kinetics data is found for the named group, ask one concise confirmation before overwriting. After the student confirms retest/overwrite, call uvvis_grouped_kinetics_start with force_restart=true so the same group-level uvvis_measure_kinetic files are overwritten.\n"
             "- If the student says start/ready after that confirmation, call uvvis_grouped_kinetics_start, tell the student the long kinetics measurement has started and data are being recorded, then use uvvis_grouped_kinetics_status/result on later turns instead of calling the blocking uvvis_measure_kinetics tool."
         )
 
@@ -1070,6 +1072,8 @@ def _exp2_recent_kinetics_scan_prompt_block(
         "- Do not ask for 1-5 sample positions to be empty, do not call shared dark-current prep, and do not say shared dark current or air baseline is complete.\n"
         "- Before starting uvvis_grouped_kinetics_start, the student must explicitly report the group number for this kinetics run in the current turn. If the latest/recent student message and graph context do not clearly identify the group number, ask only: '这是第几组的动力学测量？' Do not call UV-Vis until the group number is known.\n"
         "- Use the current kinetics placement: position 2 = sample 2 reaction solution, position 3 = sample 2 reference solution, position 4 = sample 4 reaction solution, position 5 = sample 4 reference solution, native reference = water.\n"
+        "- Before starting or restarting kinetics for an explicitly named group, inspect that group's real uv_data_common/<device_id>/<group_number>/uvvis_measure_kinetic directory. Only if actual CSV/progress data exists may you ask whether to overwrite; if no data exists, do not say data exists and start normally.\n"
+        "- If existing kinetics data is found for the named group, ask one concise confirmation before overwriting. After the student confirms retest/overwrite, call uvvis_grouped_kinetics_start with force_restart=true so the same group-level uvvis_measure_kinetic files are overwritten.\n"
         "- If all placements were just confirmed, call uvvis_grouped_kinetics_start and do not call the blocking uvvis_measure_kinetics tool."
     )
 
@@ -1344,6 +1348,47 @@ def _user_explicitly_requests_cleanup(user_text: str) -> bool:
     return _text_contains_any(_normalize_whitespace(user_text), _EXP2_CLEANUP_PHRASES)
 
 
+def _user_explicitly_requests_kinetics_rerun(user_text: str) -> bool:
+    text = _normalize_whitespace(user_text)
+    if not text:
+        return False
+    rerun_or_clear = _text_contains_any(
+        text,
+        (
+            "重测",
+            "重新测",
+            "重新做",
+            "重新跑",
+            "重新扫描",
+            "重新扫",
+            "重跑",
+            "重扫",
+            "重新开始",
+            "清空",
+            "清掉",
+            "删掉",
+            "删除",
+        ),
+    )
+    if not rerun_or_clear:
+        return False
+    return _text_contains_any(
+        text,
+        (
+            "动力学",
+            "400",
+            "这一组",
+            "这组",
+            "第一组",
+            "第1组",
+            "第二组",
+            "第2组",
+            "这个记录",
+            "记录",
+        ),
+    )
+
+
 def _exp2_kinetics_text_reverts_to_batch_loading(text: str) -> bool:
     if not text:
         return False
@@ -1368,7 +1413,7 @@ def _exp2_kinetics_text_reverts_to_batch_loading(text: str) -> bool:
             "装入",
             "放入自动五联架",
             "五联架",
-            "原生参比位放纯水",
+            "仪器参考位放纯水",
             "最大吸收",
             "吸收波长",
             "批量测量",
@@ -1542,7 +1587,7 @@ def _finalize_exp2_kinetics_guard_text(
         routing_context=routing_context,
         experiment_context=experiment_context,
     )
-    if running_progress is not None:
+    if running_progress is not None and not _user_explicitly_requests_kinetics_rerun(user_text):
         return _format_running_exp2_kinetics_reply(running_progress)
     if _exp2_kinetics_text_claims_start(assistant_text):
         return _EXP2_KINETICS_NO_TOOL_REPLY
@@ -2764,7 +2809,7 @@ def _experiment_prompt_block(
             "Exp2 post-kinetics graph gate:\n"
             f"- The trusted graph currently says step_6_kinetics_combined_measurement, {group_phrase}. Treat this as the current kinetics step, not the 1-5 sample loading or max-absorbance spectra step.\n"
             "- While this step is not explicitly completed, do not guide the student back to 1-5 sample loading, 1-5 max-absorbance spectra, or shared dark/air calibration. Keep the flow on kinetics placement, kinetics progress, or kinetics result.\n"
-            "- When uvvis_grouped_kinetics_status or uvvis_grouped_kinetics_result returns record_fields, write those returned fields into the current experiment-graph step before answering. This keeps the per-group experimental_graph_records.yaml/pdf live under the current uv_data_common/<device_id>/<group_number>/ directory.\n"
+            "- When uvvis_grouped_kinetics_status or uvvis_grouped_kinetics_result returns record_fields, write those returned fields into the current experiment-graph step before answering. Experiment reports must be refreshed only as the single device-root experimental_graph_records.yaml/pdf under the experiment data/<device_id> directory, with group numbers inside the records; do not export per-group reports.\n"
             "- Before telling the student to load 1-5 samples for the next group, call experiment-graph can_proceed/proceed_to_next_step using the trusted experiment_session_id and wait for ok=true. Only then speak the returned next step.\n"
             "- If the student explicitly says '进入清理', '进入清理步骤', '开始清理', '实验结束', or '所有组完成', first call redirect_to_step(session_id=trusted id, step_id='step_7_cleanup', force=true, group_number=current group) and wait for ok=true. Only after that may you give cleanup instructions.\n"
             "- If proceed_to_next_step fails, do not guide the next group; ask only for the missing confirmation or choose cleanup/retry as appropriate.\n"
@@ -2842,7 +2887,7 @@ def _experiment_prompt_block(
                 "- Confirmation-step completion rule: when the active step's interaction.fast_path_mode is confirmation_step, or its capabilities/tags include step_confirmation/confirmation_step, and the student says a short completion report such as '做好了', '完成了', '做完了', '已经做好了', '已经加好了', '已经混匀了', or '已经混匀好了', treat that as confirmation of the current step's required boolean action fields unless the message contains a negative/uncertain phrase. For this case, call start_trial if needed, add_fields with all required boolean fields set to true, finish_trial(validate=true), and proceed_to_next_step within this same turn before the final answer names the next step. Do not ask the student to repeat the same step using more specific wording.\n"
                 "- Always copy the full exact experiment_session_id into experiment-graph calls. A session_id containing '...' or '…' is invalid; replace it with the latest full session id before retrying.\n"
                 "- If a graph write, finish, proceed, redirect, or export tool returns ok=false or a session_id-not-found error, retry once with the latest full exact session id. If it still fails, do not claim the record, photo, step transition, group transition, or export succeeded.\n"
-                "- Only pass group_number to photo/export/UV tools when the experiment YAML explicitly has group_number fields or workflow.group_start_steps. In non-group experiments, current_group_number=1 is bookkeeping only and must not be used for storage.\n"
+                "- Only use student group identifiers for photo or UV measurement tools when the experiment YAML explicitly has group_number fields or workflow.group_start_steps. Experiment report generation must stay unsplit and refresh one device-root experimental_graph_records.yaml/pdf with group numbers inside the records.\n"
                 "- Before calling xiaozhi_take_photo, the latest student message must explicitly authorize taking a photo. If it does not, do not call the tool on this turn; ask only '现在可以拍照吗？'. If a photo tool call is rejected with 'user rejected MCP tool call', treat that as missing authorization, not as a camera, device, network, or permission failure.\n"
                 "- Photo authorization hot path: if the latest student message explicitly says '可以拍照', '拍吧', '现在拍', '能拍', '行，拍', or another clear short photo authorization, your next action must be the connected xiaozhi_take_photo MCP tool call. Do not explain first, do not wait, do not ask again, do not call unrelated overview/reference/schema tools first, and do not produce a student-facing reply before the photo tool returns.\n"
                 "- Retake photo hot path: if the latest student message says '重拍/重新拍/再拍/补拍 N号样品照片', call xiaozhi_take_photo immediately with photo_name='N号样品照片' and append_timestamp=true. Treat this as an extra photo capture only: do not redirect_to_step, redo_trial, modify_record, cancel prior records, or roll back completed experiment steps.\n"
@@ -2869,7 +2914,8 @@ def _experiment_prompt_block(
     parts.append(
         "UV-Vis execution guard:\n"
         "- The UV-Vis MCP tools are available in this runtime.\n"
-        "- If the current experiment step or local prompt explicitly requires uvvis_prepare_dark_current, call only uvvis_prepare_dark_current for that preparation step and wait for its result before advancing.\n"
+        "- Before calling uvvis_prepare_dark_current, reuse the shared uv_data_common artifacts when latest_dark_current.json and an air blank/baseline artifact already exist; write the graph readiness fields and advance instead of rescanning.\n"
+        "- If the current experiment step or local prompt explicitly requires uvvis_prepare_dark_current and reusable shared artifacts are missing, call only uvvis_prepare_dark_current for that preparation step and wait for its result before advancing.\n"
         "- Do not call uvvis_measure_spectra with ready_for_samples=false after uvvis_prepare_dark_current unless the active experiment step explicitly asks for an additional separate blank scan.\n"
         "- Do not start any real sample scan until the experiment graph has advanced to the sample-loading or sample-recording step and the student has confirmed the real samples are loaded.\n"
         "- Before re-measuring a shared pure-water blank, inspect the shared uv_data_common directory for reusable blank artifacts and skip the blank scan when reusable data already exists there.\n"
@@ -2877,6 +2923,7 @@ def _experiment_prompt_block(
         "- After those shared prerequisites are ready, ask for six pure-water cuvettes only when the shared pure-water blank is still missing, then use uvvis_measure_spectra with ready_for_samples=true to record the pure-water blank.\n"
         "- For the actual batch spectra measurement after the cuvettes are loaded, use uvvis_measure_spectra with ready_for_samples=true.\n"
         "- For exp2 grouped kinetics runs, use uvvis_grouped_kinetics_start so the long run returns immediately; use uvvis_grouped_kinetics_status/result to monitor or fetch completion. Use the older blocking uvvis_measure_kinetics only for backward compatibility when no async grouped tool is available. Use uvvis_session when you need to acquire or refresh the UV-Vis lease/session first.\n"
+        "- For exp2 grouped kinetics retests, first inspect the explicitly named group's real uvvis_measure_kinetic directory. Ask whether to overwrite only after confirming actual CSV/progress data exists; after confirmation, use force_restart=true and overwrite the same group-level files without creating numbered subdirectories.\n"
         "- Do not verbalize internal orchestration rules such as '先根据上一步返回结果判断是否可复用', '只有在主说话人明确回报…后才调用…', '若工具提示…则不要重复测量', or any session/tool-call wording; speak only the student's current physical action or concise readiness prompt.\n"
         "- Do not say you are starting a UV-Vis scan, baseline, or kinetics run unless one of those UV-Vis tools was actually called on the current turn."
     )
@@ -2903,17 +2950,22 @@ def _experiment_bootstrap_prompt_block(
         run_dir = resolved_yaml.parent.parent if resolved_yaml.parent.name.lower() == "configs" else resolved_yaml.parent
         if safe_device_id:
             if "exp2_uv_vis_analysis" in yaml_path.replace("\\", "/").lower():
-                output_root = (run_dir / "data" / "uv_data_common").as_posix()
+                output_root = (run_dir / "data").as_posix()
+                output_path = (
+                    run_dir / "data" / safe_device_id / "experimental_graph_records.yaml"
+                ).as_posix()
                 create_session_call = (
                     f'create_session(yaml_path="{yaml_path}", '
                     f'device_id="{safe_device_id}", '
-                    f'output_root="{output_root}", split_groups=true)'
+                    f'output_root="{output_root}", output_path="{output_path}", '
+                    f'split_groups=false)'
                 )
                 auto_export_line = (
-                    "- For exp2, that create_session call must enable per-group auto export: "
-                    f'device_id="{safe_device_id}", output_root="{output_root}", split_groups=true, '
-                    "so each group writes experimental_graph_records.yaml/pdf inside "
-                    f"{output_root}/{safe_device_id}/<group_number>.\n"
+                    "- For exp2, that create_session call must enable only the single device-root auto export: "
+                    f'device_id="{safe_device_id}", output_root="{output_root}", '
+                    f'output_path="{output_path}", split_groups=false, '
+                    "so all groups refresh that one experimental_graph_records.yaml/pdf, "
+                    "with group numbers written inside the records.\n"
                 )
             else:
                 output_root = (run_dir / "data").as_posix()

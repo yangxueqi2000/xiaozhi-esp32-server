@@ -214,7 +214,6 @@ async def ensure_startup_uvvis_session(config: dict):
         "startup_begin",
         yaml_path=yaml_path,
     )
-    _shutdown_uvvis_http_mcp_processes(reason="exp2_startup_force_reconnect")
     ctx = _StartupMCPContext(config)
     manager = ServerMCPManager(ctx)
     try:
@@ -427,7 +426,10 @@ async def stop_managed_voiceprint_service():
 
 async def monitor_stdin():
     while True:
-        await ainput()
+        try:
+            await ainput()
+        except (EOFError, OSError):
+            await asyncio.Future()
 
 
 async def main():

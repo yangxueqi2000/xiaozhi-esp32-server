@@ -126,7 +126,7 @@ class DeviceMCPHandler(BaseHandler):
         return group_number if group_number >= 1 else None
 
     def _format_group_dir_name(self, group_number: int) -> str:
-        return f"group_{int(group_number):02d}"
+        return str(int(group_number))
 
     def _derive_experiment_data_root(self) -> str:
         cfg = self.config or {}

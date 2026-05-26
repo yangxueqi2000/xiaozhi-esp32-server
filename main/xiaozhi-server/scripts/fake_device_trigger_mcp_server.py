@@ -42,7 +42,7 @@ def _group_dir_name(group_number: Optional[int]) -> str:
         n = int(group_number) if group_number is not None else 0
     except (TypeError, ValueError):
         n = 0
-    return f"group_{n:02d}" if n > 0 else ""
+    return str(n) if n > 0 else ""
 
 
 def _photo_dir(device_id: str, group_number: Optional[int]) -> Path:

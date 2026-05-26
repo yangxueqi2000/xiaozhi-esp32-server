@@ -144,7 +144,7 @@ class WebsocketTutorialSmoke:
     def _device_dir(self, group_number: Optional[int] = None) -> Path:
         path = self.data_root / _safe_device_id(self.device_id)
         if group_number:
-            path = path / f"group_{int(group_number):02d}"
+            path = path / str(int(group_number))
         path.mkdir(parents=True, exist_ok=True)
         return path
 

@@ -5,6 +5,7 @@ import re
 import uuid
 import asyncio
 import time
+import shutil
 from pathlib import Path
 
 import yaml
@@ -57,6 +58,19 @@ async def handle_user_intent(conn, text):
         except Exception as exc:
             conn.logger.bind(tag=TAG).warning(
                 f"experiment explicit resume handler failed: {exc}"
+            )
+            return False
+
+    # Fresh-start semantics must not depend on fast-path availability.
+    # When the user explicitly says "start today's experiment", always rotate
+    # into a new chat/model session and prewarm a brand-new experiment session
+    # instead of letting later handlers fall back to a stale device resume.
+    if _is_explicit_experiment_start_request(filtered_text):
+        try:
+            return await _handle_explicit_experiment_start_request(conn, text)
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"experiment explicit start handler failed: {exc}"
             )
             return False
 
@@ -432,6 +446,31 @@ def _extract_experiment_current_progress(payload):
     return None
 
 
+def _extract_experiment_current_group_number(payload) -> int | None:
+    body = _experiment_result_body(payload)
+    candidates = [
+        body.get("current_group_number"),
+        body.get("group_number"),
+    ]
+
+    progress = _extract_experiment_current_progress(payload)
+    if isinstance(progress, dict):
+        candidates.extend(
+            [
+                progress.get("group_number"),
+                (progress.get("current_data") or {}).get("group_number")
+                if isinstance(progress.get("current_data"), dict)
+                else None,
+            ]
+        )
+
+    for value in candidates:
+        parsed = _extract_int_value(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
 def _extract_experiment_schema_view(payload) -> dict:
     body = _experiment_result_body(payload)
     schema_view = body.get("schema_view")
@@ -568,16 +607,14 @@ def _format_missing_field_prompts(missing_fields, schema_by_name: dict) -> list:
 def _compose_missing_field_reply(missing_fields, schema_by_name: dict) -> str:
     prompts = _format_missing_field_prompts(missing_fields, schema_by_name)
     if not prompts:
-        return "继续前还差这一步的关键信息，你补一句当前结果就行。"
-    if len(prompts) > 3:
-        return "继续前还差这一步的一整组关键记录。你把当前这一步要记录的数据按顺序告诉我就行。"
+        return "实验图返回了缺失项，但没有给出明确字段名。我需要重新核对当前步骤，先不要补整组数据。"
     if len(prompts) == 1:
-        return f"继续前还差这一步的一个确认：{prompts[0]}。你补一句这个就行。"
+        return f"我刚查了实验图，继续前只差这一个确认：{prompts[0]}。"
     if len(prompts) == 2:
         joined = f"{prompts[0]}，还有 {prompts[1]}"
     else:
-        joined = "、".join(prompts[:3])
-    return f"继续前还差这几个确认：{joined}。你补一句这几个结果就行。"
+        joined = "、".join(prompts)
+    return f"我刚查了实验图，继续前还差这些记录：{joined}。"
 
 
 def _first_nonempty_text(*values) -> str:
@@ -586,6 +623,49 @@ def _first_nonempty_text(*values) -> str:
         if text:
             return text
     return ""
+
+
+_INTERNAL_STEP_SPEECH_MARKERS = (
+    "学生说",
+    "直接记录",
+    "本步全部完成",
+    "进入下一步",
+    "不要再追问",
+    "质量检查",
+    "禁止",
+)
+
+
+def _strip_internal_step_speech_text(text: str) -> str:
+    """Remove graph-control instructions before composing student-facing speech."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    cleaned_parts = []
+    for part in re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?", raw):
+        if not part.strip():
+            continue
+
+        marker_positions = [
+            part.find(marker)
+            for marker in _INTERNAL_STEP_SPEECH_MARKERS
+            if marker in part
+        ]
+        if not marker_positions:
+            cleaned_parts.append(part.strip())
+            continue
+
+        keep = part[: min(marker_positions)].strip(" ，,；;。")
+        if keep and not any(marker in keep for marker in _INTERNAL_STEP_SPEECH_MARKERS):
+            cleaned_parts.append(keep)
+
+    cleaned = "。".join(
+        piece.rstrip("。！？!?；;").strip()
+        for piece in cleaned_parts
+        if piece.strip()
+    ).strip()
+    return cleaned
 
 
 def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
@@ -600,6 +680,48 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
         prefix = "接下来做这一步："
     else:
         prefix = "现在做这一步："
+
+    exact_reply_map = {
+        "step_3_uv_vis_shared_dark_air_prep": (
+            "先检查1到5号样品位都为空，参比位也不要放任何液体。"
+            "都空了就告诉我。可以开始时直接说“开始扫描”。"
+        ),
+        "step_3_uv_vis_shared_dark_blank_prep": (
+            f"{prefix}1-5号样品：纯水空白校正。"
+            "请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。"
+        ),
+        "step_3_uv_vis_sample1-4_load_cuvette": (
+            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位放纯水，擦净外壁。"
+            "放好后告诉我这是第几组。"
+        ),
+        "step_3_uv_vis_sample1-4_record_data": (
+            "确认1到5号样品位都已放好真实样品，参比位是纯水。"
+            "可以开始时直接说开始扫描。"
+        ),
+        "step_3_uv_vis_sample1-4_clean_cuvettes": (
+            f"{prefix}紫外-可见测量后：统一清洗比色皿。"
+            "按规范处理残液并清洗比色皿，为后续动力学实验做准备，做好告诉我。"
+        ),
+        "step_3_uv_vis_sample1-5_load_cuvette": (
+            "把1到5号真实样品分别装入比色皿，按编号放入样品位，参比位保持为空，擦净外壁，做好告诉我。"
+        ),
+        "step_3_uv_vis_sample1-5_record_data": (
+            "确认1到5号样品位都已放好真实样品，参比位保持为空。"
+            "放好了告诉我开始测量。"
+        ),
+        "step_3_uv_vis_sample5_clean_cuvette": (
+            f"{prefix}紫外-可见测量后：统一清洗比色皿。"
+            "按规范处理残液并清洗比色皿，为后续动力学实验做准备，做好告诉我。"
+        ),
+        "step_6_kinetics_combined_measurement": (
+            "请确认这是第几组动力学测量：1号位为空，2号位放2号样品反应液，3号位放2号样品参比液，"
+            "4号位放4号样品反应液，5号位放4号样品参比液，仪器参考位为纯水。"
+            "确认好后说“第几组，可以开始”。"
+        ),
+    }
+    exact_reply = exact_reply_map.get(step_id)
+    if exact_reply:
+        return exact_reply
 
     signature = _normalize_text_for_match(
         " ".join(
@@ -640,7 +762,7 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
             "请在 1-5 号样品位和参比位各放入纯水比色皿，共 6 个，放好后告诉我可以开始扫描。"
         )
 
-    if signature and _signature_has_any(
+    if step_id == "step_3_uv_vis_shared_dark_air_prep" and signature and _signature_has_any(
             "暗电流校正",
             "暗电流和空气能量校正",
             "暗电流和空气基线",
@@ -798,14 +920,21 @@ def _compose_uvvis_step_reply(step_meta: dict, mode: str = "guide") -> str:
 
 
 def _compose_experiment_step_reply(step_meta: dict, mode: str = "guide") -> str:
-    title = _first_nonempty_text(step_meta.get("title", ""))
+    title = _strip_internal_step_speech_text(
+        _first_nonempty_text(step_meta.get("title", ""))
+    )
     instruction = _first_nonempty_text(
         step_meta.get("instruction", ""),
         step_meta.get("description", ""),
         title,
     )
-    safety = _first_nonempty_text(step_meta.get("safety", ""))
-    tip = _first_nonempty_text(step_meta.get("tip", ""))
+    instruction = _strip_internal_step_speech_text(instruction)
+    safety = _strip_internal_step_speech_text(
+        _first_nonempty_text(step_meta.get("safety", ""))
+    )
+    tip = _strip_internal_step_speech_text(
+        _first_nonempty_text(step_meta.get("tip", ""))
+    )
 
     if not instruction:
         return ""
@@ -863,7 +992,9 @@ def _prepare_fastpath_spoken_reply(
     fallback_step_meta: dict | None = None,
     fallback_mode: str = "guide",
 ) -> str:
-    prepared = textUtils.prepare_runtime_spoken_text(text)
+    prepared = textUtils.prepare_runtime_spoken_text(
+        _strip_internal_step_speech_text(text)
+    )
     if prepared:
         return prepared
     if fallback_step_meta:
@@ -871,7 +1002,9 @@ def _prepare_fastpath_spoken_reply(
             fallback_step_meta,
             mode=fallback_mode,
         )
-        return textUtils.prepare_runtime_spoken_text(fallback_text)
+        return textUtils.prepare_runtime_spoken_text(
+            _strip_internal_step_speech_text(fallback_text)
+        )
     return ""
 
 
@@ -1111,7 +1244,11 @@ def _is_explicit_ready_to_start_reply(filtered_text: str) -> bool:
     )
 
 
-async def _reset_experiment_fresh_start_context(conn) -> None:
+async def _reset_experiment_fresh_start_context(
+    conn,
+    *,
+    allow_device_resume: bool = False,
+) -> None:
     old_chat_session_id = str(getattr(conn, "chat_session_id", "") or "").strip()
     old_model_session_key = str(getattr(conn, "model_session_key", "") or "").strip()
     device_id = str(getattr(conn, "device_id", "") or "").strip()
@@ -1193,6 +1330,7 @@ async def _reset_experiment_fresh_start_context(conn) -> None:
         await conn.prewarm_experiment_session(
             trigger="explicit_fresh_start",
             force=True,
+            allow_device_resume=allow_device_resume,
         )
 
     conn.logger.bind(tag=TAG).info(
@@ -1212,7 +1350,10 @@ async def _handle_explicit_experiment_resume_request(
 ) -> bool:
     previous_session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
     try:
-        await _reset_experiment_fresh_start_context(conn)
+        await _reset_experiment_fresh_start_context(
+            conn,
+            allow_device_resume=True,
+        )
     except Exception as exc:
         conn.logger.bind(tag=TAG).warning(
             f"experiment explicit resume reset failed: {exc}"
@@ -1326,6 +1467,32 @@ async def _handle_explicit_experiment_resume_request(
             reply = "我已经按上次实验日志接回当前步骤了，你跟着这一步继续做。"
         else:
             reply = "我已经接回到上次实验记录对应的步骤了，你跟着这一步继续做。"
+
+    await _start_direct_intent_turn(conn, original_text)
+    speak_txt(conn, reply)
+    return True
+
+
+async def _handle_explicit_experiment_start_request(
+    conn,
+    original_text: str,
+) -> bool:
+    try:
+        await _reset_experiment_fresh_start_context(
+            conn,
+            allow_device_resume=False,
+        )
+    except Exception as exc:
+        conn.logger.bind(tag=TAG).warning(
+            f"experiment explicit start reset failed: {exc}"
+        )
+        return False
+
+    experiment_title = await _load_experiment_overview_title(conn)
+    reply = _compose_experiment_start_reply(experiment_title, "")
+    reply = _prepare_fastpath_spoken_reply(reply)
+    if not reply:
+        return False
 
     await _start_direct_intent_turn(conn, original_text)
     speak_txt(conn, reply)
@@ -1512,6 +1679,20 @@ def _classify_short_experiment_control(conn, filtered_text: str) -> str:
         "什么意思",
     )
     if _contains_any(norm, clarify_tokens):
+        return "repeat"
+
+    repeat_measurement_tokens = (
+        "再测一轮",
+        "重测一轮",
+        "重新测一轮",
+        "再测一次",
+        "重新测一次",
+        "再扫一轮",
+        "重新扫描",
+        "重扫",
+        "重测",
+    )
+    if _contains_any(norm, repeat_measurement_tokens):
         return "repeat"
 
     if waiting_for_step_start and _is_explicit_ready_to_start_reply(filtered_text):
@@ -1710,6 +1891,9 @@ async def _load_experiment_step_meta(conn) -> dict:
 
     conn.experiment_current_step = step_payload
     conn.experiment_progress_summary = progress_payload
+    current_group_number = _extract_experiment_current_group_number(progress_payload)
+    if current_group_number is not None:
+        _remember_uvvis_group_number(conn, current_group_number)
     loaded_meta = _enrich_experiment_step_meta_from_yaml(
         conn,
         _merge_experiment_step_meta(
@@ -1778,6 +1962,9 @@ async def _refresh_experiment_step_cache(conn, session_id: str):
     )
     conn.experiment_current_step = step_payload
     conn.experiment_progress_summary = progress_payload
+    current_group_number = _extract_experiment_current_group_number(progress_payload)
+    if current_group_number is not None:
+        _remember_uvvis_group_number(conn, current_group_number)
     if hasattr(conn, "_extract_experiment_current_step_id"):
         current_step_id = conn._extract_experiment_current_step_id(
             step_payload,
@@ -2573,6 +2760,50 @@ async def _try_apply_current_confirmation_report(
         return None
 
     schema_by_name = _extract_experiment_schema_view(schema_payload)
+    current_step_id = ""
+    if hasattr(conn, "_extract_experiment_current_step_id"):
+        current_step_id = conn._extract_experiment_current_step_id(
+            step_payload,
+            progress_payload,
+        )
+    if (
+        current_step_id in _UVVIS_SAMPLE_LOAD_STEP_IDS
+        and "native_reference_water_loaded" in missing_fields
+        and (
+            _looks_like_uvvis_ready_reply(filtered_text)
+            or _looks_like_uvvis_start_scan_reply(filtered_text)
+            or _classify_short_experiment_control(conn, filtered_text)
+            in {"guide", "advance", "repeat"}
+        )
+    ):
+        current_data = (current_progress or {}).get("current_data") or {}
+        if current_data.get("all_samples_loaded_into_cuvettes") and current_data.get(
+            "all_cuvettes_ready_for_measurement"
+        ):
+            group_number = current_data.get("group_number") or _get_current_uvvis_group_number(conn)
+            fields = {
+                "native_reference_water_loaded": True,
+                "all_samples_loaded_into_cuvettes": True,
+                "all_cuvettes_ready_for_measurement": True,
+                "observations": current_data.get("observations")
+                or "1-5号样品已装入比色皿并放入样品位，参比位为纯水。",
+            }
+            if group_number is not None:
+                fields["group_number"] = group_number
+                _remember_uvvis_group_number(conn, int(group_number))
+            conn.logger.bind(tag=TAG).info(
+                "uvvis sample load completion writeback recovered missing native reference: "
+                f"text={filtered_text}, fields={sorted(fields.keys())}"
+            )
+            completed, reply = await _complete_experiment_step_with_fields(
+                conn,
+                fields=fields,
+                auto_advance=True,
+                fallback_reply="确认1到5号样品位都已放好真实样品，参比位是纯水。可以开始时直接说开始扫描。",
+            )
+            if completed or reply:
+                return reply
+
     write_fields = _build_experiment_current_step_confirmation_fields(
         filtered_text,
         schema_by_name,
@@ -4807,6 +5038,42 @@ def _looks_like_uvvis_start_scan_reply(filtered_text: str) -> bool:
     return _contains_any(norm, start_tokens)
 
 
+def _looks_like_kinetics_rerun_request(
+    original_text: str = "",
+    filtered_text: str = "",
+) -> bool:
+    norm = _normalize_text_for_match(
+        " ".join(
+            text
+            for text in (original_text, filtered_text)
+            if str(text or "").strip()
+        )
+    )
+    if not norm:
+        return False
+    kinetics_tokens = (
+        "动力学",
+        "400纳米",
+        "2号和4号",
+        "二号和四号",
+        "2号与4号",
+        "二号与四号",
+    )
+    rerun_tokens = (
+        "重跑",
+        "重新跑",
+        "重测",
+        "重新测",
+        "重新做",
+        "重新扫描",
+        "重新扫",
+        "重扫",
+        "再测一轮",
+        "再扫一轮",
+    )
+    return _contains_any(norm, kinetics_tokens) and _contains_any(norm, rerun_tokens)
+
+
 def _get_current_experiment_step_id(conn) -> str:
     step_id = str(getattr(conn, "experiment_current_step_id", "") or "").strip()
     if step_id:
@@ -5029,6 +5296,18 @@ def _resolve_uvvis_native_output_root(conn) -> Path:
     return (Path("data") / "uv_data_common").resolve()
 
 
+def _resolve_experiment_report_output_root(conn) -> Path:
+    override_root = str(conn.config.get("experiment_data_root", "") or "").strip()
+    if override_root:
+        return Path(override_root).expanduser().resolve()
+
+    for candidate in _resolve_uvvis_experiment_data_dirs(conn):
+        if candidate.name.lower() != "uv_data_common":
+            return candidate
+
+    return Path("data").resolve()
+
+
 def _resolve_uvvis_root_candidates(conn) -> list[Path]:
     candidates: list[Path] = []
 
@@ -5080,6 +5359,129 @@ def _resolve_uvvis_shared_blank_dirs(conn) -> list[Path]:
         seen.add(key)
         deduped.append(candidate)
     return deduped
+
+
+def _uvvis_dark_json_artifact_ready(path: Path) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size <= 2:
+            return False
+        with path.open("r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            return False
+        return (
+            payload.get("sample_dark_signal") is not None
+            and payload.get("reference_dark_signal") is not None
+        )
+    except Exception:
+        return False
+
+
+def _uvvis_csv_artifact_ready(path: Path) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = set(reader.fieldnames or [])
+            required_columns = {"wavelength_nm"}
+            for sample_position in _UVVIS_SAMPLE_POSITIONS:
+                required_columns.add(f"sample{sample_position}_blank_signal")
+                required_columns.add(f"sample{sample_position}_reference_blank_signal")
+            if not required_columns.issubset(fieldnames):
+                return False
+            wavelengths = set()
+            for row in reader:
+                try:
+                    wavelengths.add(round(float(row.get("wavelength_nm", ""))))
+                except Exception:
+                    continue
+        expected_wavelengths = set(_UVVIS_SPECTRA_WAVELENGTH_GRID)
+        return expected_wavelengths.issubset(wavelengths)
+    except Exception:
+        return False
+
+
+def _uvvis_air_manifest_artifact_ready(path: Path, shared_dir: Path) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size <= 2:
+            return False
+        with path.open("r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            return False
+        positions = {int(value) for value in payload.get("sample_positions", [])}
+        if not set(_UVVIS_SAMPLE_POSITIONS).issubset(positions):
+            return False
+        wavelengths = {round(float(value)) for value in payload.get("wavelengths_nm", [])}
+        if not set(_UVVIS_SPECTRA_WAVELENGTH_GRID).issubset(wavelengths):
+            return False
+        raw_csv = str(payload.get("raw_csv", "") or "").strip()
+        if raw_csv:
+            raw_path = Path(raw_csv)
+            if not raw_path.is_absolute():
+                raw_path = shared_dir / raw_path
+            return _uvvis_csv_artifact_ready(raw_path)
+        return True
+    except Exception:
+        return False
+
+
+def _format_uvvis_shared_dark_air_cache_observation(cache_details: dict) -> str:
+    shared_dir = str(cache_details.get("shared_dir", "") or "").strip()
+    dark_current = str(cache_details.get("dark_current", "") or "").strip()
+    air_manifest = str(cache_details.get("air_manifest", "") or "").strip()
+    air_csv = str(cache_details.get("air_csv", "") or "").strip()
+    parts = ["共享暗电流和空气能量校正已复用"]
+    if shared_dir:
+        parts.append(f"数据目录={shared_dir}")
+    if dark_current:
+        parts.append(f"暗电流={dark_current}")
+    if air_manifest:
+        parts.append(f"空气校正manifest={air_manifest}")
+    if air_csv:
+        parts.append(f"空气校正CSV={air_csv}")
+    return "；".join(parts) + "。"
+
+
+def _uvvis_shared_dark_air_cache_ready(conn) -> tuple[bool, dict]:
+    for shared_dir in _resolve_uvvis_shared_blank_dirs(conn):
+        dark_candidates = [
+            shared_dir / "latest_dark_current.json",
+            *sorted(shared_dir.glob("dark_current_*.json")),
+        ]
+        air_manifest_candidates = [
+            shared_dir / "latest_air_blank_manifest.json",
+            *sorted(shared_dir.glob("air_baseline_*_manifest.json")),
+        ]
+        air_csv_candidates = [
+            shared_dir / "air_blank_latest.csv",
+            *sorted(shared_dir.glob("air_baseline_*_raw.csv")),
+        ]
+
+        dark_path = next((path for path in dark_candidates if _uvvis_dark_json_artifact_ready(path)), None)
+        air_manifest_path = next(
+            (
+                path
+                for path in air_manifest_candidates
+                if _uvvis_air_manifest_artifact_ready(path, shared_dir)
+            ),
+            None,
+        )
+        air_csv_path = next(
+            (path for path in air_csv_candidates if _uvvis_csv_artifact_ready(path)),
+            None,
+        )
+
+        if dark_path is not None and (air_manifest_path is not None or air_csv_path is not None):
+            return True, {
+                "shared_dir": str(shared_dir),
+                "dark_current": str(dark_path),
+                "air_manifest": str(air_manifest_path or ""),
+                "air_csv": str(air_csv_path or ""),
+            }
+
+    return False, {}
 
 
 def _path_exists(path_value) -> bool:
@@ -6753,6 +7155,12 @@ async def _complete_experiment_step_with_fields(
         priority="foreground",
     )
     if not bool(_experiment_result_body(finish_payload).get("ok")):
+        advanced, advanced_reply = await _advance_if_current_step_already_completed(
+            conn,
+            fallback_reply=fallback_reply,
+        )
+        if advanced:
+            return True, advanced_reply
         message = _extract_experiment_result_message(finish_payload)
         if message:
             return False, message
@@ -6832,6 +7240,175 @@ async def _advance_finished_experiment_step(
     return True, fallback_reply or ""
 
 
+def _current_step_is_completed_from_payload(payload) -> bool:
+    body = _experiment_result_body(payload)
+    if not isinstance(body, dict):
+        return False
+
+    summary = body.get("summary")
+    if isinstance(summary, dict):
+        current_step = summary.get("current_step")
+        if isinstance(current_step, dict):
+            value = current_step.get("is_completed")
+            if isinstance(value, bool):
+                return value
+
+    state = body.get("state")
+    if isinstance(state, dict):
+        value = state.get("current_step_is_completed")
+        if isinstance(value, bool):
+            return value
+
+    return False
+
+
+def _uvvis_sample_record_progress_has_saved_measurement(progress: dict | None) -> bool:
+    if not isinstance(progress, dict):
+        return False
+
+    current_data = progress.get("current_data")
+    if not isinstance(current_data, dict):
+        current_data = progress
+
+    has_saved_flag = bool(
+        current_data.get("spectrum_saved")
+        or current_data.get("measurement_round_saved")
+    )
+    has_lambda_fields = all(
+        current_data.get(f"sample{sample_position}_lambda_max_nm") is not None
+        for sample_position in _UVVIS_SAMPLE_POSITIONS
+    )
+    if not (has_saved_flag and has_lambda_fields):
+        return False
+
+    missing_fields = {
+        str(field or "").strip()
+        for field in (progress.get("missing_fields") or [])
+        if str(field or "").strip()
+    }
+    return missing_fields.issubset({"step_finished_confirmed"})
+
+
+async def _finish_saved_uvvis_spectra_step_if_ready(
+    conn,
+    *,
+    fallback_reply: str = "当前批量光谱测量步骤已经完成。",
+) -> tuple[bool, str]:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return False, ""
+
+    state_payload, progress_payload = await asyncio.gather(
+        _call_experiment_graph_tool_fast(
+            conn,
+            "get_state",
+            {"session_id": session_id},
+            priority="foreground",
+        ),
+        _call_experiment_graph_tool_fast(
+            conn,
+            "get_current_progress",
+            {"session_id": session_id},
+            priority="foreground",
+        ),
+    )
+
+    body = _experiment_result_body(state_payload)
+    state = body.get("state") if isinstance(body, dict) else {}
+    current_step_id = ""
+    if isinstance(state, dict):
+        current_step_id = str(state.get("current_step_id", "") or "").strip()
+    if not current_step_id:
+        current_step_id = _get_current_experiment_step_id(conn)
+    if current_step_id not in _UVVIS_SAMPLE_RECORD_STEP_IDS:
+        return False, ""
+
+    current_progress = _extract_experiment_current_progress(progress_payload)
+    if not _uvvis_sample_record_progress_has_saved_measurement(current_progress):
+        return False, ""
+
+    completed, reply = await _complete_experiment_step_with_fields(
+        conn,
+        fields={"step_finished_confirmed": True},
+        auto_advance=True,
+        fallback_reply=fallback_reply,
+    )
+    if not completed:
+        return True, reply or fallback_reply
+
+    _clear_uvvis_direct_state(conn)
+    await _export_current_experiment_report(conn)
+    return True, reply or fallback_reply
+
+
+async def _advance_if_current_step_already_completed(
+    conn,
+    *,
+    fallback_reply: str = "",
+) -> tuple[bool, str]:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return False, fallback_reply or ""
+
+    progress_payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "get_current_progress",
+        {"session_id": session_id},
+        priority="foreground",
+    )
+    if not _current_step_is_completed_from_payload(progress_payload):
+        return False, fallback_reply or ""
+
+    conn.logger.bind(tag=TAG).info(
+        "experiment current step already completed; forcing advance: "
+        f"session_id={session_id}, current_step_id={getattr(conn, 'experiment_current_step_id', '')}"
+    )
+    return await _advance_finished_experiment_step(
+        conn,
+        fallback_reply=fallback_reply,
+    )
+
+
+async def _export_current_experiment_report(conn) -> dict:
+    session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+    if not session_id:
+        return {}
+
+    output_root = _resolve_experiment_report_output_root(conn)
+    output_path = (
+        output_root
+        / _normalize_uvvis_device_id(conn)
+        / "experimental_graph_records.yaml"
+    )
+    payload = await _call_experiment_graph_tool_fast(
+        conn,
+        "export_records_to_yaml",
+        {
+            "session_id": session_id,
+            "device_id": _normalize_uvvis_device_id(conn),
+            "output_path": str(output_path),
+            "output_root": str(output_root),
+            "split_groups": False,
+        },
+        priority="foreground",
+    )
+    body = _experiment_result_body(payload)
+    if bool(body.get("ok")):
+        setattr(conn, "_last_experiment_report_export", body)
+        conn.logger.bind(tag=TAG).info(
+            "experiment report exported: "
+            f"session_id={session_id}, "
+            f"yaml_path={body.get('yaml_path', '')}, pdf_path={body.get('pdf_path', '')}"
+        )
+    else:
+        conn.logger.bind(tag=TAG).warning(
+            "experiment report export failed: "
+            f"session_id={session_id}, "
+            f"message={_extract_experiment_result_message(payload)}"
+        )
+    return body
+
+
 async def _release_uvvis_session_for_analysis(conn) -> None:
     step_id = _get_current_experiment_step_id(conn)
     if step_id != _UVVIS_ANALYSIS_STEP_ID:
@@ -6866,6 +7443,35 @@ async def _release_uvvis_session_for_analysis(conn) -> None:
 
 
 async def _run_uvvis_shared_dark_air_scan(conn) -> tuple[bool, str]:
+    cache_ready, cache_details = _uvvis_shared_dark_air_cache_ready(conn)
+    if cache_ready:
+        conn.logger.bind(tag=TAG).info(
+            "uvvis shared dark/air cache hit; skip uvvis_prepare_dark_current: "
+            f"{cache_details}"
+        )
+        cache_notice = "已找到可复用的共享暗电流和空气能量校正数据。"
+        not_advanced_reply = (
+            f"{cache_notice}我还没有把实验图推进到下一步，请再说一次继续下一步。"
+        )
+        completed, reply = await _complete_experiment_step_with_fields(
+            conn,
+            fields={
+                "empty_positions_confirmed": True,
+                "shared_dark_current_ready": True,
+                "shared_air_baseline_ready": True,
+                "observations": _format_uvvis_shared_dark_air_cache_observation(cache_details),
+            },
+            auto_advance=True,
+            fallback_reply=not_advanced_reply,
+        )
+        if completed:
+            _clear_uvvis_direct_state(conn)
+            if reply and reply != not_advanced_reply:
+                reply = f"{cache_notice}{reply}"
+            elif not reply:
+                reply = cache_notice
+        return True, reply
+
     session_key, busy_reply = await _ensure_uvvis_session_key(conn)
     if not session_key:
         return False, busy_reply
@@ -6912,6 +7518,14 @@ async def _handle_uvvis_shared_dark_air_prep(
         filtered_text
     ):
         await _start_direct_intent_turn(conn, original_text)
+        cache_ready, _cache_details = _uvvis_shared_dark_air_cache_ready(conn)
+        if cache_ready:
+            handled, reply = await _run_uvvis_shared_dark_air_scan(conn)
+            if handled:
+                if reply:
+                    speak_txt(conn, reply)
+                return True
+            return False
         _set_uvvis_direct_state(
             conn,
             step_id=_UVVIS_SHARED_DARK_AIR_STEP_ID,
@@ -6925,12 +7539,41 @@ async def _handle_uvvis_shared_dark_air_prep(
 
     state = _get_uvvis_direct_state(conn, _UVVIS_SHARED_DARK_AIR_STEP_ID)
     phase = str(state.get("phase", "") or "").strip()
+    control_action = _classify_short_experiment_control(conn, filtered_text)
+
+    if control_action in {"guide", "advance", "repeat"}:
+        advanced, reply = await _advance_if_current_step_already_completed(
+            conn,
+            fallback_reply="",
+        )
+        if advanced:
+            await _start_direct_intent_turn(conn, original_text)
+            _clear_uvvis_direct_state(conn)
+            if reply:
+                speak_txt(conn, reply)
+            return True
 
     if phase == "await_empty_positions":
         if _is_negative_short_reply_fixed(filtered_text):
             await _start_direct_intent_turn(conn, original_text)
             speak_txt(conn, "好，等你确认样品位和参比位都留空后再告诉我。")
             return True
+        cache_ready, _cache_details = _uvvis_shared_dark_air_cache_ready(conn)
+        if cache_ready and (
+            _looks_like_uvvis_ready_reply(filtered_text)
+            or _looks_like_uvvis_empty_positions_reply(filtered_text)
+            or _looks_like_uvvis_empty_then_start_reply(filtered_text)
+            or _looks_like_uvvis_start_scan_reply(filtered_text)
+            or _classify_short_experiment_control(conn, filtered_text)
+            in {"guide", "advance", "repeat"}
+        ):
+            await _start_direct_intent_turn(conn, original_text)
+            handled, reply = await _run_uvvis_shared_dark_air_scan(conn)
+            if handled:
+                if reply:
+                    speak_txt(conn, reply)
+                return True
+            return False
         if (
             _looks_like_uvvis_empty_then_start_reply(filtered_text)
             or _looks_like_uvvis_start_scan_reply(filtered_text)
@@ -6980,7 +7623,6 @@ async def _handle_uvvis_shared_dark_air_prep(
             speak_txt(conn, reply)
         return True
 
-    control_action = _classify_short_experiment_control(conn, filtered_text)
     norm = _normalize_text_for_match(filtered_text)
     if not (
         (_assistant_recently_prompted_uvvis_action(conn) and control_action in {"guide", "advance", "repeat"})
@@ -7004,6 +7646,14 @@ async def _handle_uvvis_shared_dark_air_prep(
         return False
 
     await _start_direct_intent_turn(conn, original_text)
+    cache_ready, _cache_details = _uvvis_shared_dark_air_cache_ready(conn)
+    if cache_ready:
+        handled, reply = await _run_uvvis_shared_dark_air_scan(conn)
+        if handled:
+            if reply:
+                speak_txt(conn, reply)
+            return True
+        return False
     _set_uvvis_direct_state(
         conn,
         step_id=_UVVIS_SHARED_DARK_AIR_STEP_ID,
@@ -7488,17 +8138,19 @@ async def _handle_uvvis_sample_load_completion(
     explicit_group_number = _extract_uvvis_group_number_from_text(
         f"{original_text} {filtered_text}"
     )
-    group_number = _remember_uvvis_group_number(conn, explicit_group_number)
+    group_number = explicit_group_number
     if group_number is None:
         await _start_direct_intent_turn(conn, original_text)
         speak_txt(conn, "这是第几组的样品？")
         return True
+    group_number = _remember_uvvis_group_number(conn, group_number)
 
     await _start_direct_intent_turn(conn, original_text)
     fields = {
         "group_number": group_number,
         "all_samples_loaded_into_cuvettes": True,
         "all_cuvettes_ready_for_measurement": True,
+        "native_reference_water_loaded": True,
         "reference_cuvette_ready": True,
         "observations": f"第{group_number}组1-5号样品已装入比色皿并放入样品位，参比位为纯水。",
     }
@@ -7527,24 +8179,55 @@ async def _handle_uvvis_sample_load_completion(
 async def _handle_uvvis_spectra_measurement(
     conn, original_text: str, filtered_text: str, *, start_turn: bool = True
 ) -> bool:
+    control_action = _classify_short_experiment_control(conn, filtered_text)
     if not (
         _looks_like_uvvis_ready_reply(filtered_text)
-        or _classify_short_experiment_control(conn, filtered_text) in {"guide", "advance", "repeat"}
+        or _is_explicit_experiment_resume_request(filtered_text)
+        or control_action in {"guide", "advance", "repeat"}
     ):
         return False
+
+    state = _get_uvvis_direct_state(conn, _get_current_experiment_step_id(conn))
+    phase = str(state.get("phase") or "").strip()
+    if phase == "await_finish_decision":
+        if control_action == "repeat":
+            await _start_direct_intent_turn(conn, original_text)
+            _set_uvvis_direct_state(
+                conn,
+                step_id=_get_current_experiment_step_id(conn),
+                phase="",
+            )
+            speak_txt(conn, "可以，再测一轮。请确认这是第几组，然后说开始扫描。")
+            return True
+
+        if control_action == "advance":
+            await _start_direct_intent_turn(conn, original_text)
+            handled, reply = await _finish_saved_uvvis_spectra_step_if_ready(conn)
+            speak_txt(conn, reply or "当前批量光谱测量步骤已经完成。")
+            return True
+
+        await _start_direct_intent_turn(conn, original_text)
+        speak_txt(conn, "你现在可以说“再测一轮”，或说“当前步骤全部完成”再进入下一步。")
+        return True
+
+    if control_action == "advance":
+        handled, reply = await _finish_saved_uvvis_spectra_step_if_ready(conn)
+        if handled:
+            if start_turn:
+                await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, reply or "当前批量光谱测量步骤已经完成。")
+            return True
 
     explicit_group_number = _extract_uvvis_group_number_from_text(
         f"{original_text} {filtered_text}"
     )
-    group_number = _remember_uvvis_group_number(
-        conn,
-        explicit_group_number if explicit_group_number is not None else None,
-    )
+    group_number = explicit_group_number
     if group_number is None:
         if start_turn:
             await _start_direct_intent_turn(conn, original_text)
         speak_txt(conn, "这是第几组的样品扫描？")
         return True
+    group_number = _remember_uvvis_group_number(conn, group_number)
 
     session_key, busy_reply = await _ensure_uvvis_session_key(conn)
     if not session_key:
@@ -7557,6 +8240,7 @@ async def _handle_uvvis_spectra_measurement(
 
     if start_turn:
         await _start_direct_intent_turn(conn, original_text)
+    output_dir = str(_resolve_uvvis_primary_group_dir(conn))
     payload = await _execute_uvvis_tool_payload(
         conn,
         "uvvis_measure_spectra",
@@ -7564,12 +8248,24 @@ async def _handle_uvvis_spectra_measurement(
             "session_key": session_key,
             "sample_positions": list(_UVVIS_SAMPLE_POSITIONS),
             "ready_for_samples": True,
+            "output_dir": output_dir,
         },
     )
     if _payload_looks_busy_or_inaccessible(payload):
         speak_txt(conn, _UVVIS_BUSY_REPLY)
         return True
     if _payload_mentions_missing_blank(payload):
+        cache_ready, cache_details = _uvvis_shared_dark_air_cache_ready(conn)
+        if cache_ready:
+            conn.logger.bind(tag=TAG).warning(
+                "uvvis_measure_spectra reported missing shared prep, but reusable "
+                f"shared dark/air cache exists; preserving current graph step: {cache_details}"
+            )
+            speak_txt(
+                conn,
+                "共享暗电流和空气能量校正数据是完整的，我没有回退实验步骤。请再说一次开始扫描。",
+            )
+            return True
         _clear_uvvis_direct_state(conn)
         fallback_step_id = (
             _UVVIS_SHARED_BLANK_STEP_ID
@@ -7604,18 +8300,28 @@ async def _handle_uvvis_spectra_measurement(
         )
         return True
 
+    round_index = len(
+        list(
+            (
+                _resolve_uvvis_primary_group_dir(conn) / "uvvis_measure_spectra"
+            ).glob("sample_batch_*_manifest.json")
+        )
+    )
+    if round_index < 1:
+        round_index = 1
+
     fields = {
-        f"sample_{sample_position}_lambda_max": rows[sample_position]["lambda_max_nm"]
+        f"sample{sample_position}_lambda_max_nm": rows[sample_position]["lambda_max_nm"]
         for sample_position in _UVVIS_SAMPLE_POSITIONS
     }
     for sample_position in _UVVIS_SAMPLE_POSITIONS:
         max_absorbance = rows[sample_position].get("max_absorbance")
-        # The experiment schema only accepts non-negative absorbance maxima.
-        # Slightly negative values can appear after baseline correction, so we
-        # skip recording that optional field rather than failing the whole step.
-        if max_absorbance is not None and max_absorbance >= 0:
-            fields[f"sample_{sample_position}_absorbance_max"] = max_absorbance
+        if max_absorbance is not None:
+            fields[f"sample{sample_position}_max_absorbance"] = max_absorbance
     fields["spectrum_saved"] = True
+    fields["measurement_round_index"] = round_index
+    fields["measurement_round_saved"] = True
+    fields["step_finished_confirmed"] = False
     fields["observations"] = (
         "1-5号样品批量扫描完成，"
         + "；".join(
@@ -7628,21 +8334,30 @@ async def _handle_uvvis_spectra_measurement(
     auto_advanced, reply = await _complete_experiment_step_with_fields(
         conn,
         fields=fields,
-        auto_advance=True,
+        auto_advance=False,
         fallback_reply="1-5号样品的光谱都测好了。",
     )
+    report_payload = {}
+    if auto_advanced:
+        report_payload = await _export_current_experiment_report(conn)
     summary = "，".join(
         f"{sample_position}号{rows[sample_position]['lambda_max_nm']}纳米"
         for sample_position in _UVVIS_SAMPLE_POSITIONS
     )
     spoken_reply = f"{summary}。400到700纳米每隔10纳米的校正吸光度结果和光谱图已保存。"
-    if reply:
-        if reply.startswith("接下来"):
-            spoken_reply = f"{spoken_reply}{reply}"
-        else:
-            spoken_reply = f"{spoken_reply}{reply}"
-    if auto_advanced or reply:
-        speak_txt(conn, spoken_reply)
+    if bool(report_payload.get("ok")) and report_payload.get("pdf_generated"):
+        spoken_reply += "实验总报告PDF和YAML也已更新。"
+    elif auto_advanced:
+        spoken_reply += "实验总报告还没有完整生成成功，我已保留当前步骤。"
+    elif reply:
+        spoken_reply += reply
+    spoken_reply += "你现在可以说“再测一轮”，或说“当前步骤全部完成”再进入下一步。"
+    _set_uvvis_direct_state(
+        conn,
+        step_id=_get_current_experiment_step_id(conn),
+        phase="await_finish_decision",
+    )
+    speak_txt(conn, spoken_reply)
     return True
 
 
@@ -7658,7 +8373,426 @@ async def _handle_uvvis_kinetics_measurement(
         "advance",
         "repeat",
     }
-    output_dir = str(_resolve_uvvis_native_output_root(conn))
+    explicit_group_number = _extract_uvvis_group_number_from_text(
+        f"{original_text} {filtered_text}"
+    )
+    is_explicit_rerun = control_action == "repeat" or _looks_like_kinetics_rerun_request(
+        original_text,
+        filtered_text,
+    )
+
+    def _select_kinetics_output_dir(group_number: int | None) -> str:
+        if group_number is not None:
+            _remember_uvvis_group_number(conn, group_number)
+        selected_group_number = _get_current_uvvis_group_number(conn)
+        if selected_group_number is None:
+            return ""
+        target_dir = (
+            _resolve_uvvis_native_output_root(conn)
+            / _normalize_uvvis_device_id(conn)
+            / str(selected_group_number)
+        ).resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return str(target_dir)
+
+    def _extract_grouped_task_id(payload: dict) -> str:
+        values = _collect_payload_named_values(payload, {"task_id"})
+        return str(values.get("task_id") or "").strip()
+
+    def _grouped_kinetics_counts(record_fields: dict) -> tuple[int, int]:
+        sample2_count = sum(
+            1
+            for key in record_fields
+            if re.fullmatch(r"sample2_t\d+_absorbance", str(key or ""))
+        )
+        sample4_count = sum(
+            1
+            for key in record_fields
+            if re.fullmatch(r"sample4_t\d+_absorbance", str(key or ""))
+        )
+        return sample2_count, sample4_count
+
+    def _grouped_kinetics_progress_text(payload: dict, group_number: int | None) -> str:
+        data = _to_plain_data(payload)
+        point_count = None
+        completed_points = None
+        if isinstance(data, dict):
+            point_count = _extract_int_value(data.get("point_count"))
+            completed_points = _extract_int_value(data.get("completed_points"))
+            sample_groups = data.get("sample_groups")
+            if completed_points is None and isinstance(sample_groups, list):
+                counts = [
+                    _extract_int_value(item.get("completed_points"))
+                    for item in sample_groups
+                    if isinstance(item, dict)
+                ]
+                counts = [value for value in counts if value is not None]
+                if counts:
+                    completed_points = min(counts)
+            if point_count is None and isinstance(sample_groups, list):
+                totals = [
+                    _extract_int_value(item.get("point_count"))
+                    for item in sample_groups
+                    if isinstance(item, dict)
+                ]
+                totals = [value for value in totals if value is not None]
+                if totals:
+                    point_count = max(totals)
+        group_label = f"第{group_number}组" if group_number else "当前组"
+        if completed_points is not None and point_count:
+            return (
+                f"{group_label}动力学测量正在记录，当前已完成 {completed_points}/{point_count} 个时间点。"
+                "请不要移动2、3、4、5号位比色皿。"
+            )
+        return f"{group_label}动力学测量正在记录。请不要移动2、3、4、5号位比色皿。"
+
+    def _grouped_kinetics_complete_fields(payload: dict, group_number: int | None) -> tuple[dict, int | None]:
+        record_fields = _extract_uvvis_measure_kinetics_record_fields(payload, conn, "")
+        sample2_count, sample4_count = _grouped_kinetics_counts(record_fields)
+        if sample2_count < 35 or sample4_count < 35:
+            return {}, None
+        data = _to_plain_data(payload)
+        round_index = None
+        if isinstance(data, dict):
+            round_index = _extract_int_value(data.get("round_index"))
+        fields = {
+            key: value
+            for key, value in record_fields.items()
+            if re.fullmatch(r"(sample2|sample4)_t\d+_absorbance", str(key or ""))
+        }
+        if group_number is not None:
+            fields["group_number"] = group_number
+        if round_index is not None:
+            fields["kinetics_round_index"] = round_index
+        fields["kinetics_round_saved"] = True
+        fields["step_finished_confirmed"] = False
+        fields["observations"] = (
+            f"第{group_number}组2号和4号样品 400 nm 联合动力学测量完成，"
+            "2号样品使用2/3号位，4号样品使用4/5号位；"
+            "本轮共记录35个时间点。"
+        )
+        return fields, round_index
+
+    async def _cancel_open_kinetics_trial_if_only_metadata(group_number: int | None) -> None:
+        session_id = str(getattr(conn, "experiment_session_id", "") or "").strip()
+        if not session_id:
+            return
+        try:
+            progress_payload = await _call_experiment_graph_tool_fast(
+                conn,
+                "get_current_progress",
+                {"session_id": session_id},
+                priority="foreground",
+            )
+            progress = _extract_experiment_current_progress(progress_payload)
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"kinetics progress check before async start failed: {exc}"
+            )
+            return
+        if not isinstance(progress, dict):
+            return
+        current_data = progress.get("current_data")
+        if not isinstance(current_data, dict):
+            current_data = {}
+        has_absorbance = any(
+            re.fullmatch(r"(sample2|sample4)_t\d+_absorbance", str(key or ""))
+            for key in current_data
+        )
+        if has_absorbance:
+            return
+        progress_group = _extract_int_value(progress.get("group_number")) or _extract_int_value(
+            current_data.get("group_number")
+        )
+        if group_number is not None and progress_group not in (None, group_number):
+            should_cancel = True
+        else:
+            collected = _extract_int_value(progress.get("collected_required_fields"))
+            should_cancel = collected is None or collected <= 4
+        if not should_cancel:
+            return
+        try:
+            await _call_experiment_graph_tool_fast(
+                conn,
+                "cancel_trial",
+                {"session_id": session_id},
+                priority="foreground",
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"kinetics stale trial cancel failed before async start: {exc}"
+            )
+
+    def _clear_existing_kinetics_output(output_dir: str, group_number: int | None) -> bool:
+        output_path = Path(str(output_dir or "")).resolve()
+        if not output_path:
+            return False
+        expected_group = str(group_number or "").strip()
+        if expected_group and output_path.name != expected_group:
+            conn.logger.bind(tag=TAG).warning(
+                "skip clearing kinetics output because output_dir does not end with "
+                f"group number: output_dir={output_path}, group={expected_group}"
+            )
+            return False
+        kinetics_dir = (output_path / "uvvis_measure_kinetic").resolve()
+        if kinetics_dir.parent != output_path:
+            conn.logger.bind(tag=TAG).warning(
+                f"skip clearing unexpected kinetics output path: {kinetics_dir}"
+            )
+            return False
+        if not kinetics_dir.exists():
+            return True
+        try:
+            shutil.rmtree(kinetics_dir)
+            conn.logger.bind(tag=TAG).info(
+                f"cleared existing grouped kinetics output before rerun: {kinetics_dir}"
+            )
+            return True
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"failed to clear existing grouped kinetics output before rerun: {kinetics_dir}, error={exc}"
+            )
+            return False
+
+    def _kinetics_csv_row_count(csv_path: Path) -> int:
+        if not csv_path.exists() or not csv_path.is_file():
+            return 0
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                return sum(1 for _row in csv.DictReader(handle))
+        except Exception:
+            return 0
+
+    def _existing_kinetics_data_summary(output_dir: str, group_number: int | None) -> dict:
+        output_path = Path(str(output_dir or "")).resolve()
+        expected_group = str(group_number or "").strip()
+        if expected_group and output_path.name != expected_group:
+            return {"has_data": False}
+
+        kinetics_dir = (output_path / "uvvis_measure_kinetic").resolve()
+        if kinetics_dir.parent != output_path or not kinetics_dir.exists():
+            return {"has_data": False, "kinetics_dir": str(kinetics_dir)}
+
+        positions_count = _kinetics_csv_row_count(kinetics_dir / "positions_absorbance.csv")
+        sample2_count = _kinetics_csv_row_count(
+            kinetics_dir / "2号样品" / "absorbance.csv"
+        )
+        sample4_count = _kinetics_csv_row_count(
+            kinetics_dir / "4号样品" / "absorbance.csv"
+        )
+        point_count = None
+        phase_text = ""
+        progress_has_data = False
+        progress_path = kinetics_dir / "kinetics_progress.json"
+        if progress_path.exists() and progress_path.is_file():
+            try:
+                progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            except Exception:
+                progress = {}
+            if isinstance(progress, dict):
+                point_count = _extract_int_value(progress.get("point_count"))
+                phase_text = str(progress.get("phase") or "").strip()
+                record_fields = progress.get("record_fields")
+                if isinstance(record_fields, dict):
+                    progress_has_data = any(
+                        re.fullmatch(r"(sample2|sample4)_t\d+_absorbance", str(key or ""))
+                        for key in record_fields
+                    )
+                progress_has_data = progress_has_data or bool(point_count and point_count > 0)
+
+        has_data = any(
+            count > 0 for count in (positions_count, sample2_count, sample4_count)
+        ) or progress_has_data
+        complete = (
+            point_count is not None
+            and point_count >= 35
+            and sample2_count >= 35
+            and sample4_count >= 35
+        ) or (
+            phase_text == "grouped_kinetics_complete"
+            and sample2_count >= 35
+            and sample4_count >= 35
+        )
+        return {
+            "has_data": bool(has_data),
+            "complete": bool(complete),
+            "kinetics_dir": str(kinetics_dir),
+            "positions_count": positions_count,
+            "sample2_count": sample2_count,
+            "sample4_count": sample4_count,
+            "point_count": point_count,
+            "phase": phase_text,
+        }
+
+    def _pending_overwrite_confirmation_matches(group_number: int, output_dir: str) -> bool:
+        if phase != "await_kinetics_overwrite_confirmation":
+            return False
+        state_group = _extract_int_value(state.get("group_number"))
+        state_output_dir = str(state.get("output_dir") or "").strip()
+        return state_group == group_number and state_output_dir == str(output_dir or "").strip()
+
+    async def _finish_grouped_kinetics_payload(
+        payload: dict,
+        group_number: int | None,
+        *,
+        running_reply: str = "",
+    ) -> bool:
+        fields, _round_index = _grouped_kinetics_complete_fields(payload, group_number)
+        if not fields:
+            speak_txt(conn, running_reply or _grouped_kinetics_progress_text(payload, group_number))
+            return True
+        completed, reply = await _complete_experiment_step_with_fields(
+            conn,
+            fields=fields,
+            auto_advance=False,
+            fallback_reply=(
+                "我记录好了。如果还要继续重测，请说再测一轮；"
+                "如果当前步骤已经全部完成，请直接告诉我。"
+            ),
+        )
+        if completed:
+            _set_uvvis_direct_state(
+                conn,
+                step_id=step_id,
+                phase="await_finish_decision",
+                session_key=session_key,
+                group_number=group_number,
+                output_dir=_select_kinetics_output_dir(group_number),
+            )
+            speak_txt(
+                conn,
+                f"我记录好了。第{group_number}组2号和4号样品的动力学数据已经保存。"
+                "如果还要继续重测，请说再测一轮；如果这个步骤已经全部完成，请直接告诉我。",
+            )
+        elif reply:
+            speak_txt(conn, reply)
+        else:
+            speak_txt(conn, "这次动力学结果还没有完整写回当前步骤，请稍后再试。")
+        return True
+
+    async def _check_grouped_kinetics_status(group_number: int | None) -> bool:
+        task_id = str(state.get("task_id") or "").strip()
+        status_args = {"task_id": task_id} if task_id else {}
+        try:
+            payload = await _execute_uvvis_tool_payload(
+                conn,
+                "uvvis_grouped_kinetics_status",
+                status_args,
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"uvvis_grouped_kinetics_status failed: {exc}"
+            )
+            speak_txt(conn, _UVVIS_NOT_READY_REPLY)
+            return True
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        fields, _round_index = _grouped_kinetics_complete_fields(payload, group_number)
+        if fields:
+            return await _finish_grouped_kinetics_payload(payload, group_number)
+        data = _to_plain_data(payload)
+        state_text = ""
+        if isinstance(data, dict):
+            state_text = str(data.get("state") or data.get("phase") or "").strip().lower()
+        if any(token in state_text for token in ("succeed", "complete", "done", "finished")):
+            try:
+                result_payload = await _execute_uvvis_tool_payload(
+                    conn,
+                    "uvvis_grouped_kinetics_result",
+                    status_args,
+                )
+            except Exception as exc:
+                conn.logger.bind(tag=TAG).warning(
+                    f"uvvis_grouped_kinetics_result failed: {exc}"
+                )
+                speak_txt(conn, "动力学测量已结束，但结果还没有取回成功，请稍后再查一次。")
+                return True
+            return await _finish_grouped_kinetics_payload(result_payload, group_number)
+        speak_txt(conn, _grouped_kinetics_progress_text(payload, group_number))
+        return True
+
+    async def _start_grouped_kinetics(group_number: int, *, clear_existing: bool = False) -> bool:
+        output_dir = _select_kinetics_output_dir(group_number)
+        if not output_dir:
+            speak_txt(conn, "这是第几组的动力学测量？请说第几组可以开始。")
+            return True
+        existing_summary = _existing_kinetics_data_summary(output_dir, group_number)
+        if (
+            existing_summary.get("has_data")
+            and not _pending_overwrite_confirmation_matches(group_number, output_dir)
+        ):
+            _set_uvvis_direct_state(
+                conn,
+                step_id=step_id,
+                phase="await_kinetics_overwrite_confirmation",
+                session_key=session_key,
+                group_number=group_number,
+                output_dir=output_dir,
+                existing_kinetics_summary=existing_summary,
+            )
+            if existing_summary.get("complete"):
+                detail = "已经有完整的35个时间点"
+            else:
+                detail = (
+                    "已经有部分数据，"
+                    f"2号样品{existing_summary.get('sample2_count', 0)}个点，"
+                    f"4号样品{existing_summary.get('sample4_count', 0)}个点"
+                )
+            speak_txt(
+                conn,
+                f"我检查到第{group_number}组动力学目录里{detail}。是否需要重测并覆盖这些数据？",
+            )
+            return True
+        if clear_existing and not _clear_existing_kinetics_output(output_dir, group_number):
+            speak_txt(
+                conn,
+                f"第{group_number}组旧的动力学结果目录没有清理成功，我先不启动重测，避免新旧数据混在一起。",
+            )
+            return True
+        await _cancel_open_kinetics_trial_if_only_metadata(group_number)
+        try:
+            payload = await _execute_uvvis_tool_payload(
+                conn,
+                "uvvis_grouped_kinetics_start",
+                {
+                    "session_key": session_key,
+                    "wavelength_nm": 400,
+                    "duration_minutes": 34,
+                    "interval_seconds": 60,
+                    "readings_per_point": 1,
+                    "settle_time": 0.01,
+                    "sample_positions": list(_UVVIS_GROUPED_KINETICS_POSITIONS),
+                    "output_dir": output_dir,
+                    "force_restart": bool(clear_existing),
+                },
+            )
+        except Exception as exc:
+            conn.logger.bind(tag=TAG).warning(
+                f"uvvis_grouped_kinetics_start failed: {exc}"
+            )
+            speak_txt(conn, _UVVIS_NOT_READY_REPLY)
+            return True
+        if _payload_looks_busy_or_inaccessible(payload):
+            speak_txt(conn, _UVVIS_BUSY_REPLY)
+            return True
+        task_id = _extract_grouped_task_id(payload)
+        setattr(conn, "_last_uvvis_kinetics_artifacts", _to_plain_data(payload))
+        _set_uvvis_direct_state(
+            conn,
+            step_id=step_id,
+            phase="kinetics_running",
+            session_key=session_key,
+            group_number=group_number,
+            output_dir=output_dir,
+            task_id=task_id,
+        )
+        speak_txt(
+            conn,
+            f"第{group_number}组2号和4号样品动力学测量已经开始，仪器会连续记录35个时间点。"
+            "请不要移动2、3、4、5号位比色皿。",
+        )
+        return True
 
     session_key, busy_reply = await _ensure_uvvis_session_key(conn)
     if not session_key:
@@ -7668,6 +8802,69 @@ async def _handle_uvvis_kinetics_measurement(
             return True
         return False
 
+    if phase == "await_kinetics_overwrite_confirmation":
+        await _start_direct_intent_turn(conn, original_text)
+        group_number = explicit_group_number or _extract_int_value(state.get("group_number"))
+        output_dir = str(state.get("output_dir") or "").strip()
+        if group_number is None:
+            _set_uvvis_direct_state(
+                conn,
+                step_id=step_id,
+                phase="await_grouped_samples",
+                session_key=session_key,
+                group_number=_get_current_uvvis_group_number(conn),
+            )
+            speak_txt(conn, "这是第几组的动力学测量？请说第几组可以开始。")
+            return True
+        if is_negative:
+            _set_uvvis_direct_state(
+                conn,
+                step_id=step_id,
+                phase="await_grouped_samples",
+                session_key=session_key,
+                group_number=group_number,
+                output_dir=output_dir,
+            )
+            speak_txt(conn, f"好，我不会覆盖第{group_number}组已有动力学数据。")
+            return True
+        if is_affirmative or is_explicit_rerun:
+            return await _start_grouped_kinetics(group_number, clear_existing=True)
+        speak_txt(
+            conn,
+            f"第{group_number}组动力学目录里已经有数据。请确认是否重测并覆盖这些数据。",
+        )
+        return True
+
+    if phase in {"kinetics_running", "await_kinetics_result"}:
+        if not (
+            _looks_like_uvvis_status_query(
+                conn,
+                original_text,
+                filtered_text,
+                inferred_step_id=step_id,
+            )
+            or is_affirmative
+            or is_explicit_rerun
+            or control_action in {"guide", "advance"}
+        ):
+            return False
+        await _start_direct_intent_turn(conn, original_text)
+        group_number = explicit_group_number or _extract_int_value(state.get("group_number"))
+        if is_explicit_rerun:
+            if group_number is None:
+                _set_uvvis_direct_state(
+                    conn,
+                    step_id=step_id,
+                    phase="await_grouped_samples",
+                    session_key=session_key,
+                    group_number=_get_current_uvvis_group_number(conn),
+                    clear_existing_output=True,
+                )
+                speak_txt(conn, "这是第几组的动力学测量？请说第几组可以开始。")
+                return True
+            return await _start_grouped_kinetics(group_number, clear_existing=True)
+        return await _check_grouped_kinetics_status(group_number)
+
     if phase == "await_finish_decision":
         if control_action == "repeat":
             await _start_direct_intent_turn(conn, original_text)
@@ -7676,10 +8873,12 @@ async def _handle_uvvis_kinetics_measurement(
                 step_id=step_id,
                 phase="await_grouped_samples",
                 session_key=session_key,
+                group_number=_get_current_uvvis_group_number(conn),
+                clear_existing_output=True,
             )
             speak_txt(
                 conn,
-                "请重新装好动力学样品。参比位放纯水，1号位留空，2和3号位放2号样品的反应液和参比液，4和5号位放4号样品的反应液和参比液。放好后告诉我开始。",
+                "请重新装好动力学样品。参比位放纯水，1号位留空，2和3号位放2号样品的反应液和参比液，4和5号位放4号样品的反应液和参比液。放好后告诉我是第几组并说开始。",
             )
             return True
         if control_action not in {"guide", "advance"}:
@@ -7712,99 +8911,17 @@ async def _handle_uvvis_kinetics_measurement(
         if not is_affirmative:
             return False
 
+        group_number = explicit_group_number or _extract_int_value(state.get("group_number"))
+        if group_number is None:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "这是第几组的动力学测量？请说第几组可以开始。")
+            return True
+
         await _start_direct_intent_turn(conn, original_text)
-        payload = await _execute_uvvis_tool_payload(
-            conn,
-            "uvvis_measure_kinetics",
-            {
-                "session_key": session_key,
-                "wavelength_nm": 400,
-                "duration_minutes": 34,
-                "interval_seconds": 60,
-                "ready_for_samples": True,
-                "sample_positions": list(_UVVIS_GROUPED_KINETICS_POSITIONS),
-                "output_dir": output_dir,
-            },
+        return await _start_grouped_kinetics(
+            group_number,
+            clear_existing=is_explicit_rerun or bool(state.get("clear_existing_output")),
         )
-        if _payload_looks_busy_or_inaccessible(payload):
-            speak_txt(conn, _UVVIS_BUSY_REPLY)
-            return True
-
-        record_fields = _extract_uvvis_measure_kinetics_record_fields(payload, conn, "")
-        sample2_fields = {
-            key: value
-            for key, value in record_fields.items()
-            if re.fullmatch(r"sample2_t\d+_absorbance", str(key or ""))
-        }
-        sample4_fields = {
-            key: value
-            for key, value in record_fields.items()
-            if re.fullmatch(r"sample4_t\d+_absorbance", str(key or ""))
-        }
-        if len(sample2_fields) < 35 or len(sample4_fields) < 35:
-            speak_txt(conn, "这次动力学结果还不完整，我还没有拿到2号和4号样品各自完整的35个时间点，请稍后再试。")
-            return True
-
-        payload_data = _to_plain_data(payload)
-        round_index = _extract_int_value(payload_data.get("round_index"))
-        sample_groups = payload_data.get("sample_groups")
-        if not isinstance(sample_groups, list):
-            sample_groups = []
-        required_paths = [
-            payload_data.get("progress_json"),
-            payload_data.get("manifest_json"),
-            payload_data.get("raw_csv"),
-            payload_data.get("absorbance_csv"),
-        ]
-        for group in sample_groups:
-            if not isinstance(group, dict):
-                continue
-            required_paths.extend([group.get("raw_csv"), group.get("absorbance_csv")])
-        artifacts_ok = True
-        for path_text in required_paths:
-            path = Path(str(path_text or "").strip())
-            if not path_text or not path.exists():
-                artifacts_ok = False
-                break
-        setattr(conn, "_last_uvvis_kinetics_artifacts", payload_data)
-        if not artifacts_ok:
-            speak_txt(conn, "这次动力学的数据文件还没有完整落盘，请稍后再试。")
-            return True
-
-        fields = dict(sample2_fields)
-        fields.update(sample4_fields)
-        if round_index is not None:
-            fields["kinetics_round_index"] = round_index
-        fields["kinetics_round_saved"] = True
-        fields["step_finished_confirmed"] = False
-        fields["observations"] = (
-            f"2号和4号样品 400 nm 联合动力学测量完成，"
-            f"2号样品使用2/3号位，4号样品使用4/5号位；"
-            f"本轮共记录35个时间点，数据已写入 uvvis_measure_kinetic/{round_index or '?'}。"
-        )
-
-        completed, reply = await _complete_experiment_step_with_fields(
-            conn,
-            fields=fields,
-            auto_advance=False,
-            fallback_reply="我记录好了。如果还要继续重测，请说再测一轮；如果当前步骤已经全部完成，请直接告诉我。",
-        )
-        if completed:
-            _set_uvvis_direct_state(
-                conn,
-                step_id=step_id,
-                phase="await_finish_decision",
-                session_key=session_key,
-            )
-            speak_txt(
-                conn,
-                "我记录好了。这一轮2号和4号样品的动力学数据都已经保存。如果还要继续重测，请说再测一轮；如果这个步骤已经全部完成，请直接告诉我。",
-            )
-        elif reply:
-            speak_txt(conn, reply)
-        else:
-            speak_txt(conn, "这次动力学结果还没有完整写回当前步骤，请稍后再试。")
-        return True
 
     if phase in {"start_pending", ""}:
         if is_negative:
@@ -7821,34 +8938,42 @@ async def _handle_uvvis_kinetics_measurement(
         ):
             return False
 
-        await _start_direct_intent_turn(conn, original_text)
-        speak_txt(conn, "先保持2到5号样品位为空，我先做400纳米动力学测量需要的共享前置准备。")
-        payload = await _execute_uvvis_tool_payload(
-            conn,
-            "uvvis_measure_kinetics",
-            {
-                "session_key": session_key,
-                "wavelength_nm": 400,
-                "duration_minutes": 34,
-                "interval_seconds": 60,
-                "ready_for_samples": False,
-                "sample_positions": list(_UVVIS_GROUPED_KINETICS_POSITIONS),
-                "output_dir": output_dir,
-            },
-        )
-        if _payload_looks_busy_or_inaccessible(payload):
-            speak_txt(conn, _UVVIS_BUSY_REPLY)
+        if explicit_group_number is not None and (
+            _looks_like_uvvis_start_scan_reply(filtered_text)
+            or _contains_any(_normalize_text_for_match(filtered_text), ("开始", "测量", "扫描", "扫谱"))
+        ):
+            await _start_direct_intent_turn(conn, original_text)
+            return await _start_grouped_kinetics(
+                explicit_group_number,
+                clear_existing=is_explicit_rerun,
+            )
+
+        if explicit_group_number is None:
+            await _start_direct_intent_turn(conn, original_text)
+            if is_explicit_rerun:
+                _set_uvvis_direct_state(
+                    conn,
+                    step_id=step_id,
+                    phase="await_grouped_samples",
+                    session_key=session_key,
+                    group_number=_get_current_uvvis_group_number(conn),
+                    clear_existing_output=True,
+                )
+            speak_txt(conn, "这是第几组的动力学测量？请说第几组可以开始。")
             return True
 
+        await _start_direct_intent_turn(conn, original_text)
         _set_uvvis_direct_state(
             conn,
             step_id=step_id,
             phase="await_grouped_samples",
             session_key=session_key,
+            group_number=explicit_group_number,
+            clear_existing_output=is_explicit_rerun,
         )
         speak_txt(
             conn,
-            "共享前置准备好了。请保持参比位是纯水，1号位留空，2和3号位放2号样品的反应液和参比液，4和5号位放4号样品的反应液和参比液。全部放好后告诉我开始。",
+            f"好，已记为第{explicit_group_number}组。请确认1号位为空，2/3号位为2号样品反应液/参比液，4/5号位为4号样品反应液/参比液，仪器参考位为纯水。放好后说可以开始。",
         )
         return True
 
@@ -7892,7 +9017,6 @@ async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: st
         if not (
             status_query
             or _looks_like_explicit_uvvis_turn(original_text, filtered_text)
-            or _looks_like_uvvis_followup_reply(conn, filtered_text)
         ):
             return False
 
@@ -7901,6 +9025,46 @@ async def handle_direct_uvvis_intent(conn, original_text: str, filtered_text: st
         original_text,
         filtered_text,
     )
+    if _looks_like_kinetics_rerun_request(original_text, filtered_text):
+        inferred_step_id = _UVVIS_KINETICS_COMBINED_STEP_ID
+
+    if inferred_step_id in {
+        _UVVIS_KINETICS_SAMPLE2_STEP_ID,
+        _UVVIS_KINETICS_SAMPLE4_STEP_ID,
+        _UVVIS_KINETICS_COMBINED_STEP_ID,
+    }:
+        kinetics_state = _get_uvvis_direct_state(conn, inferred_step_id)
+        if str(kinetics_state.get("phase") or "").strip() in {
+            "kinetics_running",
+            "await_kinetics_result",
+        } and _looks_like_uvvis_status_query(
+            conn,
+            original_text,
+            filtered_text,
+            inferred_step_id=inferred_step_id,
+        ):
+            return await _handle_uvvis_kinetics_measurement(
+                conn,
+                original_text,
+                filtered_text,
+                inferred_step_id,
+            )
+
+    if (
+        inferred_step_id == _UVVIS_KINETICS_COMBINED_STEP_ID
+        and step_id != _UVVIS_KINETICS_COMBINED_STEP_ID
+        and _looks_like_kinetics_rerun_request(original_text, filtered_text)
+    ):
+        redirected = await _try_redirect_experiment_step_fast(
+            conn,
+            _UVVIS_KINETICS_COMBINED_STEP_ID,
+            log_reason="direct uvvis redirecting kinetics rerun request",
+        )
+        if not redirected:
+            await _start_direct_intent_turn(conn, original_text)
+            speak_txt(conn, "我还没有把实验图谱切回动力学测量步骤，先不启动重测，避免写错步骤。")
+            return True
+        step_id = _UVVIS_KINETICS_COMBINED_STEP_ID
 
     if _looks_like_uvvis_status_query(
         conn,
@@ -8097,7 +9261,10 @@ async def handle_experiment_control_fast_intent(
         if not _is_experiment_fast_path_action_enabled(conn, "start"):
             return False
         try:
-            await _reset_experiment_fresh_start_context(conn)
+            await _reset_experiment_fresh_start_context(
+                conn,
+                allow_device_resume=False,
+            )
         except Exception as exc:
             conn.logger.bind(tag=TAG).warning(
                 f"experiment fresh start reset failed: {exc}"

@@ -333,7 +333,9 @@ def resolve_experiment_log_paths(config: Dict[str, Any], device_id: str) -> List
     seen = set()
 
     for _, llm_cfg in _iter_codex_llm_configs(config):
-        template = str(llm_cfg.get("stream_log_path", "")).strip()
+        template = str(llm_cfg.get("interaction_log_path", "")).strip()
+        if not template:
+            template = str(llm_cfg.get("stream_log_path", "")).strip()
         if not template:
             continue
         for candidate_device_id in (safe_device_id, normalized_device_id):

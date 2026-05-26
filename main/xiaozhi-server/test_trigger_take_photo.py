@@ -96,7 +96,7 @@ class TriggerTakePhotoTest(unittest.TestCase):
         question = build_question_with_photo_name("look", "sample_2", group_number=3)
         self.assertIn('"photo_name":"sample_2"', question)
         self.assertIn('"group_number":3', question)
-        self.assertIn('"group_dir_name":"group_03"', question)
+        self.assertIn('"group_dir_name":"3"', question)
 
 
 if __name__ == "__main__":

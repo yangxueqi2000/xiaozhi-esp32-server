@@ -158,6 +158,29 @@ class UVVisScanRuleTest(unittest.IsolatedAsyncioTestCase):
         expected = str((Path(tmp_dir).resolve() / "94_a9_90_28_ea_58").resolve())
         self.assertEqual(expected, arguments["output_dir"])
 
+    def test_prepare_arguments_routes_grouped_kinetics_start_to_numeric_group_dir(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = "step_6_kinetics_combined_measurement"
+        conn.experiment_current_group_number = 2
+        rule = UVVisScanRule(conn, lambda: None)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conn.config = {"uvvis_scan_output_root": tmp_dir}
+            arguments = {
+                "wavelength_nm": 400,
+                "duration_minutes": 34,
+                "interval_seconds": 60,
+                "sample_positions": [2, 3, 4, 5],
+            }
+
+            rule.prepare_arguments("uvvis_grouped_kinetics_start", arguments)
+
+        expected = str(
+            (Path(tmp_dir).resolve() / "94_a9_90_28_ea_58" / "2").resolve()
+        )
+        self.assertEqual(expected, arguments["output_dir"])
+        self.assertNotIn("group_", arguments["output_dir"])
+
     def test_prepare_arguments_injects_dark_current_shared_and_device_dirs(self):
         conn = _FakeConn()
         rule = UVVisScanRule(conn, lambda: None)

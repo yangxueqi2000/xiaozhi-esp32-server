@@ -156,7 +156,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "LLM": {
                     "codex_app_server": {
                         "type": "codex",
-                        "stream_log_path": str(Path(temp_dir) / "{device_id}.log"),
+                        "interaction_log_path": str(Path(temp_dir) / "{device_id}.log"),
                     }
                 }
             }
@@ -204,7 +204,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                 "LLM": {
                     "codex_app_server": {
                         "type": "codex",
-                        "stream_log_path": str(Path(temp_dir) / "{device_id}.log"),
+                        "interaction_log_path": str(Path(temp_dir) / "{device_id}.log"),
                     }
                 }
             }
@@ -232,10 +232,10 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
                     [
                         "[2026-05-05T14:34:44.431+08:00] [TRANSCRIPT] [USER] [source=asr] "
                         "[experiment_session_id=exp-1] [current_step_id=step_prepare_setup_all] "
-                        "[yaml=C:\\demo\\experiments.yaml] 鍏ㄩ儴瀹屾垚銆?,
+                        "[yaml=C:\\demo\\experiments.yaml] 鍏ㄩ儴瀹屾垚銆?",
                         "[2026-05-05T14:34:57.063+08:00] [TRANSCRIPT] [ASSISTANT] [source=speak_txt] "
                         "[experiment_session_id=exp-1] [current_step_id=step_add_sodium_citrate_all] "
-                        "[yaml=C:\\demo\\experiments.yaml] 鐜板湪鍋氳繖涓€姝ャ€?,
+                        "[yaml=C:\\demo\\experiments.yaml] 鐜板湪鍋氳繖涓€姝ャ€?",
                     ]
                 )
                 + "\n",
@@ -247,7 +247,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(2, len(entries))
             self.assertEqual("USER", entries[0]["role"])
             self.assertEqual("step_prepare_setup_all", entries[0]["current_step_id"])
-            self.assertEqual("鍏ㄩ儴瀹屾垚銆?, entries[0]["text"])
+            self.assertEqual("鍏ㄩ儴瀹屾垚銆?", entries[0]["text"])
             self.assertEqual("ASSISTANT", entries[1]["role"])
             self.assertEqual(
                 "step_add_sodium_citrate_all",
@@ -1733,8 +1733,12 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
 
         prewarm_calls = []
 
-        async def fake_prewarm_experiment_session(trigger="", force=False):
-            prewarm_calls.append((trigger, force))
+        async def fake_prewarm_experiment_session(
+            trigger="",
+            force=False,
+            allow_device_resume=True,
+        ):
+            prewarm_calls.append((trigger, force, allow_device_resume))
             conn.experiment_session_id = "exp-new"
             conn.experiment_current_step_id = "step_prepare_setup_all"
             return True
@@ -1759,7 +1763,7 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], conn.dialogue.dialogue)
         self.assertTrue(stale_session.closed)
         self.assertNotIn("codex:chat-old", conn.llm._sessions)
-        self.assertEqual([("explicit_fresh_start", True)], prewarm_calls)
+        self.assertEqual([("explicit_fresh_start", True, False)], prewarm_calls)
         self.assertEqual("exp-new", conn.experiment_session_id)
         self.assertEqual("step_prepare_setup_all", conn.experiment_current_step_id)
         self.assertIsNone(conn.experiment_overview)
@@ -4823,6 +4827,57 @@ class ExperimentControlFastPathTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(1, len(completed))
         self.assertEqual(["下一步：装入比色皿。"], spoken)
+
+    async def test_handle_direct_uvvis_shared_dark_air_cache_does_not_claim_next_step_when_graph_stays_put(self):
+        conn = _FakeConn()
+        conn.experiment_current_step_id = intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID
+        conn._uvvis_direct_state = {
+            "step_id": intentHandler._UVVIS_SHARED_DARK_AIR_STEP_ID,
+            "phase": "await_empty_positions",
+        }
+        spoken = []
+        completed = []
+
+        def fake_cache_ready(_conn):
+            return True, {"shared_dir": "C:/demo/uv_data_common"}
+
+        async def fake_complete(_conn, *, fields, auto_advance, fallback_reply=""):
+            completed.append(
+                {
+                    "fields": dict(fields),
+                    "auto_advance": auto_advance,
+                    "fallback_reply": fallback_reply,
+                }
+            )
+            return False, fallback_reply
+
+        with patch.object(
+            intentHandler,
+            "_uvvis_shared_dark_air_cache_ready",
+            fake_cache_ready,
+        ):
+            with patch.object(
+                intentHandler,
+                "_complete_experiment_step_with_fields",
+                fake_complete,
+            ):
+                with patch.object(
+                    intentHandler,
+                    "speak_txt",
+                    lambda _conn, text: spoken.append(text),
+                ):
+                    handled = await intentHandler.handle_direct_uvvis_intent(
+                        conn,
+                        "继续下一步",
+                        "继续下一步",
+                    )
+
+        self.assertTrue(handled)
+        self.assertEqual(1, len(completed))
+        self.assertTrue(completed[0]["auto_advance"])
+        self.assertIn("共享暗电流和空气能量校正数据", spoken[0])
+        self.assertIn("还没有把实验图推进到下一步", spoken[0])
+        self.assertNotIn("可以继续下一步", spoken[0])
 
     async def test_handle_direct_uvvis_shared_dark_air_infers_step_from_context_when_graph_stale(self):
         conn = _FakeConn()

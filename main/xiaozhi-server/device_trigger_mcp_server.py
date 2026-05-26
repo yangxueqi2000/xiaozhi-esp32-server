@@ -221,7 +221,7 @@ def _experiment_supports_group_storage() -> bool:
 
 
 def _format_group_dir_name(group_number: int) -> str:
-    return f"group_{int(group_number):02d}"
+    return str(int(group_number))
 
 
 def _derive_experiment_photo_root() -> str:
